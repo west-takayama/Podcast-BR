@@ -1,18 +1,39 @@
-// WAV → MP3 変換を UI スレッドから切り離す Web Worker。
-// 受信: { buffer: ArrayBuffer } / 送信: 進捗 { type:"progress", percent } と
-// 完了 { type:"done", mp3: ArrayBuffer, durationSec, gainDb } またはエラー { type:"error", message }
+// WAV → 前処理 → MP3 変換を UI スレッドから切り離す Web Worker。
+//
+// 受信: { buffer: ArrayBuffer, dsp: DspOptions }
+// 送信: { type:"progress", stage, percent }
+//       { type:"done", mp3, durationSec, gainDb, removedSec }
+//       { type:"error", message }
 
 import { Mp3Encoder } from "@breezystack/lamejs";
-import { decodeWav } from "./wav";
-import { normalizeInPlace } from "./normalize";
+import { decodeWav } from "./audio/wav";
+import { normalizeInPlace } from "./audio/normalize";
+import { applyDsp, type DspOptions } from "./audio/dsp";
 
 const BITRATE_KBPS = 128;
 const BLOCK_SIZE = 1152 * 32;
 
-self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
+export type ProgressStage = "decode" | "dsp" | "encode";
+
+interface Request {
+  buffer: ArrayBuffer;
+  dsp: DspOptions;
+}
+
+self.onmessage = (e: MessageEvent<Request>) => {
   try {
-    const { sampleRate, channels, durationSec } = decodeWav(e.data.buffer);
+    const post = (stage: ProgressStage, percent: number) =>
+      self.postMessage({ type: "progress", stage, percent });
+
+    post("decode", 0);
+    const decoded = decodeWav(e.data.buffer);
+    const sampleRate = decoded.sampleRate;
+    post("decode", 100);
+
+    post("dsp", 0);
+    const { channels, removedSec } = applyDsp(decoded.channels, sampleRate, e.data.dsp);
     const gainDb = normalizeInPlace(channels);
+    post("dsp", 100);
 
     const numChannels = channels.length;
     const encoder = new Mp3Encoder(numChannels, sampleRate, BITRATE_KBPS);
@@ -39,7 +60,7 @@ self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
       const percent = Math.round((end / frameCount) * 100);
       if (percent !== lastPercent) {
         lastPercent = percent;
-        self.postMessage({ type: "progress", percent });
+        post("encode", percent);
       }
     }
     const tail = encoder.flush();
@@ -53,7 +74,16 @@ self.onmessage = (e: MessageEvent<{ buffer: ArrayBuffer }>) => {
       pos += p.length;
     }
 
-    self.postMessage({ type: "done", mp3: mp3.buffer, durationSec, gainDb }, [mp3.buffer]);
+    self.postMessage(
+      {
+        type: "done",
+        mp3: mp3.buffer,
+        durationSec: frameCount / sampleRate,
+        gainDb,
+        removedSec,
+      },
+      [mp3.buffer],
+    );
   } catch (err) {
     self.postMessage({
       type: "error",

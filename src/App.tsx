@@ -1,295 +1,269 @@
 import { useEffect, useRef, useState } from "react";
 import { generateEpisodeMeta, type EpisodeMeta } from "./lib/gemini";
+import { loadSettings, saveSettings, type Settings } from "./lib/settings";
+import { saveEpisode, updateEpisode } from "./lib/history";
+import SettingsPanel from "./components/SettingsPanel";
+import ResultView from "./components/ResultView";
+import HistoryPanel from "./components/HistoryPanel";
 
-type Phase = "idle" | "converting" | "generating" | "done";
+type Tab = "create" | "history" | "settings";
+type Phase = "idle" | "processing" | "generating" | "done";
 
-interface Settings {
-  apiKey: string;
-  model: string;
-  showContext: string;
-}
-
-const SETTINGS_KEY = "podcast-br-settings";
-const DEFAULT_MODEL = "gemini-2.5-flash";
-
-function loadSettings(): Settings {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { model: DEFAULT_MODEL, ...JSON.parse(raw) };
-  } catch {
-    /* 破損時はデフォルトに戻す */
-  }
-  return { apiKey: "", model: DEFAULT_MODEL, showContext: "" };
-}
-
-function CopyButton({ text, label = "コピー" }: { text: string; label?: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      className={`copy-btn${copied ? " copied" : ""}`}
-      onClick={async () => {
-        await navigator.clipboard.writeText(text);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? "✓ コピー済み" : label}
-    </button>
-  );
-}
+const STAGE_LABELS: Record<string, string> = {
+  decode: "WAVを読み込み中",
+  dsp: "音声を整音中",
+  encode: "MP3に変換中",
+};
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
-  const [showSettings, setShowSettings] = useState(!loadSettings().apiKey);
+  const [tab, setTab] = useState<Tab>(() => (loadSettings().apiKey ? "create" : "settings"));
   const [phase, setPhase] = useState<Phase>("idle");
-  const [convertPercent, setConvertPercent] = useState(0);
+  const [stage, setStage] = useState("decode");
+  const [percent, setPercent] = useState(0);
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState("");
   const [meta, setMeta] = useState<EpisodeMeta | null>(null);
+  const [episodeId, setEpisodeId] = useState("");
+  const [chosenTitle, setChosenTitle] = useState("");
   const [mp3Url, setMp3Url] = useState("");
   const [fileInfo, setFileInfo] = useState("");
+  const [outputName, setOutputName] = useState("episode.mp3");
+
   const workerRef = useRef<Worker | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const mp3UrlRef = useRef("");
 
   useEffect(() => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    mp3UrlRef.current = mp3Url;
+  }, [mp3Url]);
 
   useEffect(() => {
     return () => {
       workerRef.current?.terminate();
-      if (mp3Url) URL.revokeObjectURL(mp3Url);
+      abortRef.current?.abort();
+      if (mp3UrlRef.current) URL.revokeObjectURL(mp3UrlRef.current);
     };
-  }, [mp3Url]);
+  }, []);
+
+  // 処理中の離脱で結果を失わないよう警告する
+  useEffect(() => {
+    if (phase !== "processing" && phase !== "generating") return;
+    const handler = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [phase]);
 
   const reset = () => {
     setPhase("idle");
     setError("");
     setMeta(null);
-    setConvertPercent(0);
+    setPercent(0);
+    setEpisodeId("");
+    setChosenTitle("");
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
   };
 
+  const cancel = () => {
+    workerRef.current?.terminate();
+    workerRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    reset();
+  };
+
   const handleFile = async (file: File) => {
     if (!settings.apiKey) {
-      setShowSettings(true);
+      setTab("settings");
       setError("先に設定画面で Gemini API キーを入力してください(無料で発行できます)");
       return;
     }
     reset();
-    setPhase("converting");
+    setPhase("processing");
+    setStage("decode");
     setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+    setOutputName(file.name.replace(/\.wav$/i, "") + ".mp3");
 
     try {
       const buffer = await file.arrayBuffer();
-      const mp3Buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const result = await new Promise<{
+        mp3: ArrayBuffer;
+        durationSec: number;
+        removedSec: number;
+      }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
         });
         workerRef.current = worker;
         worker.onmessage = (e) => {
           const msg = e.data;
-          if (msg.type === "progress") setConvertPercent(msg.percent);
-          else if (msg.type === "done") resolve(msg.mp3);
-          else if (msg.type === "error") reject(new Error(msg.message));
+          if (msg.type === "progress") {
+            setStage(msg.stage);
+            setPercent(msg.percent);
+          } else if (msg.type === "done") {
+            resolve({ mp3: msg.mp3, durationSec: msg.durationSec, removedSec: msg.removedSec });
+          } else if (msg.type === "error") {
+            reject(new Error(msg.message));
+          }
         };
         worker.onerror = () => reject(new Error("変換処理でエラーが発生しました"));
-        worker.postMessage({ buffer }, [buffer]);
+        worker.postMessage({ buffer, dsp: settings.dsp }, [buffer]);
       });
       workerRef.current?.terminate();
       workerRef.current = null;
 
-      setMp3Url(URL.createObjectURL(new Blob([mp3Buffer], { type: "audio/mpeg" })));
+      const blob = new Blob([result.mp3], { type: "audio/mpeg" });
+      setMp3Url(URL.createObjectURL(blob));
 
       setPhase("generating");
-      const result = await generateEpisodeMeta({
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const generated = await generateEpisodeMeta({
         apiKey: settings.apiKey,
         model: settings.model,
-        mp3: mp3Buffer,
-        showContext: settings.showContext,
+        mp3: result.mp3,
+        config: settings.prompt,
         onStatus: setStatusText,
+        signal: controller.signal,
       });
-      setMeta(result);
+      abortRef.current = null;
+
+      setMeta(generated);
+      setChosenTitle(generated.titles[0] ?? "");
       setPhase("done");
+
+      const id = crypto.randomUUID();
+      setEpisodeId(id);
+      // 履歴保存の失敗(容量不足など)で結果表示まで巻き添えにしない
+      saveEpisode({
+        id,
+        createdAt: Date.now(),
+        fileName: file.name,
+        durationSec: result.durationSec,
+        removedSec: result.removedSec,
+        meta: generated,
+        chosenTitle: generated.titles[0] ?? "",
+        audio: blob,
+      }).catch(() => setError("結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)"));
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setPhase("idle");
     }
   };
 
+  const busy = phase === "processing" || phase === "generating";
+
   return (
     <>
-      <h1>
-        🎙️ Podcast BR
-        <button style={{ marginLeft: "auto" }} onClick={() => setShowSettings((v) => !v)}>
-          ⚙️ 設定
-        </button>
-      </h1>
-
-      {showSettings && (
-        <div className="card">
-          <h2>設定</h2>
-          <label>
-            Gemini API キー(必須)
-            <input
-              type="password"
-              value={settings.apiKey}
-              placeholder="AIza..."
-              onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value.trim() }))}
-            />
-          </label>
-          <p className="muted">
-            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
-              Google AI Studio
-            </a>
-            で無料発行できます(クレジットカード不要)。キーはこの端末にのみ保存されます。
-          </p>
-          <label>
-            番組の背景情報(任意・生成品質が上がります)
-            <textarea
-              value={settings.showContext}
-              placeholder="例: 番組名「◯◯ラジオ」。30代の2人が雑談形式でテックニュースを語る番組。リスナーはエンジニアが中心。"
-              onChange={(e) => setSettings((s) => ({ ...s, showContext: e.target.value }))}
-            />
-          </label>
-          <label>
-            モデル
-            <select
-              value={settings.model}
-              onChange={(e) => setSettings((s) => ({ ...s, model: e.target.value }))}
-            >
-              <option value="gemini-2.5-flash">gemini-2.5-flash(推奨)</option>
-              <option value="gemini-2.5-pro">gemini-2.5-pro(高品質・枠少なめ)</option>
-              <option value="gemini-2.0-flash">gemini-2.0-flash(軽量)</option>
-            </select>
-          </label>
-          <button className="primary" onClick={() => setShowSettings(false)}>
-            保存して閉じる
+      <header>
+        <h1>🎙️ Podcast BR</h1>
+        <nav className="tabs">
+          <button className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
+            作成
           </button>
-        </div>
-      )}
+          <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
+            履歴
+          </button>
+          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
+            設定
+          </button>
+        </nav>
+      </header>
 
       {error && (
         <div className="error">
           ⚠️ {error}
-          {mp3Url && (
-            <a className="dl" href={mp3Url} download="episode.mp3">
+          {mp3Url && phase !== "done" && (
+            <a className="dl" href={mp3Url} download={outputName}>
               ⬇️ 変換済み MP3 をダウンロード
             </a>
           )}
         </div>
       )}
 
-      {phase === "idle" && (
-        <label className="drop card">
-          <input
-            type="file"
-            accept=".wav,audio/wav,audio/x-wav"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) handleFile(f);
-              e.target.value = "";
-            }}
-          />
-          <p style={{ fontSize: "2rem", margin: "0 0 8px" }}>📤</p>
-          <p style={{ margin: 0, fontWeight: 600 }}>収録した .WAV をここから選択</p>
-          <p className="muted">変換 → タイトル・説明文の生成まで自動で進みます</p>
-        </label>
+      {tab === "settings" && (
+        <SettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setTab("create")}
+        />
       )}
 
-      {(phase === "converting" || phase === "generating") && (
-        <div className="card">
-          <h2>処理中: {fileInfo}</h2>
-          <ul className="steps">
-            <li className={phase === "converting" ? "active" : "done"}>
-              {phase === "converting" ? "▶" : "✓"} MP3へ変換・音量調整
-              {phase === "converting" && ` (${convertPercent}%)`}
-            </li>
-            <li className={phase === "generating" ? "active" : ""}>
-              {phase === "generating" ? `▶ ${statusText}` : "タイトル・説明文を生成"}
-            </li>
-          </ul>
-          {phase === "converting" && (
-            <div className="progress-track">
-              <div className="progress-fill" style={{ width: `${convertPercent}%` }} />
+      {tab === "history" && (
+        <HistoryPanel
+          onChooseTitle={(id, title) => {
+            updateEpisode(id, { chosenTitle: title });
+          }}
+        />
+      )}
+
+      {tab === "create" && (
+        <>
+          {phase === "idle" && (
+            <label className="drop card">
+              <input
+                type="file"
+                accept=".wav,audio/wav,audio/x-wav"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) handleFile(f);
+                  e.target.value = "";
+                }}
+              />
+              <p style={{ fontSize: "2rem", margin: "0 0 8px" }}>📤</p>
+              <p style={{ margin: 0, fontWeight: 600 }}>収録した .WAV をここから選択</p>
+              <p className="muted">整音 → 変換 → タイトル・説明文の生成まで自動で進みます</p>
+            </label>
+          )}
+
+          {busy && (
+            <div className="card">
+              <h2>処理中: {fileInfo}</h2>
+              <ul className="steps">
+                <li className={phase === "processing" ? "active" : "done"}>
+                  {phase === "processing"
+                    ? `▶ ${STAGE_LABELS[stage] ?? "処理中"} (${percent}%)`
+                    : "✓ 整音・MP3変換"}
+                </li>
+                <li className={phase === "generating" ? "active" : ""}>
+                  {phase === "generating" ? `▶ ${statusText}` : "タイトル・説明文を生成"}
+                </li>
+              </ul>
+              {phase === "processing" && (
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${percent}%` }} />
+                </div>
+              )}
+              <p className="muted" style={{ marginTop: 12 }}>
+                画面を閉じずにお待ちください。長いエピソードほど時間がかかります。
+              </p>
+              <button onClick={cancel}>キャンセル</button>
             </div>
           )}
-          <p className="muted" style={{ marginTop: 12 }}>
-            画面を閉じずにお待ちください。長いエピソードほど時間がかかります。
-          </p>
-        </div>
-      )}
 
-      {phase === "done" && meta && (
-        <>
-          <div className="card">
-            <h2>✅ 投稿素材が完成しました</h2>
-            <p className="muted">
-              Spotify for Creators アプリを開き、下のMP3をアップロード →
-              各項目をコピーして貼り付けてください。
-            </p>
-            {mp3Url && (
-              <a className="dl" href={mp3Url} download="episode.mp3">
-                ⬇️ 変換済み MP3 をダウンロード
-              </a>
-            )}
-          </div>
-
-          <div className="card">
-            <div className="result-block">
-              <div className="result-head">
-                <h2>タイトル案</h2>
-              </div>
-              {meta.titles.map((t) => (
-                <div key={t} className="title-option">
-                  <span>{t}</span>
-                  <CopyButton text={t} />
-                </div>
-              ))}
-            </div>
-
-            <div className="result-block">
-              <div className="result-head">
-                <h2>説明文</h2>
-                <CopyButton text={meta.description} />
-              </div>
-              <div className="result-body">{meta.description}</div>
-            </div>
-
-            <div className="result-block">
-              <div className="result-head">
-                <h2>ショーノート</h2>
-                <CopyButton text={meta.showNotes} />
-              </div>
-              <div className="result-body">{meta.showNotes}</div>
-            </div>
-
-            {meta.chapters.length > 0 && (
-              <div className="result-block">
-                <div className="result-head">
-                  <h2>チャプター</h2>
-                  <CopyButton
-                    text={meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n")}
-                  />
-                </div>
-                <div className="result-body">
-                  {meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n")}
-                </div>
-              </div>
-            )}
-
-            <div className="result-block">
-              <div className="result-head">
-                <h2>ハッシュタグ</h2>
-                <CopyButton text={meta.hashtags.join(" ")} />
-              </div>
-              <div className="result-body">{meta.hashtags.join(" ")}</div>
-            </div>
-          </div>
-
-          <button className="primary" onClick={reset}>
-            次のエピソードを処理する
-          </button>
+          {phase === "done" && meta && (
+            <>
+              <ResultView
+                meta={meta}
+                chosenTitle={chosenTitle}
+                onChooseTitle={(title) => {
+                  setChosenTitle(title);
+                  if (episodeId) updateEpisode(episodeId, { chosenTitle: title });
+                }}
+                audioUrl={mp3Url}
+                fileName={outputName}
+              />
+              <button className="primary" onClick={reset}>
+                次のエピソードを処理する
+              </button>
+            </>
+          )}
         </>
       )}
     </>
