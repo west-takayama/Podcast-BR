@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { PRESETS, canvasToBlob, renderCard, type CardContent, type Preset } from "../lib/image";
+import { generateIllustration } from "../lib/gemini";
 
 interface Props {
   quote: string;
   title: string;
   showName: string;
   accent: string;
+  /** イラスト生成に使う。未設定ならボタンを出さない。 */
+  apiKey?: string;
+  imageModel?: string | null;
+  /** 絵柄の題材にする内容(要約やキーワード)。 */
+  subject?: string;
 }
 
 interface Rendered {
@@ -13,15 +19,25 @@ interface Rendered {
   blob: Blob;
 }
 
-export default function ImageCards({ quote, title, showName, accent }: Props) {
+export default function ImageCards({
+  quote,
+  title,
+  showName,
+  accent,
+  apiKey,
+  imageModel,
+  subject,
+}: Props) {
   const [selected, setSelected] = useState<Preset>("square");
   const [rendered, setRendered] = useState<Partial<Record<Preset, Rendered>>>({});
   const [error, setError] = useState("");
   const [shared, setShared] = useState(false);
+  const [background, setBackground] = useState<ImageBitmap | null>(null);
+  const [generating, setGenerating] = useState(false);
 
   const content: CardContent = useMemo(
-    () => ({ quote, title, showName, accent }),
-    [quote, title, showName, accent],
+    () => ({ quote, title, showName, accent, background: background ?? undefined }),
+    [quote, title, showName, accent, background],
   );
 
   useEffect(() => {
@@ -47,6 +63,33 @@ export default function ImageCards({ quote, title, showName, accent }: Props) {
       urls.forEach(URL.revokeObjectURL);
     };
   }, [content]);
+
+  useEffect(() => {
+    return () => background?.close();
+  }, [background]);
+
+  const makeIllustration = async () => {
+    if (!apiKey || !imageModel) return;
+    setGenerating(true);
+    setError("");
+    try {
+      const blob = await generateIllustration({
+        apiKey,
+        model: imageModel,
+        subject: subject || quote || title,
+        accent,
+      });
+      const bitmap = await createImageBitmap(blob);
+      setBackground((prev) => {
+        prev?.close();
+        return bitmap;
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const current = rendered[selected];
   const spec = PRESETS.find((p) => p.id === selected)!;
@@ -108,6 +151,32 @@ export default function ImageCards({ quote, title, showName, accent }: Props) {
         </>
       ) : (
         <p className="muted">生成中…</p>
+      )}
+
+      {apiKey && imageModel && (
+        <div className="illust">
+          <div className="row-buttons">
+            <button onClick={makeIllustration} disabled={generating}>
+              {generating ? "生成中…" : background ? "🎨 別の絵にする" : "🎨 AIイラストを背景に"}
+            </button>
+            {background && (
+              <button
+                onClick={() =>
+                  setBackground((prev) => {
+                    prev?.close();
+                    return null;
+                  })
+                }
+              >
+                元に戻す
+              </button>
+            )}
+          </div>
+          <p className="muted">
+            エピソードの内容に合わせた背景を生成します(無料枠内・1日あたりの上限あり)。文字は
+            AI に描かせず、こちらで重ねるため崩れません。
+          </p>
+        </div>
       )}
     </div>
   );

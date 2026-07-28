@@ -9,6 +9,8 @@ const API_BASE = "https://generativelanguage.googleapis.com";
 export interface ModelInfo {
   id: string; // "gemini-3.5-flash"
   displayName: string;
+  /** 画像を生成できるモデルか。テキスト用と選択肢を分けるために持つ。 */
+  image: boolean;
 }
 
 /**
@@ -31,13 +33,13 @@ export async function listModels(apiKey: string, signal?: AbortSignal): Promise<
   const models: ModelInfo[] = (data.models ?? [])
     .filter((m: { supportedGenerationMethods?: string[]; name?: string }) => {
       if (!m.name || !m.supportedGenerationMethods?.includes("generateContent")) return false;
-      // 音声を扱えない用途別モデルを除く
-      return !/embedding|aqa|imagen|veo|-tts|image-generation/.test(m.name);
+      // 用途が合わないモデルを除く。imagen は generateContent ではなく predict を使う
+      return !/embedding|aqa|imagen|veo|-tts/.test(m.name);
     })
-    .map((m: { name: string; displayName?: string }) => ({
-      id: m.name.replace(/^models\//, ""),
-      displayName: m.displayName ?? m.name.replace(/^models\//, ""),
-    }));
+    .map((m: { name: string; displayName?: string }) => {
+      const id = m.name.replace(/^models\//, "");
+      return { id, displayName: m.displayName ?? id, image: /image/.test(id) };
+    });
 
   return models.sort((a, b) => score(b.id) - score(a.id));
 }
@@ -53,9 +55,91 @@ function score(id: string): number {
   return s;
 }
 
-/** 一覧から既定として使うモデルを選ぶ。 */
+/** 一覧から既定のテキスト生成モデルを選ぶ。 */
 export function pickDefaultModel(models: ModelInfo[]): string | null {
-  return models[0]?.id ?? null;
+  return models.find((m) => !m.image)?.id ?? null;
+}
+
+/**
+ * イラスト生成に使うモデルを選ぶ。
+ * flash 系の画像モデルには無料枠があるため、pro 系より優先する。
+ */
+export function pickImageModel(models: ModelInfo[]): string | null {
+  const images = models.filter((m) => m.image);
+  return images.find((m) => m.id.includes("flash"))?.id ?? images[0]?.id ?? null;
+}
+
+export interface IllustrationOptions {
+  apiKey: string;
+  model: string;
+  /** エピソードの内容(要約やキーワード)。絵柄の題材にする。 */
+  subject: string;
+  /** 番組のメインカラー。回ごとに絵柄が変わっても色で統一感が保てる。 */
+  accent: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * 告知画像の背景に敷くイラストを生成する。
+ *
+ * 文字は必ず除外させる。画像生成モデルの日本語文字は崩れることが多く、
+ * こちらで重ねる文字とも競合するため。
+ */
+export async function generateIllustration(opts: IllustrationOptions): Promise<Blob> {
+  const { apiKey, model, subject, accent, signal } = opts;
+
+  const prompt = `日本語ポッドキャストの告知画像に使う背景イラストを1枚生成してください。
+
+題材: ${subject}
+
+条件:
+- 文字・ロゴ・記号を一切含めない(重要)。後から文字を重ねるため。
+- ${accent} と黒を基調とした配色。
+- ミニマルで洗練された抽象的・編集的なイラスト。写実的な人物は避ける。
+- 中央付近は落ち着いた面にし、余白を残す。文字を重ねても読めるようにするため。
+- 正方形の構図。`;
+
+  const res = await fetch(`${API_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: "POST",
+    signal,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 429) {
+      throw new Error("画像生成の無料枠(1日あたりの上限)に達しました。明日また試せます。");
+    }
+    if (res.status === 404) {
+      throw new Error(
+        `画像モデル ${model} が利用できませんでした。設定画面でモデルを選び直してください。`,
+      );
+    }
+    if (res.status === 400 && /billing|quota|not supported/i.test(body)) {
+      throw new Error("このAPIキーでは画像生成が利用できません(無料枠の対象外の可能性があります)。");
+    }
+    throw new Error(`イラストの生成に失敗しました (${res.status}): ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  const parts: Record<string, unknown>[] = data.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    // REST は camelCase で返るが、実装差を考えて snake_case も見る
+    const inline = (part.inlineData ?? part.inline_data) as
+      | { data?: string; mimeType?: string; mime_type?: string }
+      | undefined;
+    if (!inline?.data) continue;
+    const mime = inline.mimeType ?? inline.mime_type ?? "image/png";
+    const binary = atob(inline.data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+  throw new Error("画像が返りませんでした。もう一度お試しください。");
 }
 
 export interface SocialPosts {

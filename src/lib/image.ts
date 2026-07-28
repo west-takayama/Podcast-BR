@@ -25,6 +25,8 @@ export interface CardContent {
   title: string;
   showName: string;
   accent: string; // #RRGGBB
+  /** 背景に敷く AI イラスト。無ければ単色の背景になる。 */
+  background?: CanvasImageSource & { width: number; height: number };
 }
 
 const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif`;
@@ -134,14 +136,32 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
   const pad = W * 0.085;
   const inner = W - pad * 2;
 
-  // 背景。アクセント色をごく薄く敷いて単調さを避ける
-  ctx.fillStyle = "#101010";
+  ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, W, H);
-  const glow = ctx.createRadialGradient(W * 0.75, H * 0.12, 0, W * 0.75, H * 0.12, W * 0.9);
-  glow.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.28)`);
-  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, W, H);
+
+  if (content.background) {
+    // 縦横比が違うプリセットでも歪ませないよう、短辺に合わせて切り出す
+    const bg = content.background;
+    const scale = Math.max(W / bg.width, H / bg.height);
+    const dw = bg.width * scale;
+    const dh = bg.height * scale;
+    ctx.drawImage(bg, (W - dw) / 2, (H - dh) / 2, dw, dh);
+
+    // 文字を確実に読ませるための暗幕。下ほど濃くして下部の情報を守る
+    const scrim = ctx.createLinearGradient(0, 0, 0, H);
+    scrim.addColorStop(0, "rgba(8, 8, 8, 0.55)");
+    scrim.addColorStop(0.45, "rgba(8, 8, 8, 0.72)");
+    scrim.addColorStop(1, "rgba(8, 8, 8, 0.92)");
+    ctx.fillStyle = scrim;
+    ctx.fillRect(0, 0, W, H);
+  } else {
+    // イラストが無いときはアクセント色をごく薄く敷いて単調さを避ける
+    const glow = ctx.createRadialGradient(W * 0.75, H * 0.12, 0, W * 0.75, H * 0.12, W * 0.9);
+    glow.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.28)`);
+    glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   // 縦長ほど余白が増えるので、中身の基準位置を高さに合わせて調整する
   const isTall = H / W > 1.3;

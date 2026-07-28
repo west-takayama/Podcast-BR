@@ -4,8 +4,9 @@
   --card: #1e1e1e;
   --text: #f0f0f0;
   --muted: #9a9a9a;
-  --accent: #1db954;
-  --accent-dark: #169c46;
+  --accent: #ffd400;
+  --accent-dark: #d1ae00;
+  --on-accent: #141000;
   --danger: #e5484d;
   font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
 }
@@ -45,7 +46,7 @@ h3 {
   border-radius: 10px;
   font-size: 0.9rem;
 }
-.tabs button.active { background: var(--accent); color: #04240f; font-weight: 700; }
+.tabs button.active { background: var(--accent); color: var(--on-accent); font-weight: 700; }
 
 .card {
   background: var(--card);
@@ -68,7 +69,7 @@ button {
 
 button.primary {
   background: var(--accent);
-  color: #04240f;
+  color: var(--on-accent);
   font-weight: 700;
   width: 100%;
   font-size: 1.05rem;
@@ -84,7 +85,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   border: 1px solid #444;
   flex-shrink: 0;
 }
-.copy-btn.copied { background: var(--accent); color: #04240f; border-color: var(--accent); }
+.copy-btn.copied { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 
 .drop {
   border: 2px dashed #444;
@@ -195,7 +196,7 @@ label.check input[type="checkbox"] {
   font-size: 0.95rem;
   cursor: pointer;
 }
-.title-option.chosen { border-color: var(--accent); background: #1f3527; }
+.title-option.chosen { border-color: var(--accent); background: #2a2410; }
 
 .steps { list-style: none; padding: 0; margin: 0 0 4px; }
 .steps li { padding: 4px 0; color: var(--muted); }
@@ -255,7 +256,7 @@ button.danger { background: #3a1518; border: 1px solid var(--danger); color: #ff
   background: #2a2a2a;
   color: var(--muted);
 }
-.preset-tabs button.active { background: var(--accent); color: #04240f; font-weight: 700; }
+.preset-tabs button.active { background: var(--accent); color: var(--on-accent); font-weight: 700; }
 
 .card-preview {
   display: block;
@@ -276,3 +277,5 @@ input[type="color"] {
   border-radius: 8px;
   margin-top: 4px;
 }
+
+.illust { margin-top: 14px; padding-top: 12px; border-top: 1px solid #333; }

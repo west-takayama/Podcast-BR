@@ -16,6 +16,8 @@ export interface Settings {
   bitrate: number;
   /** 告知画像のアクセント色。番組の見た目を揃えるために保存する。 */
   accentColor: string;
+  /** イラスト生成に使うモデル。一覧から自動で選ぶ。 */
+  imageModel: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -25,7 +27,8 @@ export const DEFAULT_SETTINGS: Settings = {
   dsp: { highPass: true, noiseReduction: true, trimSilence: false },
   mono: true,
   bitrate: 96,
-  accentColor: "#1db954",
+  accentColor: "#ffd400",
+  imageModel: "",
 };
 
 export function loadSettings(): Settings {
