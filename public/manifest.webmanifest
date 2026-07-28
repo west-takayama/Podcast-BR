@@ -1,0 +1,13 @@
+{
+  "name": "Podcast BR",
+  "short_name": "PodcastBR",
+  "description": "WAVをアップロードするだけでタイトル・説明文を自動生成するポッドキャスト運営ツール",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#121212",
+  "theme_color": "#1db954",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
