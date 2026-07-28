@@ -1,14 +1,27 @@
-// WAV (RIFF) パーサ。収録アプリが出力する PCM WAV を対象とする。
+// WAV (RIFF) の解析とブロック単位デコード。
+//
+// 全体を一度に Float32 へ展開すると 60分ステレオで 1GB を超え、スマホでは
+// メモリ不足で落ちる。そのためヘッダ解析とブロックデコードを分離し、
+// 呼び出し側がファイルを少しずつ読み進められるようにしている。
+//
 // 対応: 16bit / 24bit / 32bit 整数 PCM、32bit float PCM
 
-export interface DecodedWav {
+export interface WavInfo {
+  format: number; // 1 = 整数PCM, 3 = float
+  numChannels: number;
   sampleRate: number;
-  channels: Float32Array[]; // -1.0〜1.0 のチャンネル別サンプル
+  bitsPerSample: number;
+  bytesPerFrame: number;
+  dataOffset: number; // ファイル先頭からの data チャンク本体の位置
+  frameCount: number;
   durationSec: number;
 }
 
-export function decodeWav(buffer: ArrayBuffer): DecodedWav {
-  const view = new DataView(buffer);
+/** ヘッダ解析に必要なだけの先頭バイト数。通常は 100 バイト未満で足りる。 */
+export const HEADER_PROBE_BYTES = 64 * 1024;
+
+export function parseWavHeader(head: ArrayBuffer): WavInfo {
+  const view = new DataView(head);
   const readTag = (offset: number) =>
     String.fromCharCode(
       view.getUint8(offset),
@@ -17,7 +30,7 @@ export function decodeWav(buffer: ArrayBuffer): DecodedWav {
       view.getUint8(offset + 3),
     );
 
-  if (readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
+  if (view.byteLength < 44 || readTag(0) !== "RIFF" || readTag(8) !== "WAVE") {
     throw new Error("WAVファイルではありません(RIFFヘッダが見つかりません)");
   }
 
@@ -44,7 +57,8 @@ export function decodeWav(buffer: ArrayBuffer): DecodedWav {
       }
     } else if (chunkId === "data") {
       dataOffset = body;
-      dataLength = Math.min(chunkSize, view.byteLength - body);
+      dataLength = chunkSize;
+      break; // data 以降は本体なのでヘッダ走査を終える
     }
     offset = body + chunkSize + (chunkSize % 2);
   }
@@ -53,41 +67,113 @@ export function decodeWav(buffer: ArrayBuffer): DecodedWav {
   if (numChannels < 1 || numChannels > 2) {
     throw new Error(`${numChannels}チャンネルのWAVは未対応です(モノラル/ステレオのみ)`);
   }
-
-  const bytesPerSample = bitsPerSample / 8;
-  const frameCount = Math.floor(dataLength / (bytesPerSample * numChannels));
-  const channels: Float32Array[] = Array.from(
-    { length: numChannels },
-    () => new Float32Array(frameCount),
-  );
-
-  const isFloat = format === 3;
-  const isPcm = format === 1;
-  if (!isFloat && !isPcm) throw new Error(`未対応のWAVフォーマットです (format=${format})`);
-
-  for (let i = 0; i < frameCount; i++) {
-    for (let ch = 0; ch < numChannels; ch++) {
-      const p = dataOffset + (i * numChannels + ch) * bytesPerSample;
-      let v: number;
-      if (isFloat && bitsPerSample === 32) {
-        v = view.getFloat32(p, true);
-      } else if (bitsPerSample === 16) {
-        v = view.getInt16(p, true) / 32768;
-      } else if (bitsPerSample === 24) {
-        const b0 = view.getUint8(p);
-        const b1 = view.getUint8(p + 1);
-        const b2 = view.getUint8(p + 2);
-        let s = (b2 << 16) | (b1 << 8) | b0;
-        if (s & 0x800000) s |= ~0xffffff;
-        v = s / 8388608;
-      } else if (bitsPerSample === 32) {
-        v = view.getInt32(p, true) / 2147483648;
-      } else {
-        throw new Error(`未対応のビット深度です (${bitsPerSample}bit)`);
-      }
-      channels[ch][i] = v;
-    }
+  if (format !== 1 && format !== 3) {
+    throw new Error(`未対応のWAVフォーマットです (format=${format})`);
+  }
+  if (![16, 24, 32].includes(bitsPerSample)) {
+    throw new Error(`未対応のビット深度です (${bitsPerSample}bit)`);
   }
 
-  return { sampleRate, channels, durationSec: frameCount / sampleRate };
+  const bytesPerFrame = (bitsPerSample / 8) * numChannels;
+  const frameCount = Math.floor(dataLength / bytesPerFrame);
+  return {
+    format,
+    numChannels,
+    sampleRate,
+    bitsPerSample,
+    bytesPerFrame,
+    dataOffset,
+    frameCount,
+    durationSec: frameCount / sampleRate,
+  };
+}
+
+/**
+ * 生バイト列を Float32 のチャンネル配列へ展開する。
+ *
+ * 16bit / 32bit は TypedArray ビューで一括参照する。DataView で1サンプルずつ
+ * 読むより大幅に速い(WAV も対象プラットフォームもリトルエンディアンのため、
+ * ビューのバイト順をそのまま使える)。アライメントが合わない場合のみ
+ * DataView にフォールバックする。
+ */
+export function decodeBlock(
+  raw: ArrayBuffer,
+  info: WavInfo,
+  frameCount: number,
+  out: Float32Array[],
+): void {
+  const { numChannels, bitsPerSample, format } = info;
+  const isFloat = format === 3;
+  const sampleCount = frameCount * numChannels;
+
+  if (bitsPerSample === 16 && raw.byteLength >= sampleCount * 2 && raw.byteLength % 2 === 0) {
+    const src = new Int16Array(raw, 0, sampleCount);
+    if (numChannels === 1) {
+      const ch = out[0];
+      for (let i = 0; i < frameCount; i++) ch[i] = src[i] / 32768;
+    } else {
+      const l = out[0];
+      const r = out[1];
+      for (let i = 0, p = 0; i < frameCount; i++, p += 2) {
+        l[i] = src[p] / 32768;
+        r[i] = src[p + 1] / 32768;
+      }
+    }
+    return;
+  }
+
+  if (bitsPerSample === 32 && raw.byteLength >= sampleCount * 4 && raw.byteLength % 4 === 0) {
+    const src = isFloat
+      ? new Float32Array(raw, 0, sampleCount)
+      : new Int32Array(raw, 0, sampleCount);
+    const scale = isFloat ? 1 : 1 / 2147483648;
+    for (let i = 0, p = 0; i < frameCount; i++) {
+      for (let c = 0; c < numChannels; c++, p++) out[c][i] = src[p] * scale;
+    }
+    return;
+  }
+
+  // 24bit と、アライメントが合わない場合のフォールバック
+  const bytes = new Uint8Array(raw);
+  const bytesPerSample = bitsPerSample / 8;
+  const view = new DataView(raw);
+  for (let i = 0; i < frameCount; i++) {
+    for (let c = 0; c < numChannels; c++) {
+      const p = (i * numChannels + c) * bytesPerSample;
+      let v: number;
+      if (bitsPerSample === 24) {
+        let s = (bytes[p + 2] << 16) | (bytes[p + 1] << 8) | bytes[p];
+        if (s & 0x800000) s |= ~0xffffff;
+        v = s / 8388608;
+      } else if (bitsPerSample === 16) {
+        v = view.getInt16(p, true) / 32768;
+      } else if (isFloat) {
+        v = view.getFloat32(p, true);
+      } else {
+        v = view.getInt32(p, true) / 2147483648;
+      }
+      out[c][i] = v;
+    }
+  }
+}
+
+export interface DecodedWav {
+  sampleRate: number;
+  channels: Float32Array[];
+  durationSec: number;
+}
+
+/** 全体を一括デコードする。短い素材の検証用途にのみ使う。 */
+export function decodeWav(buffer: ArrayBuffer): DecodedWav {
+  const info = parseWavHeader(buffer);
+  const channels = Array.from(
+    { length: info.numChannels },
+    () => new Float32Array(info.frameCount),
+  );
+  const raw = buffer.slice(
+    info.dataOffset,
+    info.dataOffset + info.frameCount * info.bytesPerFrame,
+  );
+  decodeBlock(raw, info, info.frameCount, channels);
+  return { sampleRate: info.sampleRate, channels, durationSec: info.durationSec };
 }

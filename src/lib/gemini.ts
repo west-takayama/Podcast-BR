@@ -29,7 +29,47 @@ export interface GenerateOptions {
   mp3: ArrayBuffer;
   config: PromptConfig;
   onStatus: (status: string) => void;
+  /** アップロードの進捗 (0〜1)。回線が遅いほど支配的になるので実測値を返す。 */
+  onUploadProgress?: (fraction: number) => void;
   signal?: AbortSignal;
+}
+
+/**
+ * fetch はアップロードの進捗を取れないため、送信は XHR を使う。
+ * モバイル回線では送信が体感時間の大半を占めるので、ここだけは実測が要る。
+ */
+function xhrUpload(
+  url: string,
+  body: ArrayBuffer,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Content-Type", "audio/mpeg");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+    xhr.onerror = () =>
+      reject(
+        new Error(
+          "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
+        ),
+      );
+    xhr.ontimeout = () => reject(new Error("アップロードがタイムアウトしました"));
+    if (signal) {
+      if (signal.aborted) {
+        xhr.abort();
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+    }
+    xhr.send(body);
+  });
 }
 
 interface UploadedFile {
@@ -49,30 +89,27 @@ interface UploadedFile {
 async function uploadFile(
   apiKey: string,
   mp3: ArrayBuffer,
+  onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
 ): Promise<UploadedFile> {
-  const res = await fetch(
+  const { status, text } = await xhrUpload(
     `${API_BASE}/upload/v1beta/files?key=${apiKey}&uploadType=media`,
-    {
-      method: "POST",
-      signal,
-      headers: { "Content-Type": "audio/mpeg" },
-      body: mp3,
-    },
+    mp3,
+    onProgress,
+    signal,
   );
-  if (!res.ok) {
-    const body = await res.text();
-    if (res.status === 400 && body.includes("API_KEY_INVALID")) {
+  if (status < 200 || status >= 300) {
+    if (status === 400 && text.includes("API_KEY_INVALID")) {
       throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
     }
-    if (res.status === 413) {
+    if (status === 413) {
       throw new Error(
         "音声ファイルが大きすぎてアップロードできませんでした。設定で無音カットを有効にするか、エピソードを分割してください。",
       );
     }
-    throw new Error(`音声のアップロードに失敗しました (${res.status}): ${body.slice(0, 200)}`);
+    throw new Error(`音声のアップロードに失敗しました (${status}): ${text.slice(0, 200)}`);
   }
-  const info = await res.json();
+  const info = JSON.parse(text);
   const file = info.file as UploadedFile | undefined;
   if (!file?.name || !file?.uri) {
     throw new Error("アップロード結果を読み取れませんでした");
@@ -151,10 +188,10 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
 }
 
 async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeMeta> {
-  const { apiKey, model, mp3, config, onStatus, signal } = opts;
+  const { apiKey, model, mp3, config, onStatus, onUploadProgress, signal } = opts;
 
   onStatus("音声をアップロード中…");
-  const file = await uploadFile(apiKey, mp3, signal);
+  const file = await uploadFile(apiKey, mp3, onUploadProgress, signal);
 
   let fileUri = file.uri;
   if (file.state !== "ACTIVE") {

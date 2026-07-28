@@ -1,8 +1,11 @@
 // ポッドキャスト向けの音声前処理。すべて端末内(Web Worker)で実行する。
 //
-// 処理順は「ハイパス → ノイズ低減 → 無音カット → 正規化」。
-// 正規化を最後に置くのは、無音やノイズを除いた後の実際の音声区間を基準に
-// 音量を決めたいため(先に正規化すると無音の分だけ音量が過小評価される)。
+// 処理順は「ハイパス → ノイズ低減 → ゲイン → 無音カット」。
+//
+// 長尺エピソードでも破綻しないよう、各処理はブロック単位で呼べる形にして
+// 状態をインスタンスに持たせている(60分ステレオを一括展開すると 1GB を超える)。
+// ゲイン量とノイズフロアだけは全体を見ないと決められないため、
+// 音声を保持しない軽い解析パス(Analyzer)を先に1回通す設計にしている。
 
 export interface DspOptions {
   highPass: boolean; // 低域のゴロつき(空調音・机の振動)を除去
@@ -10,79 +13,52 @@ export interface DspOptions {
   trimSilence: boolean; // 長い無音を詰める
 }
 
-const FRAME_MS = 20;
+export const FRAME_MS = 20;
+const TARGET_RMS_DB = -18;
+const PEAK_LIMIT_DB = -1;
 
-/** RBJ Cookbook のバイカッド・ハイパスフィルタ。80Hz 以下を落とす。 */
-export function highPassInPlace(
-  channels: Float32Array[],
-  sampleRate: number,
-  cutoffHz = 80,
-  q = 0.707,
-): void {
-  const w0 = (2 * Math.PI * cutoffHz) / sampleRate;
-  const cosW0 = Math.cos(w0);
-  const alpha = Math.sin(w0) / (2 * q);
+/** RBJ Cookbook のバイカッド・ハイパス。ブロックをまたいで状態を保つ。 */
+export class HighPassFilter {
+  private readonly b0: number;
+  private readonly b1: number;
+  private readonly b2: number;
+  private readonly a1: number;
+  private readonly a2: number;
+  private readonly state: { x1: number; x2: number; y1: number; y2: number }[];
 
-  const a0 = 1 + alpha;
-  const b0 = ((1 + cosW0) / 2) / a0;
-  const b1 = (-(1 + cosW0)) / a0;
-  const b2 = ((1 + cosW0) / 2) / a0;
-  const a1 = (-2 * cosW0) / a0;
-  const a2 = (1 - alpha) / a0;
-
-  for (const ch of channels) {
-    let x1 = 0;
-    let x2 = 0;
-    let y1 = 0;
-    let y2 = 0;
-    for (let i = 0; i < ch.length; i++) {
-      const x0 = ch[i];
-      const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      x2 = x1;
-      x1 = x0;
-      y2 = y1;
-      y1 = y0;
-      ch[i] = y0;
-    }
+  constructor(sampleRate: number, numChannels: number, cutoffHz = 80, q = 0.707) {
+    const w0 = (2 * Math.PI * cutoffHz) / sampleRate;
+    const cosW0 = Math.cos(w0);
+    const alpha = Math.sin(w0) / (2 * q);
+    const a0 = 1 + alpha;
+    this.b0 = ((1 + cosW0) / 2) / a0;
+    this.b1 = (-(1 + cosW0)) / a0;
+    this.b2 = ((1 + cosW0) / 2) / a0;
+    this.a1 = (-2 * cosW0) / a0;
+    this.a2 = (1 - alpha) / a0;
+    this.state = Array.from({ length: numChannels }, () => ({ x1: 0, x2: 0, y1: 0, y2: 0 }));
   }
-}
 
-/** 20ms フレームごとの RMS。無音判定とノイズフロア推定の共通の土台。 */
-function frameRms(channels: Float32Array[], sampleRate: number): Float32Array {
-  const frameLen = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
-  const frameCount = Math.ceil(channels[0].length / frameLen);
-  const out = new Float32Array(frameCount);
-  for (let f = 0; f < frameCount; f++) {
-    const start = f * frameLen;
-    const end = Math.min(start + frameLen, channels[0].length);
-    let sum = 0;
-    let n = 0;
-    for (const ch of channels) {
-      for (let i = start; i < end; i++) {
-        sum += ch[i] * ch[i];
-        n++;
+  process(channels: Float32Array[], length: number): void {
+    for (let c = 0; c < channels.length; c++) {
+      const ch = channels[c];
+      const s = this.state[c];
+      let { x1, x2, y1, y2 } = s;
+      for (let i = 0; i < length; i++) {
+        const x0 = ch[i];
+        const y0 = this.b0 * x0 + this.b1 * x1 + this.b2 * x2 - this.a1 * y1 - this.a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        ch[i] = y0;
       }
+      s.x1 = x1;
+      s.x2 = x2;
+      s.y1 = y1;
+      s.y2 = y2;
     }
-    out[f] = n > 0 ? Math.sqrt(sum / n) : 0;
   }
-  return out;
-}
-
-/**
- * ノイズフロアを推定する。フレーム RMS の下位10パーセンタイルを採用する。
- * 平均や最小値ではなく下位パーセンタイルなのは、完全な無音区間や
- * 単発のクリックに引きずられずに「常時鳴っている環境音」を捉えるため。
- */
-export function estimateNoiseFloor(channels: Float32Array[], sampleRate: number): number {
-  const rms = frameRms(channels, sampleRate);
-  if (rms.length === 0) return 0;
-  const sorted = Float32Array.from(rms).sort();
-  // 完全無音(デジタルゼロ)のフレームは環境音の指標にならないので除く
-  let firstNonZero = 0;
-  while (firstNonZero < sorted.length && sorted[firstNonZero] <= 1e-6) firstNonZero++;
-  if (firstNonZero >= sorted.length) return 0;
-  const idx = firstNonZero + Math.floor((sorted.length - firstNonZero) * 0.1);
-  return sorted[Math.min(idx, sorted.length - 1)];
 }
 
 /**
@@ -90,141 +66,263 @@ export function estimateNoiseFloor(channels: Float32Array[], sampleRate: number)
  * ノイズフロア付近の小さい音を滑らかに押し下げるため、ハードゲートのような
  * 不自然な途切れ(ポンピング)が起きにくい。声の区間はほぼ無加工で通る。
  */
-export function noiseReduceInPlace(
-  channels: Float32Array[],
-  sampleRate: number,
-  noiseFloor: number,
-): void {
-  if (noiseFloor <= 0) return;
+export class NoiseReducer {
+  private readonly threshold: number;
+  private readonly attack: number;
+  private readonly release: number;
+  private env = 0;
+  private gain = 1;
 
-  const threshold = noiseFloor * 3; // ノイズフロアの約 +9.5dB を「声あり」の境目とする
-  const ratio = 2.5; // エクスパンダ比。大きいほど強く沈める
-  const maxAttenuation = Math.pow(10, -18 / 20); // 下げ幅は最大 -18dB に制限
-  const attack = Math.exp(-1 / (0.005 * sampleRate)); // 5ms: 声の立ち上がりを削らない速さ
-  const release = Math.exp(-1 / (0.15 * sampleRate)); // 150ms: 語尾を不自然に切らない遅さ
+  private static readonly RATIO = 2.5;
+  private static readonly MAX_ATTENUATION = Math.pow(10, -18 / 20); // 下げ幅は最大 -18dB
 
-  const len = channels[0].length;
-  let env = 0;
-  let gain = 1;
+  constructor(sampleRate: number, noiseFloor: number) {
+    this.threshold = noiseFloor * 3; // ノイズフロアの約 +9.5dB を「声あり」の境目とする
+    this.attack = Math.exp(-1 / (0.005 * sampleRate)); // 5ms: 声の立ち上がりを削らない速さ
+    this.release = Math.exp(-1 / (0.15 * sampleRate)); // 150ms: 語尾を不自然に切らない遅さ
+  }
 
-  for (let i = 0; i < len; i++) {
-    let peak = 0;
-    for (const ch of channels) {
-      const a = Math.abs(ch[i]);
-      if (a > peak) peak = a;
+  process(channels: Float32Array[], length: number): void {
+    if (this.threshold <= 0) return;
+    const numChannels = channels.length;
+    for (let i = 0; i < length; i++) {
+      let peak = 0;
+      for (let c = 0; c < numChannels; c++) {
+        const a = Math.abs(channels[c][i]);
+        if (a > peak) peak = a;
+      }
+      // エンベロープフォロワ: 立ち上がりは速く、減衰は緩やかに追従させる
+      this.env =
+        peak > this.env
+          ? peak + this.attack * (this.env - peak)
+          : peak + this.release * (this.env - peak);
+
+      let target = 1;
+      if (this.env < this.threshold) {
+        const below = Math.max(this.env, 1e-8) / this.threshold;
+        target = Math.max(NoiseReducer.MAX_ATTENUATION, Math.pow(below, NoiseReducer.RATIO - 1));
+      }
+      // ゲイン自体も平滑化して、急激な音量変化を避ける
+      this.gain =
+        target < this.gain
+          ? target + this.attack * (this.gain - target)
+          : target + this.release * (this.gain - target);
+
+      for (let c = 0; c < numChannels; c++) channels[c][i] *= this.gain;
     }
-    // エンベロープフォロワ: 立ち上がりは速く、減衰は緩やかに追従させる
-    env = peak > env ? peak + attack * (env - peak) : peak + release * (env - peak);
-
-    let target = 1;
-    if (env < threshold) {
-      const below = Math.max(env, 1e-8) / threshold;
-      target = Math.max(maxAttenuation, Math.pow(below, ratio - 1));
-    }
-    // ゲイン自体も平滑化して、急激な音量変化を避ける
-    gain = target < gain ? target + attack * (gain - target) : target + release * (gain - target);
-
-    for (const ch of channels) ch[i] *= gain;
   }
 }
 
-export interface TrimResult {
-  channels: Float32Array[];
-  removedSec: number;
+/**
+ * 全体を見ないと決まらない値(ノイズフロアと正規化ゲイン)を求めるための解析器。
+ * 音声そのものは保持せず、20ms フレームごとの RMS だけを溜める。
+ */
+export class Analyzer {
+  private readonly frameLen: number;
+  private readonly rms: number[] = [];
+  private acc = 0;
+  private accCount = 0;
+  private peak = 0;
+
+  constructor(sampleRate: number) {
+    this.frameLen = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
+  }
+
+  push(channels: Float32Array[], length: number): void {
+    const numChannels = channels.length;
+    for (let i = 0; i < length; i++) {
+      for (let c = 0; c < numChannels; c++) {
+        const v = channels[c][i];
+        this.acc += v * v;
+        const a = v < 0 ? -v : v;
+        if (a > this.peak) this.peak = a;
+      }
+      this.accCount += numChannels;
+      if (this.accCount >= this.frameLen * numChannels) {
+        this.rms.push(Math.sqrt(this.acc / this.accCount));
+        this.acc = 0;
+        this.accCount = 0;
+      }
+    }
+  }
+
+  private flush(): void {
+    if (this.accCount > 0) {
+      this.rms.push(Math.sqrt(this.acc / this.accCount));
+      this.acc = 0;
+      this.accCount = 0;
+    }
+  }
+
+  /**
+   * ノイズフロアはフレーム RMS の下位10パーセンタイル。平均や最小値ではなく
+   * 下位パーセンタイルなのは、完全な無音や単発のクリックに引きずられずに
+   * 「常時鳴っている環境音」を捉えるため。
+   */
+  result(): { noiseFloor: number; gain: number; peak: number } {
+    this.flush();
+    if (this.rms.length === 0 || this.peak === 0) return { noiseFloor: 0, gain: 1, peak: 0 };
+
+    const sorted = Float32Array.from(this.rms).sort();
+    let firstNonZero = 0;
+    while (firstNonZero < sorted.length && sorted[firstNonZero] <= 1e-6) firstNonZero++;
+    const noiseFloor =
+      firstNonZero >= sorted.length
+        ? 0
+        : sorted[
+            Math.min(
+              firstNonZero + Math.floor((sorted.length - firstNonZero) * 0.1),
+              sorted.length - 1,
+            )
+          ];
+
+    // 正規化の基準は「声が鳴っている区間」の RMS にする。無音を含めて平均すると
+    // 沈黙の多い回だけ不必要に大きくなり、回ごとの音量が揃わないため。
+    const voiceThreshold = Math.max(noiseFloor * 2, 1e-4);
+    let sum = 0;
+    let n = 0;
+    for (const r of this.rms) {
+      if (r > voiceThreshold) {
+        sum += r * r;
+        n++;
+      }
+    }
+    const referenceRms = n > 0 ? Math.sqrt(sum / n) : Math.sqrt(this.rms.reduce((a, r) => a + r * r, 0) / this.rms.length);
+    if (referenceRms <= 0) return { noiseFloor, gain: 1, peak: this.peak };
+
+    let gainDb = TARGET_RMS_DB - 20 * Math.log10(referenceRms);
+    const peakDb = 20 * Math.log10(this.peak);
+    if (peakDb + gainDb > PEAK_LIMIT_DB) gainDb = PEAK_LIMIT_DB - peakDb;
+
+    return { noiseFloor, gain: Math.pow(10, gainDb / 20), peak: this.peak };
+  }
 }
 
 /**
  * 長い無音を詰める。無音を完全に削除すると会話が不自然に繋がるため、
- * 上限(既定1.0秒)までは残して「間」を保つ。前後の無音は0.3秒まで詰める。
+ * 上限(既定1.0秒)までは残して「間」を保つ。
+ *
+ * 無音区間はいったん保留バッファに溜め、そのあと声が来たときだけ吐き出す。
+ * こうすると冒頭・末尾の無音も同じ仕組みで自然に切り落とせる。
  */
-export function trimSilence(
-  channels: Float32Array[],
-  sampleRate: number,
-  noiseFloor: number,
-  maxSilenceSec = 1.0,
-): TrimResult {
-  const rms = frameRms(channels, sampleRate);
-  if (rms.length === 0) return { channels, removedSec: 0 };
+export class SilenceTrimmer {
+  private readonly frameLen: number;
+  private readonly maxSilenceFrames: number;
+  private readonly threshold: number;
+  /** 保留中の無音フレーム。1要素が1フレーム分の全チャンネル。 */
+  private pending: Float32Array[][] = [];
+  private started = false;
+  private removedFrames = 0;
+  private carry: Float32Array[] | null = null;
+  private carryLen = 0;
 
-  const frameLen = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
-  const silenceThreshold = Math.max(noiseFloor * 2, 1e-4);
-  const maxSilenceFrames = Math.max(1, Math.round((maxSilenceSec * 1000) / FRAME_MS));
-  const edgePadFrames = Math.max(1, Math.round(300 / FRAME_MS));
+  constructor(
+    sampleRate: number,
+    private readonly numChannels: number,
+    noiseFloor: number,
+    maxSilenceSec = 1.0,
+  ) {
+    this.frameLen = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
+    this.maxSilenceFrames = Math.max(1, Math.round((maxSilenceSec * 1000) / FRAME_MS));
+    this.threshold = Math.max(noiseFloor * 2, 1e-4);
+  }
 
-  // 残すフレームを選ぶ。無音が続いても maxSilenceFrames 分は残す。
-  const keep = new Uint8Array(rms.length);
-  let silentRun = 0;
-  let firstVoiced = -1;
-  let lastVoiced = -1;
-  for (let f = 0; f < rms.length; f++) {
-    if (rms[f] > silenceThreshold) {
-      silentRun = 0;
-      keep[f] = 1;
-      if (firstVoiced < 0) firstVoiced = f;
-      lastVoiced = f;
-    } else {
-      silentRun++;
-      // 無音の前半だけ残すことで、話し終わりの余韻を保ちつつ長い空白を削る
-      keep[f] = silentRun <= maxSilenceFrames ? 1 : 0;
+  /**
+   * ブロックを受け取り、残すべきサンプルだけを emit へ渡す。
+   * フレーム境界に満たない端数は次のブロックへ持ち越す。
+   */
+  process(
+    channels: Float32Array[],
+    length: number,
+    emit: (out: Float32Array[], len: number) => void,
+  ): void {
+    let input = channels;
+    let inputLen = length;
+
+    if (this.carry && this.carryLen > 0) {
+      const merged = Array.from(
+        { length: this.numChannels },
+        () => new Float32Array(this.carryLen + length),
+      );
+      for (let c = 0; c < this.numChannels; c++) {
+        merged[c].set(this.carry[c].subarray(0, this.carryLen), 0);
+        merged[c].set(channels[c].subarray(0, length), this.carryLen);
+      }
+      input = merged;
+      inputLen = this.carryLen + length;
+      this.carryLen = 0;
+    }
+
+    const fullFrames = Math.floor(inputLen / this.frameLen);
+    for (let f = 0; f < fullFrames; f++) {
+      const start = f * this.frameLen;
+      let sum = 0;
+      for (let c = 0; c < this.numChannels; c++) {
+        for (let i = start; i < start + this.frameLen; i++) {
+          const v = input[c][i];
+          sum += v * v;
+        }
+      }
+      const rms = Math.sqrt(sum / (this.frameLen * this.numChannels));
+
+      const frame = Array.from({ length: this.numChannels }, (_, c) =>
+        input[c].slice(start, start + this.frameLen),
+      );
+
+      if (rms > this.threshold) {
+        // 声が来た。保留していた無音(上限以内に制限済み)を「間」として復元する。
+        for (const held of this.pending) emit(held, this.frameLen);
+        this.pending = [];
+        this.started = true;
+        emit(frame, this.frameLen);
+      } else if (this.started) {
+        // 話し終わりの余韻は先頭側を残す。上限を超えた分はその場で捨てるので、
+        // 何分続く無音でも保留バッファは maxSilenceFrames を超えない。
+        if (this.pending.length < this.maxSilenceFrames) this.pending.push(frame);
+        else this.removedFrames += this.frameLen;
+      } else {
+        // 冒頭の無音は声の直前だけ残したいので、古い方から捨てていく
+        this.pending.push(frame);
+        if (this.pending.length > this.maxSilenceFrames) {
+          this.pending.shift();
+          this.removedFrames += this.frameLen;
+        }
+      }
+    }
+
+    const rest = inputLen - fullFrames * this.frameLen;
+    if (rest > 0) {
+      if (!this.carry) {
+        this.carry = Array.from(
+          { length: this.numChannels },
+          () => new Float32Array(this.frameLen * 2),
+        );
+      }
+      for (let c = 0; c < this.numChannels; c++) {
+        this.carry[c].set(input[c].subarray(fullFrames * this.frameLen, inputLen), 0);
+      }
+      this.carryLen = rest;
     }
   }
 
-  if (firstVoiced < 0) return { channels, removedSec: 0 }; // 全編無音なら何もしない
-
-  // 冒頭と末尾は余韻を短く固定する
-  for (let f = 0; f < Math.max(0, firstVoiced - edgePadFrames); f++) keep[f] = 0;
-  for (let f = Math.min(rms.length, lastVoiced + edgePadFrames + 1); f < rms.length; f++) keep[f] = 0;
-
-  const keptFrames = keep.reduce((n, v) => n + v, 0);
-  if (keptFrames === rms.length) return { channels, removedSec: 0 };
-
-  const srcLen = channels[0].length;
-  const outLen = Math.min(keptFrames * frameLen, srcLen);
-  const out = channels.map(() => new Float32Array(outLen));
-
-  // フレーム境界のブツ切りを避けるため、残す区間の切れ目に短いクロスフェードをかける
-  const fadeLen = Math.min(frameLen, Math.round(sampleRate * 0.005));
-  let w = 0;
-  for (let f = 0; f < rms.length && w < outLen; f++) {
-    if (!keep[f]) continue;
-    const start = f * frameLen;
-    const end = Math.min(start + frameLen, srcLen);
-    const isSeamStart = f === 0 || !keep[f - 1];
-    const isSeamEnd = f === rms.length - 1 || !keep[f + 1];
-    for (let i = start; i < end && w < outLen; i++, w++) {
-      const posInFrame = i - start;
-      let fade = 1;
-      if (isSeamStart && posInFrame < fadeLen) fade = posInFrame / fadeLen;
-      else if (isSeamEnd && end - i <= fadeLen) fade = (end - i) / fadeLen;
-      for (let c = 0; c < channels.length; c++) out[c][w] = channels[c][i] * fade;
+  /** 末尾に残った保留分。無音のまま終わっている場合は捨てる。 */
+  finish(emit: (out: Float32Array[], len: number) => void): number {
+    if (this.carryLen > 0 && this.carry) {
+      emit(
+        Array.from({ length: this.numChannels }, (_, c) => this.carry![c].slice(0, this.carryLen)),
+        this.carryLen,
+      );
+      this.carryLen = 0;
     }
+    this.removedFrames += this.pending.length * this.frameLen;
+    this.pending = [];
+    return this.removedFrames;
   }
-
-  const trimmed = out.map((ch) => ch.subarray(0, w));
-  return { channels: trimmed, removedSec: (srcLen - w) / sampleRate };
 }
 
-export interface DspResult {
-  channels: Float32Array[];
-  removedSec: number;
-}
-
-export function applyDsp(
-  channels: Float32Array[],
-  sampleRate: number,
-  options: DspOptions,
-): DspResult {
-  if (options.highPass) highPassInPlace(channels, sampleRate);
-
-  // ノイズフロアはハイパス後に測る。低域の暗騒音を含んだままだと過大評価になる。
-  const needsFloor = options.noiseReduction || options.trimSilence;
-  const noiseFloor = needsFloor ? estimateNoiseFloor(channels, sampleRate) : 0;
-
-  if (options.noiseReduction) noiseReduceInPlace(channels, sampleRate, noiseFloor);
-
-  if (options.trimSilence) {
-    const result = trimSilence(channels, sampleRate, noiseFloor);
-    return { channels: result.channels, removedSec: result.removedSec };
+export function applyGain(channels: Float32Array[], length: number, gain: number): void {
+  if (gain === 1) return;
+  for (const ch of channels) {
+    for (let i = 0; i < length; i++) ch[i] *= gain;
   }
-  return { channels, removedSec: 0 };
 }
