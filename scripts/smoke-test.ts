@@ -12,6 +12,7 @@ import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
 import { listModels, pickDefaultModel } from "../src/lib/gemini";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
+import { wrapJapanese, PRESETS } from "../src/lib/image";
 
 const SR = 44100;
 let failures = 0;
@@ -246,10 +247,27 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("空の一覧でも落ちない", pickDefaultModel([]) === null);
   }
 
-  console.log("\n[12] プロンプト生成");
+  console.log("\n[12] 告知画像の折り返しと禁則処理");
   {
-    const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
+    // measureText を全角1文字=1単位とみなす簡易実装で代用する
+    const ctx = { measureText: (t: string) => ({ width: [...t].length }) } as CanvasRenderingContext2D;
+    const lines = wrapJapanese(ctx, "AIに任せられる仕事、まだ無理な仕事。", 8);
+    check("指定幅で折り返す", lines.every((l) => [...l].length <= 8), lines.join(" / "));
+    check("全文が保たれる", lines.join("") === "AIに任せられる仕事、まだ無理な仕事。");
+    check("行頭に句読点が来ない", lines.every((l) => !"、。".includes(l[0])), lines.join(" / "));
+
+    const withBreaks = wrapJapanese(ctx, "一行目\n二行目", 20);
+    check("改行を尊重する", withBreaks.length === 2 && withBreaks[0] === "一行目");
+    check("空文字でも落ちない", wrapJapanese(ctx, "", 10).length === 0);
+    check("プリセットは3種", PRESETS.length === 3 && PRESETS.some((p) => p.width === 3000));
+  }
+
+  console.log("\n[13] プロンプト生成");
+  {
+    const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "", showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
     check("背景情報が入る", p.includes("テスト番組"));
+    check("番組名が入る", buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "ブリッジラジオ" }).includes("番組名: ブリッジラジオ"));
+    check("imageQuote がスキーマに入る", p.includes("imageQuote"));
     check("禁止語が入る", p.includes("超 / 神回"));
     check("定型文が入る", p.includes("お便りはこちら"));
     check("SNS項目が入る", p.includes('"social"'));

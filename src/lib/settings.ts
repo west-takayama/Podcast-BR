@@ -14,6 +14,8 @@ export interface Settings {
   /** 配信用MP3をモノラルで書き出すか。トーク番組はモノラルが標準で、処理も約1.7倍速い。 */
   mono: boolean;
   bitrate: number;
+  /** 告知画像のアクセント色。番組の見た目を揃えるために保存する。 */
+  accentColor: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -23,6 +25,7 @@ export const DEFAULT_SETTINGS: Settings = {
   dsp: { highPass: true, noiseReduction: true, trimSilence: false },
   mono: true,
   bitrate: 96,
+  accentColor: "#1db954",
 };
 
 export function loadSettings(): Settings {

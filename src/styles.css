@@ -225,3 +225,54 @@ a.dl {
 .chevron { color: var(--muted); flex-shrink: 0; }
 
 audio { display: block; }
+
+.row-buttons { display: flex; gap: 8px; margin-top: 10px; }
+.row-buttons button { flex: 1; font-size: 0.9rem; padding: 10px; }
+button.danger { background: #3a1518; border: 1px solid var(--danger); color: #ff9d9d; }
+
+.confirm {
+  background: #2a2a2a;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 10px;
+  font-size: 0.9rem;
+}
+.confirm p { margin: 0; }
+
+.history-main { flex: 1; min-width: 0; cursor: pointer; }
+.icon-btn {
+  background: transparent;
+  padding: 8px 10px;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.preset-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.preset-tabs button {
+  flex: 1;
+  padding: 9px;
+  font-size: 0.85rem;
+  background: #2a2a2a;
+  color: var(--muted);
+}
+.preset-tabs button.active { background: var(--accent); color: #04240f; font-weight: 700; }
+
+.card-preview {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 10px;
+  margin: 10px 0;
+  background: #000;
+}
+
+input[type="color"] {
+  width: 100%;
+  height: 46px;
+  padding: 4px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  margin-top: 4px;
+}

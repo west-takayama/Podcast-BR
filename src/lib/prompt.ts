@@ -20,6 +20,8 @@ export const TITLE_STYLE_LABELS: Record<TitleStyle, string> = {
 };
 
 export interface PromptConfig {
+  /** 番組名。プロンプトと告知画像の両方で使う。 */
+  showName: string;
   showContext: string;
   tone: Tone;
   titleStyle: TitleStyle;
@@ -30,6 +32,7 @@ export interface PromptConfig {
 }
 
 export const DEFAULT_PROMPT_CONFIG: PromptConfig = {
+  showName: "",
   showContext: "",
   tone: "friendly",
   titleStyle: "curiosity",
@@ -56,7 +59,8 @@ function schemaBlock(generateSocial: boolean): string {
   "chapters": [{ "time": string, "label": string }],  // time は "MM:SS"
   "hashtags": string[],   // "#"付きのハッシュタグ5つ
   "transcriptSummary": string,  // 200文字以内の要約
-  "keywords": string[]    // 検索されうるキーワード5〜8語(#なし)${social}
+  "keywords": string[],   // 検索されうるキーワード5〜8語(#なし)
+  "imageQuote": string    // 告知画像に載せる一言。30文字以内${social}
 }`;
 }
 
@@ -67,9 +71,13 @@ export function buildPrompt(config: PromptConfig): string {
     `あなたは日本語ポッドキャストの制作を長年支えてきたプロデューサーです。添付の音声エピソードを最初から最後まで聴き取り、Spotify for Creators に投稿するためのメタデータ一式を作成してください。`,
   );
 
-  if (config.showContext.trim()) {
-    sections.push(`# 番組の背景\n${config.showContext.trim()}`);
-  }
+  const background = [
+    config.showName.trim() && `番組名: ${config.showName.trim()}`,
+    config.showContext.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+  if (background) sections.push(`# 番組の背景\n${background}`);
 
   sections.push(`# 文体
 - トーン: ${TONE_LABELS[config.tone]}
@@ -95,6 +103,11 @@ export function buildPrompt(config: PromptConfig): string {
 ## chapters
 - 話題が実際に切り替わった箇所のみ。無理に細分化しない。
 - time は音声の実時間に基づく "MM:SS"。60分を超える場合も分表記のまま(例 "72:30")。
+
+## imageQuote
+- SNSの告知画像に大きく載せる一言。この回で最も引きの強い言葉を選ぶ。
+- 全角30文字以内。体言止めか短い問いかけが望ましい。
+- エピソード内で実際に語られた言葉を優先する。
 
 ## hashtags / keywords
 - hashtags は日本語圏のリスナーが実際に使う語を選ぶ。

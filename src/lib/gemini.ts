@@ -72,6 +72,8 @@ export interface EpisodeMeta {
   hashtags: string[];
   transcriptSummary: string;
   keywords: string[];
+  /** 告知画像に載せる一言。 */
+  imageQuote: string;
   social?: SocialPosts;
 }
 
@@ -223,6 +225,7 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
     hashtags: strArray(o.hashtags),
     transcriptSummary: typeof o.transcriptSummary === "string" ? o.transcriptSummary : "",
     keywords: strArray(o.keywords),
+    imageQuote: typeof o.imageQuote === "string" ? o.imageQuote : "",
     social,
   };
 }
