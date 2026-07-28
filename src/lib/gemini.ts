@@ -6,6 +6,58 @@ import { buildPrompt, type PromptConfig } from "./prompt";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
+export interface ModelInfo {
+  id: string; // "gemini-3.5-flash"
+  displayName: string;
+}
+
+/**
+ * 利用可能なモデルを API から取得する。
+ *
+ * モデル名をアプリに書き込むと Google 側の廃止で必ず動かなくなる
+ * (実際に gemini-2.5-flash が予告より早く 404 になった)。
+ * 一覧はキーごとに変わるため、その端末のキーで毎回引き直す。
+ */
+export async function listModels(apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
+  const res = await fetch(`${API_BASE}/v1beta/models?key=${apiKey}&pageSize=200`, { signal });
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 400 && body.includes("API_KEY_INVALID")) {
+      throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
+    }
+    throw new Error(`モデル一覧を取得できませんでした (${res.status})`);
+  }
+  const data = await res.json();
+  const models: ModelInfo[] = (data.models ?? [])
+    .filter((m: { supportedGenerationMethods?: string[]; name?: string }) => {
+      if (!m.name || !m.supportedGenerationMethods?.includes("generateContent")) return false;
+      // 音声を扱えない用途別モデルを除く
+      return !/embedding|aqa|imagen|veo|-tts|image-generation/.test(m.name);
+    })
+    .map((m: { name: string; displayName?: string }) => ({
+      id: m.name.replace(/^models\//, ""),
+      displayName: m.displayName ?? m.name.replace(/^models\//, ""),
+    }));
+
+  return models.sort((a, b) => score(b.id) - score(a.id));
+}
+
+/** 新しい安定版の flash 系を上位に並べるためのスコア。 */
+function score(id: string): number {
+  const version = Number(/gemini-(\d+(?:\.\d+)?)/.exec(id)?.[1] ?? 0);
+  let s = version * 100;
+  if (id.includes("flash")) s += 40; // 速く、無料枠の制限も緩い
+  if (id.includes("lite")) s -= 25; // 音声の聞き取り精度が落ちる
+  if (id.includes("pro")) s += 10;
+  if (/preview|exp|-\d{3,}/.test(id)) s -= 60; // プレビュー版と日付入りは避ける
+  return s;
+}
+
+/** 一覧から既定として使うモデルを選ぶ。 */
+export function pickDefaultModel(models: ModelInfo[]): string | null {
+  return models[0]?.id ?? null;
+}
+
 export interface SocialPosts {
   x: string;
   instagram: string;
@@ -31,6 +83,8 @@ export interface GenerateOptions {
   onStatus: (status: string) => void;
   /** アップロードの進捗 (0〜1)。回線が遅いほど支配的になるので実測値を返す。 */
   onUploadProgress?: (fraction: number) => void;
+  /** モデル廃止で別のモデルに切り替わったときに呼ばれる。設定へ保存し直すために使う。 */
+  onModelChanged?: (model: string) => void;
   signal?: AbortSignal;
 }
 
@@ -188,7 +242,7 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
 }
 
 async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeMeta> {
-  const { apiKey, model, mp3, config, onStatus, onUploadProgress, signal } = opts;
+  const { apiKey, model, mp3, config, onStatus, onUploadProgress, onModelChanged, signal } = opts;
 
   onStatus("音声をアップロード中…");
   const file = await uploadFile(apiKey, mp3, onUploadProgress, signal);
@@ -200,25 +254,46 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
   }
 
   onStatus("タイトル・説明文を生成中…");
-  const res = await fetch(`${API_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [
-            { file_data: { mime_type: "audio/mpeg", file_uri: fileUri } },
-            { text: buildPrompt(config) },
-          ],
+  const prompt = buildPrompt(config);
+  const call = (modelId: string) =>
+    fetch(`${API_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { file_data: { mime_type: "audio/mpeg", file_uri: fileUri } },
+              { text: prompt },
+            ],
+          },
+        ],
+        generationConfig: {
+          response_mime_type: "application/json",
+          temperature: 0.7,
         },
-      ],
-      generationConfig: {
-        response_mime_type: "application/json",
-        temperature: 0.7,
-      },
-    }),
-  });
+      }),
+    });
+
+  let res = await call(model);
+
+  // Google はモデルを予告より早く廃止することがある。ここで諦めると変換済みの
+  // 音声が無駄になるので、利用可能なモデルを引き直して一度だけやり直す。
+  if (res.status === 404) {
+    onStatus("モデルが更新されたため切り替え中…");
+    const models = await listModels(apiKey, signal);
+    const replacement = pickDefaultModel(models);
+    if (!replacement || replacement === model) {
+      throw new Error(
+        `モデル ${model} は利用できなくなっています。設定画面でモデルを選び直してください。`,
+      );
+    }
+    onStatus("タイトル・説明文を生成中…");
+    res = await call(replacement);
+    if (res.ok) onModelChanged?.(replacement);
+  }
+
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 400 && body.includes("API_KEY_INVALID")) {

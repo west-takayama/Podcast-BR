@@ -18,7 +18,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   apiKey: "",
-  model: "gemini-2.5-flash",
+  model: "gemini-3.5-flash",
   prompt: DEFAULT_PROMPT_CONFIG,
   dsp: { highPass: true, noiseReduction: true, trimSilence: false },
   mono: true,

@@ -10,6 +10,7 @@ import {
 import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
+import { listModels, pickDefaultModel } from "../src/lib/gemini";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 
 const SR = 44100;
@@ -217,7 +218,35 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("表示整形", formatDuration(65000) === "1分05秒" && formatDuration(30000) === "30秒");
   }
 
-  console.log("\n[11] プロンプト生成");
+  console.log("\n[11] モデル一覧の絞り込みと優先順位");
+  {
+    const catalog = {
+      models: [
+        { name: "models/gemini-2.5-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3.5-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3.5-flash-preview-05-20", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3.1-flash-lite", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3-pro", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
+        { name: "models/imagen-4.0", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/veo-3", supportedGenerationMethods: ["generateContent"] },
+      ],
+    };
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(catalog), { status: 200 })) as typeof fetch;
+    const models = await listModels("dummy");
+    globalThis.fetch = original;
+
+    const ids = models.map((m) => m.id);
+    check("音声に使えないモデルを除く", !ids.some((i) => /embedding|imagen|veo/.test(i)), ids.join(", "));
+    check("最新の安定版 flash が先頭", pickDefaultModel(models) === "gemini-3.5-flash", `先頭 ${ids[0]}`);
+    check("プレビュー版は安定版より後", ids.indexOf("gemini-3.5-flash-preview-05-20") > ids.indexOf("gemini-3.5-flash"));
+    check("古い世代は後ろ", ids.indexOf("gemini-2.5-flash") > ids.indexOf("gemini-3.5-flash"));
+    check("空の一覧でも落ちない", pickDefaultModel([]) === null);
+  }
+
+  console.log("\n[12] プロンプト生成");
   {
     const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
     check("背景情報が入る", p.includes("テスト番組"));

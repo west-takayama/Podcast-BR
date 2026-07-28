@@ -165,6 +165,8 @@ export default function App() {
         },
         onUploadProgress: (f) =>
           advance("upload", f, `${(result.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
+        // 廃止されたモデルから自動で切り替わったら、次回以降のために保存し直す
+        onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         signal: controller.signal,
       });
       abortRef.current = null;

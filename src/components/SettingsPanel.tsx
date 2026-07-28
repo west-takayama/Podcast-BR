@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import type { Settings } from "../lib/settings";
 import { TONE_LABELS, TITLE_STYLE_LABELS, type Tone, type TitleStyle } from "../lib/prompt";
+import { listModels, pickDefaultModel, type ModelInfo } from "../lib/gemini";
 
 interface Props {
   settings: Settings;
@@ -8,6 +10,40 @@ interface Props {
 }
 
 export default function SettingsPanel({ settings, onChange, onClose }: Props) {
+  const [models, setModels] = useState<ModelInfo[] | null>(null);
+  const [modelError, setModelError] = useState("");
+
+  // モデル一覧はキーを入れた時点で取りに行く。Google 側の廃止でアプリ内の
+  // 固定リストが古くなる問題を避けるため、選択肢は常に API の返り値から作る。
+  useEffect(() => {
+    if (!settings.apiKey) {
+      setModels(null);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setModelError("");
+      listModels(settings.apiKey, controller.signal)
+        .then((list) => {
+          setModels(list);
+          // 保存済みのモデルが廃止されていたら、使えるものへ寄せておく
+          if (list.length > 0 && !list.some((m) => m.id === settings.model)) {
+            const fallback = pickDefaultModel(list);
+            if (fallback) onChange({ ...settings, model: fallback });
+          }
+        })
+        .catch((e: unknown) => {
+          if (e instanceof DOMException && e.name === "AbortError") return;
+          setModelError(e instanceof Error ? e.message : String(e));
+        });
+    }, 500); // 入力途中のキーで何度も叩かないよう少し待つ
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.apiKey]);
+
   const setPrompt = <K extends keyof Settings["prompt"]>(
     key: K,
     value: Settings["prompt"][K],
@@ -40,13 +76,25 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         モデル
         <select
           value={settings.model}
+          disabled={!models || models.length === 0}
           onChange={(e) => onChange({ ...settings, model: e.target.value })}
         >
-          <option value="gemini-2.5-flash">gemini-2.5-flash(推奨)</option>
-          <option value="gemini-2.5-pro">gemini-2.5-pro(高品質・枠少なめ)</option>
-          <option value="gemini-2.0-flash">gemini-2.0-flash(軽量)</option>
+          {models === null && <option>{settings.apiKey ? "取得中…" : "APIキーを入力してください"}</option>}
+          {models?.map((m, i) => (
+            <option key={m.id} value={m.id}>
+              {m.id}
+              {i === 0 ? "(推奨)" : ""}
+            </option>
+          ))}
         </select>
       </label>
+      {modelError ? (
+        <p className="muted">⚠️ {modelError}</p>
+      ) : (
+        <p className="muted">
+          利用可能なモデルをキーから取得して表示しています。Google がモデルを廃止した場合は、生成時に自動で新しいモデルへ切り替えます。
+        </p>
+      )}
 
       <h3>番組の個性</h3>
       <label>
