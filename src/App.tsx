@@ -2,26 +2,24 @@ import { useEffect, useRef, useState } from "react";
 import { generateEpisodeMeta, type EpisodeMeta } from "./lib/gemini";
 import { loadSettings, saveSettings, type Settings } from "./lib/settings";
 import { saveEpisode, updateEpisode } from "./lib/history";
+import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
+import { ScreenWakeLock } from "./lib/wakeLock";
 import SettingsPanel from "./components/SettingsPanel";
 import ResultView from "./components/ResultView";
 import HistoryPanel from "./components/HistoryPanel";
+import ProgressPanel from "./components/ProgressPanel";
 
 type Tab = "create" | "history" | "settings";
-type Phase = "idle" | "processing" | "generating" | "done";
-
-const STAGE_LABELS: Record<string, string> = {
-  decode: "WAVを読み込み中",
-  dsp: "音声を整音中",
-  encode: "MP3に変換中",
-};
+type Phase = "idle" | "running" | "done";
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [tab, setTab] = useState<Tab>(() => (loadSettings().apiKey ? "create" : "settings"));
   const [phase, setPhase] = useState<Phase>("idle");
-  const [stage, setStage] = useState("decode");
-  const [percent, setPercent] = useState(0);
-  const [statusText, setStatusText] = useState("");
+  const [stage, setStage] = useState<Stage>("analyze");
+  const [overall, setOverall] = useState(0);
+  const [remainingMs, setRemainingMs] = useState<number | null>(null);
+  const [detail, setDetail] = useState("");
   const [error, setError] = useState("");
   const [meta, setMeta] = useState<EpisodeMeta | null>(null);
   const [episodeId, setEpisodeId] = useState("");
@@ -33,6 +31,10 @@ export default function App() {
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mp3UrlRef = useRef("");
+  const startedAtRef = useRef(0);
+  const wakeLockRef = useRef(new ScreenWakeLock());
+  // 残り時間がちらつかないよう、指数移動平均でならしてから表示する
+  const smoothedRemainingRef = useRef<number | null>(null);
 
   useEffect(() => {
     saveSettings(settings);
@@ -43,26 +45,48 @@ export default function App() {
   }, [mp3Url]);
 
   useEffect(() => {
+    const wakeLock = wakeLockRef.current;
     return () => {
       workerRef.current?.terminate();
       abortRef.current?.abort();
+      void wakeLock.stop();
       if (mp3UrlRef.current) URL.revokeObjectURL(mp3UrlRef.current);
     };
   }, []);
 
   // 処理中の離脱で結果を失わないよう警告する
   useEffect(() => {
-    if (phase !== "processing" && phase !== "generating") return;
+    if (phase !== "running") return;
     const handler = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [phase]);
 
+  const advance = (nextStage: Stage, fraction: number, text = "") => {
+    const progress = overallProgress(nextStage, fraction);
+    setStage(nextStage);
+    setOverall(progress);
+    setDetail(text);
+
+    const raw = estimateRemainingMs(Date.now() - startedAtRef.current, progress);
+    if (raw === null) {
+      setRemainingMs(null);
+      return;
+    }
+    const prev = smoothedRemainingRef.current;
+    // 残り時間は減る方向に素早く、増える方向には緩やかに追従させる
+    const next = prev === null ? raw : raw < prev ? raw * 0.6 + prev * 0.4 : raw * 0.25 + prev * 0.75;
+    smoothedRemainingRef.current = next;
+    setRemainingMs(next);
+  };
+
   const reset = () => {
     setPhase("idle");
     setError("");
     setMeta(null);
-    setPercent(0);
+    setOverall(0);
+    setRemainingMs(null);
+    smoothedRemainingRef.current = null;
     setEpisodeId("");
     setChosenTitle("");
     if (mp3Url) URL.revokeObjectURL(mp3Url);
@@ -74,6 +98,7 @@ export default function App() {
     workerRef.current = null;
     abortRef.current?.abort();
     abortRef.current = null;
+    void wakeLockRef.current.stop();
     reset();
   };
 
@@ -84,15 +109,17 @@ export default function App() {
       return;
     }
     reset();
-    setPhase("processing");
-    setStage("decode");
-    setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+    setPhase("running");
+    setStage("analyze");
+    startedAtRef.current = Date.now();
+    setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
     setOutputName(file.name.replace(/\.wav$/i, "") + ".mp3");
+    void wakeLockRef.current.start();
 
     try {
-      const buffer = await file.arrayBuffer();
       const result = await new Promise<{
         mp3: ArrayBuffer;
+        aiMp3: ArrayBuffer;
         durationSec: number;
         removedSec: number;
       }>((resolve, reject) => {
@@ -103,16 +130,20 @@ export default function App() {
         worker.onmessage = (e) => {
           const msg = e.data;
           if (msg.type === "progress") {
-            setStage(msg.stage);
-            setPercent(msg.percent);
+            advance(msg.stage, msg.fraction);
           } else if (msg.type === "done") {
-            resolve({ mp3: msg.mp3, durationSec: msg.durationSec, removedSec: msg.removedSec });
+            resolve(msg);
           } else if (msg.type === "error") {
             reject(new Error(msg.message));
           }
         };
         worker.onerror = () => reject(new Error("変換処理でエラーが発生しました"));
-        worker.postMessage({ buffer, dsp: settings.dsp }, [buffer]);
+        worker.postMessage({
+          file,
+          dsp: settings.dsp,
+          mono: settings.mono,
+          bitrate: settings.bitrate,
+        });
       });
       workerRef.current?.terminate();
       workerRef.current = null;
@@ -120,22 +151,29 @@ export default function App() {
       const blob = new Blob([result.mp3], { type: "audio/mpeg" });
       setMp3Url(URL.createObjectURL(blob));
 
-      setPhase("generating");
+      advance("upload", 0);
       const controller = new AbortController();
       abortRef.current = controller;
       const generated = await generateEpisodeMeta({
         apiKey: settings.apiKey,
         model: settings.model,
-        mp3: result.mp3,
+        mp3: result.aiMp3,
         config: settings.prompt,
-        onStatus: setStatusText,
+        onStatus: (text) => {
+          if (text.includes("生成")) advance("generate", 0.15, text);
+          else if (text.includes("解析")) advance("upload", 1, text);
+        },
+        onUploadProgress: (f) =>
+          advance("upload", f, `${(result.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
         signal: controller.signal,
       });
       abortRef.current = null;
+      void wakeLockRef.current.stop();
 
       setMeta(generated);
       setChosenTitle(generated.titles[0] ?? "");
       setPhase("done");
+      window.scrollTo({ top: 0 });
 
       const id = crypto.randomUUID();
       setEpisodeId(id);
@@ -149,15 +187,18 @@ export default function App() {
         meta: generated,
         chosenTitle: generated.titles[0] ?? "",
         audio: blob,
-      }).catch(() => setError("結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)"));
+      }).catch(() =>
+        setError(
+          "結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)",
+        ),
+      );
     } catch (err) {
+      void wakeLockRef.current.stop();
       if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setPhase("idle");
     }
   };
-
-  const busy = phase === "processing" || phase === "generating";
 
   return (
     <>
@@ -222,29 +263,15 @@ export default function App() {
             </label>
           )}
 
-          {busy && (
-            <div className="card">
-              <h2>処理中: {fileInfo}</h2>
-              <ul className="steps">
-                <li className={phase === "processing" ? "active" : "done"}>
-                  {phase === "processing"
-                    ? `▶ ${STAGE_LABELS[stage] ?? "処理中"} (${percent}%)`
-                    : "✓ 整音・MP3変換"}
-                </li>
-                <li className={phase === "generating" ? "active" : ""}>
-                  {phase === "generating" ? `▶ ${statusText}` : "タイトル・説明文を生成"}
-                </li>
-              </ul>
-              {phase === "processing" && (
-                <div className="progress-track">
-                  <div className="progress-fill" style={{ width: `${percent}%` }} />
-                </div>
-              )}
-              <p className="muted" style={{ marginTop: 12 }}>
-                画面を閉じずにお待ちください。長いエピソードほど時間がかかります。
-              </p>
-              <button onClick={cancel}>キャンセル</button>
-            </div>
+          {phase === "running" && (
+            <ProgressPanel
+              fileInfo={fileInfo}
+              stage={stage}
+              overall={overall}
+              remainingMs={remainingMs}
+              detail={detail}
+              onCancel={cancel}
+            />
           )}
 
           {phase === "done" && meta && (

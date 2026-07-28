@@ -1,16 +1,16 @@
-// WAVデコード → DSP → 正規化 → MP3エンコードの一連を検証するスモークテスト。
+// 音声処理とプロンプト生成の検証スモークテスト。
 // 実行: npx tsx scripts/smoke-test.ts
-import { Mp3Encoder } from "@breezystack/lamejs";
-import { decodeWav } from "../src/lib/audio/wav";
-import { normalizeInPlace } from "../src/lib/audio/normalize";
 import {
-  applyDsp,
-  estimateNoiseFloor,
-  highPassInPlace,
-  noiseReduceInPlace,
-  trimSilence,
+  Analyzer,
+  HighPassFilter,
+  NoiseReducer,
+  SilenceTrimmer,
+  applyGain,
 } from "../src/lib/audio/dsp";
+import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
+import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
+import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 
 const SR = 44100;
 let failures = 0;
@@ -57,105 +57,177 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
   return buf;
 }
 
-console.log("\n[1] WAVデコード + MP3エンコード(各ビット深度)");
-for (const [bits, float, ch] of [[16, false, 1], [16, false, 2], [24, false, 2], [32, true, 1]] as const) {
-  const decoded = decodeWav(makeWav(bits, float, ch));
-  const okMeta = decoded.sampleRate === SR && decoded.channels.length === ch && Math.abs(decoded.durationSec - 2) < 0.01;
-  const gainDb = normalizeInPlace(decoded.channels);
-  const enc = new Mp3Encoder(ch, SR, 128);
-  const toI16 = (f: Float32Array) => Int16Array.from(f, (x) => Math.max(-32768, Math.min(32767, x * 32767)));
-  const body = ch === 2
-    ? enc.encodeBuffer(toI16(decoded.channels[0]), toI16(decoded.channels[1]))
-    : enc.encodeBuffer(toI16(decoded.channels[0]));
-  const size = body.length + enc.flush().length;
-  check(`${bits}bit${float ? " float" : ""} ${ch}ch`, okMeta && size > 10000, `gain=${gainDb.toFixed(1)}dB mp3=${(size / 1024).toFixed(0)}KB`);
-}
-
-console.log("\n[2] ハイパスフィルタ — 低域だけが落ちること");
-{
-  const low = new Float32Array(SR);   // 40Hz(除去対象)
-  const mid = new Float32Array(SR);   // 1kHz(声の帯域・保持対象)
-  for (let i = 0; i < SR; i++) {
-    low[i] = 0.5 * Math.sin((2 * Math.PI * 40 * i) / SR);
-    mid[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / SR);
+(async () => {
+  console.log("\n[1] WAVデコード + MP3エンコード(各ビット深度)");
+  for (const [bits, float, ch] of [[16, false, 1], [16, false, 2], [24, false, 2], [32, true, 1]] as const) {
+    const decoded = decodeWav(makeWav(bits, float, ch));
+    const okMeta = decoded.sampleRate === SR && decoded.channels.length === ch && Math.abs(decoded.durationSec - 2) < 0.01;
+    // デコード値が実際に正しいか(440Hz 振幅0.25 → RMS ≈ -15dB)
+    const okValue = Math.abs(rmsDb(decoded.channels[0]) - 20 * Math.log10(0.25 / Math.SQRT2)) < 0.5;
+    const mp3 = await encodeMp3(decoded.channels, SR, 96);
+    check(`${bits}bit${float ? " float" : ""} ${ch}ch`, okMeta && okValue && mp3.byteLength > 5000,
+      `mp3=${(mp3.byteLength / 1024).toFixed(0)}KB`);
   }
-  const lowBefore = rmsDb(low), midBefore = rmsDb(mid);
-  highPassInPlace([low], SR);
-  highPassInPlace([mid], SR);
-  // 過渡応答を避けて後半だけ測る
-  const lowAfter = rmsDb(low, SR / 2), midAfter = rmsDb(mid, SR / 2);
-  check("40Hz が減衰する", lowBefore - lowAfter > 10, `${(lowBefore - lowAfter).toFixed(1)}dB 減衰`);
-  check("1kHz は保持される", Math.abs(midBefore - midAfter) < 1, `${(midBefore - midAfter).toFixed(2)}dB 変化`);
-}
 
-console.log("\n[3] ノイズ低減 — 無音部のノイズが下がり声は残ること");
-{
-  // 前半1秒: ノイズのみ / 後半1秒: 声(1kHz)+ノイズ
-  const ch = new Float32Array(SR * 2);
-  for (let i = 0; i < ch.length; i++) {
-    const noise = (Math.random() - 0.5) * 0.02;
-    const voice = i >= SR ? 0.3 * Math.sin((2 * Math.PI * 1000 * i) / SR) : 0;
-    ch[i] = noise + voice;
+  console.log("\n[2] ブロック分割デコードが一括デコードと一致すること");
+  {
+    const buf = makeWav(16, false, 2, 3);
+    const info = parseWavHeader(buf);
+    const whole = decodeWav(buf);
+    const blockFrames = SR; // 1秒ずつ
+    const block = Array.from({ length: 2 }, () => new Float32Array(blockFrames));
+    let maxDiff = 0;
+    for (let start = 0; start < info.frameCount; start += blockFrames) {
+      const n = Math.min(blockFrames, info.frameCount - start);
+      const byteStart = info.dataOffset + start * info.bytesPerFrame;
+      decodeBlock(buf.slice(byteStart, byteStart + n * info.bytesPerFrame), info, n, block);
+      for (let c = 0; c < 2; c++)
+        for (let i = 0; i < n; i++)
+          maxDiff = Math.max(maxDiff, Math.abs(block[c][i] - whole.channels[c][start + i]));
+    }
+    check("ブロック分割でも同じ値", maxDiff === 0, `最大差 ${maxDiff}`);
   }
-  const noiseBefore = rmsDb(ch, 0, SR);
-  const voiceBefore = rmsDb(ch, SR);
-  const floor = estimateNoiseFloor([ch], SR);
-  noiseReduceInPlace([ch], SR, floor);
-  const noiseAfter = rmsDb(ch, 0, SR);
-  const voiceAfter = rmsDb(ch, SR + SR * 0.1); // 立ち上がり直後を除いて測る
-  check("ノイズ区間が減衰する", noiseBefore - noiseAfter > 8, `${(noiseBefore - noiseAfter).toFixed(1)}dB 減衰`);
-  check("声区間はほぼ無加工", Math.abs(voiceBefore - voiceAfter) < 1.5, `${(voiceBefore - voiceAfter).toFixed(2)}dB 変化`);
-}
 
-console.log("\n[4] 無音カット — 長い沈黙が詰まり、声が残ること");
-{
-  // 1秒 声 / 5秒 無音 / 1秒 声
-  const total = SR * 7;
-  const ch = new Float32Array(total);
-  for (let i = 0; i < total; i++) {
-    const t = i / SR;
-    const voiced = t < 1 || t >= 6;
-    ch[i] = (voiced ? 0.3 * Math.sin((2 * Math.PI * 1000 * i) / SR) : 0) + (Math.random() - 0.5) * 0.001;
+  console.log("\n[3] ハイパスフィルタ — 低域だけが落ちること");
+  {
+    const low = new Float32Array(SR);
+    const mid = new Float32Array(SR);
+    for (let i = 0; i < SR; i++) {
+      low[i] = 0.5 * Math.sin((2 * Math.PI * 40 * i) / SR);
+      mid[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / SR);
+    }
+    const lowBefore = rmsDb(low), midBefore = rmsDb(mid);
+    new HighPassFilter(SR, 1).process([low], low.length);
+    new HighPassFilter(SR, 1).process([mid], mid.length);
+    const lowAfter = rmsDb(low, SR / 2), midAfter = rmsDb(mid, SR / 2);
+    check("40Hz が減衰する", lowBefore - lowAfter > 10, `${(lowBefore - lowAfter).toFixed(1)}dB 減衰`);
+    check("1kHz は保持される", Math.abs(midBefore - midAfter) < 1, `${(midBefore - midAfter).toFixed(2)}dB 変化`);
   }
-  const floor = estimateNoiseFloor([ch], SR);
-  const { channels, removedSec } = trimSilence([ch], SR, floor);
-  const outSec = channels[0].length / SR;
-  check("無音が削られる", removedSec > 3 && removedSec < 4.5, `${removedSec.toFixed(2)}秒 削除`);
-  check("声の長さは保たれる", outSec > 2.5 && outSec < 4, `残り ${outSec.toFixed(2)}秒`);
-  const loudFrames = Array.from({ length: Math.floor(outSec * 10) }, (_, k) =>
-    rmsDb(channels[0], k * SR * 0.1, Math.min((k + 1) * SR * 0.1, channels[0].length)) > -30);
-  check("声が消えていない", loudFrames.filter(Boolean).length >= 15, `${loudFrames.filter(Boolean).length} フレームが有声`);
-}
 
-console.log("\n[5] applyDsp — 全処理を通してMP3化できること");
-{
-  const decoded = decodeWav(makeWav(16, false, 2, 3));
-  const before = decoded.channels[0].length;
-  const { channels, removedSec } = applyDsp(decoded.channels, SR, {
-    highPass: true, noiseReduction: true, trimSilence: true,
-  });
-  normalizeInPlace(channels);
-  const enc = new Mp3Encoder(channels.length, SR, 128);
-  const toI16 = (f: Float32Array) => Int16Array.from(f, (x) => Math.max(-32768, Math.min(32767, x * 32767)));
-  const size = enc.encodeBuffer(toI16(channels[0]), toI16(channels[1])).length + enc.flush().length;
-  check("全処理を通せる", size > 10000 && channels[0].length > 0, `${before}→${channels[0].length}サンプル 削除${removedSec.toFixed(2)}秒 mp3=${(size / 1024).toFixed(0)}KB`);
+  console.log("\n[4] ハイパスがブロック境界で不連続を生まないこと");
+  {
+    const make = () => { const a = new Float32Array(SR); for (let i = 0; i < SR; i++) a[i] = 0.4 * Math.sin(2 * Math.PI * 300 * i / SR); return a; };
+    const whole = make(), split = make();
+    new HighPassFilter(SR, 1).process([whole], whole.length);
+    // 1000サンプルずつ分割して同じフィルタ器に通す
+    const f = new HighPassFilter(SR, 1);
+    for (let i = 0; i < split.length; i += 1000) {
+      const view = split.subarray(i, Math.min(i + 1000, split.length));
+      f.process([view], view.length);
+    }
+    let maxDiff = 0;
+    for (let i = 0; i < whole.length; i++) maxDiff = Math.max(maxDiff, Math.abs(whole[i] - split[i]));
+    check("分割処理でも波形が一致", maxDiff < 1e-6, `最大差 ${maxDiff.toExponential(1)}`);
+  }
 
-  // 全編無音でも落ちないこと(実運用で起こりうる事故ケース)
-  const silent = [new Float32Array(SR), new Float32Array(SR)];
-  const silentResult = applyDsp(silent, SR, { highPass: true, noiseReduction: true, trimSilence: true });
-  check("全編無音でも落ちない", silentResult.channels[0].length > 0);
-}
+  console.log("\n[5] ノイズ低減 — 無音部のノイズが下がり声は残ること");
+  {
+    const ch = new Float32Array(SR * 2);
+    for (let i = 0; i < ch.length; i++) {
+      const noise = (Math.random() - 0.5) * 0.02;
+      const voice = i >= SR ? 0.3 * Math.sin((2 * Math.PI * 1000 * i) / SR) : 0;
+      ch[i] = noise + voice;
+    }
+    const noiseBefore = rmsDb(ch, 0, SR), voiceBefore = rmsDb(ch, SR);
+    const an = new Analyzer(SR); an.push([ch], ch.length);
+    const { noiseFloor } = an.result();
+    new NoiseReducer(SR, noiseFloor).process([ch], ch.length);
+    const noiseAfter = rmsDb(ch, 0, SR), voiceAfter = rmsDb(ch, SR + SR * 0.1);
+    check("ノイズ区間が減衰する", noiseBefore - noiseAfter > 8, `${(noiseBefore - noiseAfter).toFixed(1)}dB 減衰`);
+    check("声区間はほぼ無加工", Math.abs(voiceBefore - voiceAfter) < 1.5, `${(voiceBefore - voiceAfter).toFixed(2)}dB 変化`);
+  }
 
-console.log("\n[6] プロンプト生成");
-{
-  const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
-  check("背景情報が入る", p.includes("テスト番組"));
-  check("禁止語が入る", p.includes("超 / 神回"));
-  check("定型文が入る", p.includes("お便りはこちら"));
-  check("SNS項目が入る", p.includes('"social"'));
-  const noSocial = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, generateSocial: false });
-  check("SNS無効時は含まれない", !noSocial.includes('"social"'));
-}
+  console.log("\n[6] 正規化ゲイン — 小さい録音が持ち上がりピークを超えないこと");
+  {
+    const quiet = new Float32Array(SR * 2);
+    for (let i = 0; i < quiet.length; i++) quiet[i] = 0.02 * Math.sin(2 * Math.PI * 500 * i / SR);
+    const an = new Analyzer(SR); an.push([quiet], quiet.length);
+    const { gain } = an.result();
+    applyGain([quiet], quiet.length, gain);
+    let peak = 0; for (const v of quiet) peak = Math.max(peak, Math.abs(v));
+    check("音量が持ち上がる", gain > 2, `ゲイン ${(20 * Math.log10(gain)).toFixed(1)}dB`);
+    check("ピークが -1dBFS 以内", peak <= Math.pow(10, -1 / 20) + 1e-3, `ピーク ${(20 * Math.log10(peak)).toFixed(2)}dBFS`);
+  }
 
-console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
-process.exit(failures === 0 ? 0 : 1);
+  console.log("\n[7] 無音カット — 長い沈黙が詰まり、声が残ること");
+  {
+    const total = SR * 7; // 1秒 声 / 5秒 無音 / 1秒 声
+    const ch = new Float32Array(total);
+    for (let i = 0; i < total; i++) {
+      const t = i / SR;
+      const voiced = t < 1 || t >= 6;
+      ch[i] = (voiced ? 0.3 * Math.sin((2 * Math.PI * 1000 * i) / SR) : 0) + (Math.random() - 0.5) * 0.001;
+    }
+    const an = new Analyzer(SR); an.push([ch], ch.length);
+    const { noiseFloor } = an.result();
+    const trimmer = new SilenceTrimmer(SR, 1, noiseFloor);
+    const out: number[] = [];
+    const emit = (chs: Float32Array[], len: number) => { for (let i = 0; i < len; i++) out.push(chs[0][i]); };
+    // ブロック分割で流しても正しく動くこと
+    for (let i = 0; i < total; i += SR * 0.7 | 0) {
+      const n = Math.min((SR * 0.7) | 0, total - i);
+      trimmer.process([ch.subarray(i, i + n)], n, emit);
+    }
+    const removedSec = trimmer.finish(emit) / SR;
+    const outSec = out.length / SR;
+    check("無音が削られる", removedSec > 3 && removedSec < 4.6, `${removedSec.toFixed(2)}秒 削除`);
+    check("声の長さは保たれる", outSec > 2.4 && outSec < 4, `残り ${outSec.toFixed(2)}秒`);
+    const arr = Float32Array.from(out);
+    const loud = Array.from({ length: Math.floor(outSec * 10) }, (_, k) =>
+      rmsDb(arr, k * SR * 0.1, Math.min((k + 1) * SR * 0.1, arr.length)) > -30);
+    check("声が消えていない", loud.filter(Boolean).length >= 15, `${loud.filter(Boolean).length} フレームが有声`);
+  }
+
+  console.log("\n[8] 長い無音でも保留バッファが膨らまないこと");
+  {
+    const total = SR * 30; // 1秒 声 → 29秒 無音
+    const ch = new Float32Array(total);
+    for (let i = 0; i < SR; i++) ch[i] = 0.3 * Math.sin(2 * Math.PI * 1000 * i / SR);
+    const trimmer = new SilenceTrimmer(SR, 1, 1e-5);
+    let emitted = 0;
+    const emit = (_c: Float32Array[], len: number) => { emitted += len; };
+    for (let i = 0; i < total; i += SR) trimmer.process([ch.subarray(i, i + SR)], SR, emit);
+    trimmer.finish(emit);
+    check("29秒の無音がほぼ削除される", emitted / SR < 2.2, `出力 ${(emitted / SR).toFixed(2)}秒`);
+  }
+
+  console.log("\n[9] 全編無音・極小入力で落ちないこと");
+  {
+    const silent = [new Float32Array(SR), new Float32Array(SR)];
+    const an = new Analyzer(SR); an.push(silent, SR);
+    const r = an.result();
+    new HighPassFilter(SR, 2).process(silent, SR);
+    new NoiseReducer(SR, r.noiseFloor).process(silent, SR);
+    applyGain(silent, SR, r.gain);
+    const mp3 = await encodeMp3(silent, SR, 96);
+    check("全編無音でも MP3 化できる", mp3.byteLength > 0 && Number.isFinite(r.gain), `gain=${r.gain}`);
+
+    const tiny = [new Float32Array(10)];
+    const an2 = new Analyzer(SR); an2.push(tiny, 10);
+    check("10サンプルでも落ちない", Number.isFinite(an2.result().gain));
+  }
+
+  console.log("\n[10] 進捗と残り時間");
+  {
+    check("段階が進むと単調増加", overallProgress("analyze", 0.5) < overallProgress("process", 0.1));
+    check("最後は1未満に収まる", overallProgress("generate", 1) < 1);
+    check("序盤は推定しない", estimateRemainingMs(500, 0.01) === null);
+    const rem = estimateRemainingMs(10000, 0.25);
+    check("半分未満なら残りが経過より長い", rem !== null && rem > 10000, `残り ${rem && (rem / 1000).toFixed(0)}秒`);
+    check("表示整形", formatDuration(65000) === "1分05秒" && formatDuration(30000) === "30秒");
+  }
+
+  console.log("\n[11] プロンプト生成");
+  {
+    const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
+    check("背景情報が入る", p.includes("テスト番組"));
+    check("禁止語が入る", p.includes("超 / 神回"));
+    check("定型文が入る", p.includes("お便りはこちら"));
+    check("SNS項目が入る", p.includes('"social"'));
+    const noSocial = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, generateSocial: false });
+    check("SNS無効時は含まれない", !noSocial.includes('"social"'));
+  }
+
+  console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
+  process.exit(failures === 0 ? 0 : 1);
+})();

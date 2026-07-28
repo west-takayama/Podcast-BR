@@ -5,4 +5,6 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   base: "./",
   plugins: [react()],
+  // Worker が WASM エンコーダを動的に読み込むため、コード分割できる ES 形式にする
+  worker: { format: "es" },
 });

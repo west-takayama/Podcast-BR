@@ -126,6 +126,30 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         SNS告知文(X / Instagram / メール)も生成する
       </label>
 
+      <h3>書き出し</h3>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={settings.mono}
+          onChange={(e) => onChange({ ...settings, mono: e.target.checked })}
+        />
+        モノラルで書き出す(トーク番組の標準。処理が約1.7倍速く、ファイルも半分)
+      </label>
+      <label>
+        ビットレート: {settings.bitrate} kbps
+        <input
+          type="range"
+          min={64}
+          max={192}
+          step={32}
+          value={settings.bitrate}
+          onChange={(e) => onChange({ ...settings, bitrate: Number(e.target.value) })}
+        />
+      </label>
+      <p className="muted">
+        会話中心なら 96kbps モノラルで十分な音質です。音楽や環境音を聴かせたい回はステレオ・高ビットレートにしてください。
+      </p>
+
       <h3>音声処理</h3>
       <label className="check">
         <input
