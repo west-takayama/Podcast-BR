@@ -4,6 +4,7 @@ import { loadSettings, saveSettings, type Settings } from "./lib/settings";
 import { saveEpisode, updateEpisode } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import { ScreenWakeLock } from "./lib/wakeLock";
+import { applyAccent } from "./lib/theme";
 import SettingsPanel from "./components/SettingsPanel";
 import ResultView from "./components/ResultView";
 import HistoryPanel from "./components/HistoryPanel";
@@ -39,6 +40,10 @@ export default function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  useEffect(() => {
+    applyAccent(settings.accentColor);
+  }, [settings.accentColor]);
 
   useEffect(() => {
     mp3UrlRef.current = mp3Url;
@@ -231,11 +236,7 @@ export default function App() {
       )}
 
       {tab === "settings" && (
-        <SettingsPanel
-          settings={settings}
-          onChange={setSettings}
-          onClose={() => setTab("create")}
-        />
+        <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setTab("create")} />
       )}
 
       {tab === "history" && (
@@ -245,6 +246,8 @@ export default function App() {
           }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
+          apiKey={settings.apiKey}
+          imageModel={settings.imageModel || null}
         />
       )}
 
@@ -291,6 +294,8 @@ export default function App() {
                 fileName={outputName}
                 showName={settings.prompt.showName}
                 accentColor={settings.accentColor}
+                apiKey={settings.apiKey}
+                imageModel={settings.imageModel || null}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する

@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import type { Settings } from "../lib/settings";
 import { TONE_LABELS, TITLE_STYLE_LABELS, type Tone, type TitleStyle } from "../lib/prompt";
-import { listModels, pickDefaultModel, type ModelInfo } from "../lib/gemini";
+import { listModels, pickDefaultModel, pickImageModel, type ModelInfo } from "../lib/gemini";
 
 interface Props {
   settings: Settings;
-  onChange: (next: Settings) => void;
+  /**
+   * setState と同じ形にしてある。モデル一覧の取得は非同期で、
+   * その間に利用者が別の項目を編集しうるため、更新関数を渡せる必要がある。
+   */
+  onChange: Dispatch<SetStateAction<Settings>>;
   onClose: () => void;
 }
 
@@ -26,11 +30,28 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       listModels(settings.apiKey, controller.signal)
         .then((list) => {
           setModels(list);
-          // 保存済みのモデルが廃止されていたら、使えるものへ寄せておく
-          if (list.length > 0 && !list.some((m) => m.id === settings.model)) {
-            const fallback = pickDefaultModel(list);
-            if (fallback) onChange({ ...settings, model: fallback });
-          }
+          // 取得中に編集された項目を消さないよう、必ず最新の設定を基に更新する
+          onChange((prev) => {
+            const next = { ...prev };
+            let changed = false;
+            // 保存済みのモデルが廃止されていたら、使えるものへ寄せておく
+            if (list.length > 0 && !list.some((m) => m.id === prev.model && !m.image)) {
+              const fallback = pickDefaultModel(list);
+              if (fallback) {
+                next.model = fallback;
+                changed = true;
+              }
+            }
+            // イラスト用モデルは利用者に選ばせず、無料枠のあるものを自動で採る
+            if (!list.some((m) => m.id === prev.imageModel && m.image)) {
+              const picked = pickImageModel(list) ?? "";
+              if (picked !== prev.imageModel) {
+                next.imageModel = picked;
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
         })
         .catch((e: unknown) => {
           if (e instanceof DOMException && e.name === "AbortError") return;
@@ -80,12 +101,14 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
           onChange={(e) => onChange({ ...settings, model: e.target.value })}
         >
           {models === null && <option>{settings.apiKey ? "取得中…" : "APIキーを入力してください"}</option>}
-          {models?.map((m, i) => (
-            <option key={m.id} value={m.id}>
-              {m.id}
-              {i === 0 ? "(推奨)" : ""}
-            </option>
-          ))}
+          {models
+            ?.filter((m) => !m.image)
+            .map((m, i) => (
+              <option key={m.id} value={m.id}>
+                {m.id}
+                {i === 0 ? "(推奨)" : ""}
+              </option>
+            ))}
         </select>
       </label>
       {modelError ? (
@@ -194,6 +217,9 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       </label>
       <p className="muted">
         告知画像の差し色です。毎回同じ色にしておくと、並んだときに番組として見分けやすくなります。
+        {settings.imageModel
+          ? ` AIイラストの生成には ${settings.imageModel} を使います。`
+          : " このキーではAIイラストの生成は利用できません。"}
       </p>
 
       <h3>書き出し</h3>

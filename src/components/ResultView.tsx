@@ -10,6 +10,8 @@ interface Props {
   fileName?: string;
   showName: string;
   accentColor: string;
+  apiKey?: string;
+  imageModel?: string | null;
 }
 
 function Block({
@@ -40,6 +42,8 @@ export default function ResultView({
   fileName,
   showName,
   accentColor,
+  apiKey,
+  imageModel,
 }: Props) {
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
@@ -129,6 +133,9 @@ export default function ResultView({
         title={chosenTitle || meta.titles[0]}
         showName={showName}
         accent={accentColor}
+        apiKey={apiKey}
+        imageModel={imageModel}
+        subject={[meta.transcriptSummary, meta.keywords.join("、")].filter(Boolean).join(" / ")}
       />
 
       {meta.social && (

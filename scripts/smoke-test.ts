@@ -10,7 +10,7 @@ import {
 import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
-import { listModels, pickDefaultModel } from "../src/lib/gemini";
+import { listModels, pickDefaultModel, pickImageModel } from "../src/lib/gemini";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese, PRESETS } from "../src/lib/image";
 
@@ -228,6 +228,8 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
         { name: "models/gemini-3.5-flash-preview-05-20", supportedGenerationMethods: ["generateContent"] },
         { name: "models/gemini-3.1-flash-lite", supportedGenerationMethods: ["generateContent"] },
         { name: "models/gemini-3-pro", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3.1-flash-image", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3-pro-image-preview", supportedGenerationMethods: ["generateContent"] },
         { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
         { name: "models/imagen-4.0", supportedGenerationMethods: ["generateContent"] },
         { name: "models/veo-3", supportedGenerationMethods: ["generateContent"] },
@@ -245,6 +247,9 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("プレビュー版は安定版より後", ids.indexOf("gemini-3.5-flash-preview-05-20") > ids.indexOf("gemini-3.5-flash"));
     check("古い世代は後ろ", ids.indexOf("gemini-2.5-flash") > ids.indexOf("gemini-3.5-flash"));
     check("空の一覧でも落ちない", pickDefaultModel([]) === null);
+    check("テキスト用に画像モデルを選ばない", !pickDefaultModel(models)!.includes("image"));
+    check("イラストは無料枠のある flash 系", pickImageModel(models) === "gemini-3.1-flash-image", String(pickImageModel(models)));
+    check("画像モデルが無ければ null", pickImageModel(models.filter((m) => !m.image)) === null);
   }
 
   console.log("\n[12] 告知画像の折り返しと禁則処理");
