@@ -243,6 +243,8 @@ export default function App() {
           onChooseTitle={(id, title) => {
             updateEpisode(id, { chosenTitle: title });
           }}
+          showName={settings.prompt.showName}
+          accentColor={settings.accentColor}
         />
       )}
 
@@ -287,6 +289,8 @@ export default function App() {
                 }}
                 audioUrl={mp3Url}
                 fileName={outputName}
+                showName={settings.prompt.showName}
+                accentColor={settings.accentColor}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する

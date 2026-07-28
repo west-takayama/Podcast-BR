@@ -1,4 +1,5 @@
 import CopyButton from "./CopyButton";
+import ImageCards from "./ImageCards";
 import type { EpisodeMeta } from "../lib/gemini";
 
 interface Props {
@@ -7,6 +8,8 @@ interface Props {
   onChooseTitle: (title: string) => void;
   audioUrl?: string;
   fileName?: string;
+  showName: string;
+  accentColor: string;
 }
 
 function Block({
@@ -35,6 +38,8 @@ export default function ResultView({
   onChooseTitle,
   audioUrl,
   fileName,
+  showName,
+  accentColor,
 }: Props) {
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
@@ -118,6 +123,13 @@ export default function ResultView({
           </Block>
         )}
       </div>
+
+      <ImageCards
+        quote={meta.imageQuote || chosenTitle || meta.titles[0]}
+        title={chosenTitle || meta.titles[0]}
+        showName={showName}
+        accent={accentColor}
+      />
 
       {meta.social && (
         <div className="card">

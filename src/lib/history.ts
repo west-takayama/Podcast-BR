@@ -82,6 +82,25 @@ async function pruneAudio(): Promise<void> {
   }
 }
 
+/** 履歴をすべて消す。 */
+export async function deleteAllEpisodes(): Promise<void> {
+  await tx("readwrite", (s) => s.clear());
+}
+
+/** 本文は残したまま音声だけ消す。端末の空き容量を取り戻すため。 */
+export async function dropAllAudio(): Promise<void> {
+  const all = await listEpisodes();
+  for (const record of all) {
+    if (!record.audio) continue;
+    const { audio: _audio, ...rest } = record;
+    await tx("readwrite", (s) => s.put(rest as EpisodeRecord));
+  }
+}
+
+export function totalAudioBytes(records: EpisodeRecord[]): number {
+  return records.reduce((n, r) => n + (r.audio?.size ?? 0), 0);
+}
+
 export function formatDate(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, "0");

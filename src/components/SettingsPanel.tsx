@@ -98,6 +98,15 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
 
       <h3>番組の個性</h3>
       <label>
+        番組名(告知画像にも入ります)
+        <input
+          type="text"
+          value={settings.prompt.showName}
+          placeholder="例: ◯◯ラジオ"
+          onChange={(e) => setPrompt("showName", e.target.value)}
+        />
+      </label>
+      <label>
         番組の背景情報(生成品質が大きく上がります)
         <textarea
           value={settings.prompt.showContext}
@@ -173,6 +182,19 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         />
         SNS告知文(X / Instagram / メール)も生成する
       </label>
+
+      <h3>告知画像</h3>
+      <label>
+        アクセント色
+        <input
+          type="color"
+          value={settings.accentColor}
+          onChange={(e) => onChange({ ...settings, accentColor: e.target.value })}
+        />
+      </label>
+      <p className="muted">
+        告知画像の差し色です。毎回同じ色にしておくと、並んだときに番組として見分けやすくなります。
+      </p>
 
       <h3>書き出し</h3>
       <label className="check">
