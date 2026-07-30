@@ -214,6 +214,33 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
   return canvas;
 }
 
+/**
+ * 取り込んだ画像を、文字を重ねずにプリセットの寸法へ収める。
+ *
+ * ChatGPT などで題名まで描いてもらった画像を使う場合、こちらで文字を重ねると
+ * 二重になる。縦横比が違うプリセットに合わせる切り出しだけを行う。
+ */
+export function renderPlainImage(
+  spec: PresetSpec,
+  image: CanvasImageSource & { width: number; height: number },
+): HTMLCanvasElement {
+  const { width: W, height: H } = spec;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("画像を描画できませんでした");
+
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(0, 0, W, H);
+  // 短辺に合わせて拡大し、はみ出す分を均等に切る(歪ませない)
+  const scale = Math.max(W / image.width, H / image.height);
+  const dw = image.width * scale;
+  const dh = image.height * scale;
+  ctx.drawImage(image, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  return canvas;
+}
+
 export function canvasToBlob(
   canvas: HTMLCanvasElement,
   type = "image/png",
