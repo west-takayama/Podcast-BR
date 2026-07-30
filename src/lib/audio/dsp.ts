@@ -218,9 +218,10 @@ export class Analyzer {
    * 下位パーセンタイルなのは、完全な無音や単発のクリックに引きずられずに
    * 「常時鳴っている環境音」を捉えるため。
    */
-  result(): { noiseFloor: number; gain: number; peak: number } {
+  result(): { noiseFloor: number; gain: number; peak: number; voiceRms: number } {
     this.flush();
-    if (this.rms.length === 0 || this.peak === 0) return { noiseFloor: 0, gain: 1, peak: 0 };
+    if (this.rms.length === 0 || this.peak === 0)
+      return { noiseFloor: 0, gain: 1, peak: 0, voiceRms: 0 };
 
     const noiseFloor = percentileFloor(this.rms);
 
@@ -236,13 +237,13 @@ export class Analyzer {
       }
     }
     const referenceRms = n > 0 ? Math.sqrt(sum / n) : Math.sqrt(this.rms.reduce((a, r) => a + r * r, 0) / this.rms.length);
-    if (referenceRms <= 0) return { noiseFloor, gain: 1, peak: this.peak };
+    if (referenceRms <= 0) return { noiseFloor, gain: 1, peak: this.peak, voiceRms: 0 };
 
     let gainDb = TARGET_RMS_DB - 20 * Math.log10(referenceRms);
     const peakDb = 20 * Math.log10(this.peak);
     if (peakDb + gainDb > PEAK_LIMIT_DB) gainDb = PEAK_LIMIT_DB - peakDb;
 
-    return { noiseFloor, gain: Math.pow(10, gainDb / 20), peak: this.peak };
+    return { noiseFloor, gain: Math.pow(10, gainDb / 20), peak: this.peak, voiceRms: referenceRms };
   }
 }
 

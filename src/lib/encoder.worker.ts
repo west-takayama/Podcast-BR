@@ -27,6 +27,7 @@ import {
   type DspOptions,
 } from "./audio/dsp";
 import { LoudnessMeter, gainForTarget, targetLufs } from "./audio/loudness";
+import { Diagnostics } from "./audio/diagnostics";
 import { CEILING_DBFS, Limiter } from "./audio/limiter";
 import { openAudio, type BlockHandler, type BlockReader } from "./audio/source";
 import { Mp3Stream } from "./audio/mp3";
@@ -82,13 +83,26 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // --- 1回目: ノイズフロアを測る ---
     // ハイパスを通してから測る。低域の暗騒音を含んだままだと過大評価になる。
     const analyzer = new Analyzer(info.sampleRate);
+    // 収録そのものの問題は、処理を通す前の生の状態でないと分からない
+    const diagnostics = new Diagnostics();
+    const rawMeter = new LoudnessMeter(info.sampleRate, info.numChannels);
     const floorHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
     await forEachBlock(file, info, (channels, length, fraction) => {
+      diagnostics.push(channels, length);
+      rawMeter.push(channels, length);
       if (floorHp) floorHp.process(channels, length);
       analyzer.push(channels, length);
       post("analyze", fraction / 3);
     });
-    const { noiseFloor } = analyzer.result();
+    const { noiseFloor, voiceRms } = analyzer.result();
+    // SNR は「声が鳴っている区間の RMS」と比べる。全体の RMS で比べると
+    // 沈黙の多い回ほど声が小さく見え、環境音の警告が誤って出る。
+    const findings = diagnostics.result(
+      info.sampleRate,
+      rawMeter.integratedLufs(),
+      noiseFloor,
+      voiceRms,
+    );
     // 2人別マイクの独立処理では、チャンネルごとのノイズフロアを使う
     const perChannel = dsp.perChannelNoise && info.numChannels > 1;
     const floors: number | number[] = perChannel ? analyzer.channelNoiseFloors() : noiseFloor;
@@ -272,6 +286,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         limitedSamples: limiter.reducedSamples,
         // チャプター時刻を吸着させるための候補位置(秒)
         pauses: pauses.result(),
+        // 収録そのものの問題。次回の設定で直せるものが多いので伝える
+        findings,
       },
       [publishMp3, aiMp3],
     );

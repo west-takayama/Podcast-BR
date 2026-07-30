@@ -11,6 +11,7 @@ import {
 import { loadSettings, saveSettings, type Settings } from "./lib/settings";
 import { listEpisodes, saveEpisode, updateEpisode } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
+import type { Finding } from "./lib/audio/diagnostics";
 import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
 import { ScreenWakeLock } from "./lib/wakeLock";
@@ -38,6 +39,8 @@ export interface AudioReport {
   correctionDb: number;
   /** 入力ファイルの形式(表示用)。 */
   inputFormat: string;
+  /** 収録そのものの問題。 */
+  findings: Finding[];
 }
 
 export default function App() {
@@ -63,6 +66,16 @@ export default function App() {
   const [chapterNote, setChapterNote] = useState("");
   const [previousTitles, setPreviousTitles] = useState<string[]>([]);
 
+  // 生成が失敗しても変換をやり直さずに済むよう、変換結果を保持しておく。
+  // 60分の回では変換だけで数分かかるため、レート制限のたびに捨てるのは損が大きい。
+  const convertedRef = useRef<{
+    mp3: ArrayBuffer;
+    aiMp3: ArrayBuffer;
+    durationSec: number;
+    removedSec: number;
+    pauses: number[];
+    fileName: string;
+  } | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mp3UrlRef = useRef("");
@@ -148,6 +161,7 @@ export default function App() {
     setTranscript(null);
     setChapterNote("");
     setBusyText("");
+    convertedRef.current = null;
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
   };
@@ -313,6 +327,7 @@ export default function App() {
         correctionDb: number;
         pauses: number[];
         inputFormat: string;
+        findings: Finding[];
       }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
@@ -339,6 +354,15 @@ export default function App() {
       workerRef.current?.terminate();
       workerRef.current = null;
 
+      convertedRef.current = {
+        mp3: result.mp3,
+        aiMp3: result.aiMp3,
+        durationSec: result.durationSec,
+        removedSec: result.removedSec,
+        pauses: result.pauses,
+        fileName: file.name,
+      };
+
       setAudioReport({
         sourceLufs: result.sourceLufs,
         outputLufs: result.outputLufs,
@@ -351,23 +375,43 @@ export default function App() {
         sampleRate: result.sampleRate,
         correctionDb: result.correctionDb,
         inputFormat: result.inputFormat,
+        findings: result.findings,
       });
 
       // 生成前でもダウンロードできるよう、まずタグ無しで出しておく
       setMp3Url(URL.createObjectURL(new Blob([result.mp3], { type: "audio/mpeg" })));
 
       advance("upload", 0);
+      await runGeneration();
+    } catch (err) {
+      void wakeLockRef.current.stop();
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setError(err instanceof Error ? err.message : String(err));
+      setPhase("idle");
+    }
+  };
+
+  /**
+   * 変換済みの音声から生成だけを行う。失敗しても変換をやり直さずに再試行できる。
+   * すでにアップロード済みなら送信も省く。
+   */
+  const runGeneration = async () => {
+    const converted = convertedRef.current;
+    if (!converted) throw new Error("変換結果がありません。もう一度アップロードしてください。");
+
+    try {
       const controller = new AbortController();
       abortRef.current = controller;
-      let uploadedAudio: UploadedAudio | null = null;
+      let uploadedAudio: UploadedAudio | null = uploaded;
       const raw = await generateEpisodeMeta({
         apiKey: settings.apiKey,
         model: settings.model,
-        mp3: result.aiMp3,
+        mp3: converted.aiMp3,
+        audio: uploaded ?? undefined,
         config: settings.prompt,
         context: {
-          pauses: result.pauses,
-          durationSec: result.durationSec,
+          pauses: converted.pauses,
+          durationSec: converted.durationSec,
           previousTitles,
         },
         onStatus: (text) => {
@@ -375,7 +419,7 @@ export default function App() {
           else if (text.includes("解析")) advance("upload", 1, text);
         },
         onUploadProgress: (f) =>
-          advance("upload", f, `${(result.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
+          advance("upload", f, `${(converted.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
         // 廃止されたモデルから自動で切り替わったら、次回以降のために保存し直す
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         onUploaded: (a) => {
@@ -388,9 +432,9 @@ export default function App() {
       void wakeLockRef.current.stop();
 
       // AI の推定時刻を、端末側で検出した実際の切り替わり位置へ寄せる
-      const snap = snapChapters(raw.chapters, result.pauses);
+      const snap = snapChapters(raw.chapters, converted.pauses);
       const generated: EpisodeMeta = { ...raw, chapters: snap.chapters };
-      setPauses(result.pauses);
+      setPauses(converted.pauses);
       setTranscript(null);
       setChapterNote(
         snap.movedCount > 0
@@ -403,7 +447,12 @@ export default function App() {
       // タイトルとチャプターが揃ってから ID3 タグを付ける。
       // アートワークも埋め込むので、プレイヤーで番組として正しく表示される。
       // 結果画面を出す前に差し替えないと、タグ無しの MP3 をダウンロードされうる。
-      const blob = await buildTaggedMp3(result.mp3, generated, title, result.durationSec);
+      const blob = await buildTaggedMp3(
+        converted.mp3,
+        generated,
+        title,
+        converted.durationSec,
+      );
       setMp3Url((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(blob);
@@ -420,21 +469,40 @@ export default function App() {
       saveEpisode({
         id,
         createdAt: Date.now(),
-        fileName: file.name,
-        durationSec: result.durationSec,
-        removedSec: result.removedSec,
+        fileName: converted.fileName,
+        durationSec: converted.durationSec,
+        removedSec: converted.removedSec,
         meta: generated,
         chosenTitle: title,
         audio: blob,
         uploaded: uploadedAudio ?? undefined,
-        pauses: result.pauses,
+        pauses: converted.pauses,
       }).catch(() =>
         setError(
           "結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)",
         ),
       );
-    } catch (err) {
+    } finally {
+      abortRef.current = null;
       void wakeLockRef.current.stop();
+    }
+  };
+
+  /**
+   * 生成だけをやり直す。変換は済んでいるので数十秒で終わる。
+   * 無料枠ではレート制限(429)に当たることがあり、そのたびに数分かけた変換を
+   * 捨てるのは損が大きいため、この経路を用意している。
+   */
+  const retryGeneration = async () => {
+    setError("");
+    setPhase("running");
+    startedAtRef.current = Date.now();
+    smoothedRemainingRef.current = null;
+    advance("upload", 0);
+    void wakeLockRef.current.start();
+    try {
+      await runGeneration();
+    } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setPhase("idle");
@@ -461,10 +529,20 @@ export default function App() {
       {error && (
         <div className="error">
           ⚠️ {error}
-          {mp3Url && phase !== "done" && (
-            <a className="dl" href={mp3Url} download={outputName}>
-              ⬇️ 変換済み MP3 をダウンロード
-            </a>
+          {/* 変換は済んでいるので、生成だけやり直せば数十秒で終わる */}
+          {convertedRef.current && phase === "idle" && (
+            <>
+              <button className="primary" onClick={retryGeneration}>
+                {isAudioUsable(uploaded)
+                  ? "🔄 生成だけやり直す(変換済み・送信も不要)"
+                  : "🔄 生成だけやり直す(変換はやり直しません)"}
+              </button>
+              {mp3Url && (
+                <a className="dl" href={mp3Url} download={outputName}>
+                  ⬇️ 変換済み MP3 をダウンロード
+                </a>
+              )}
+            </>
           )}
         </div>
       )}

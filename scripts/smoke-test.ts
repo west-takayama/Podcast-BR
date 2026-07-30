@@ -14,6 +14,7 @@ import { listModels, pickDefaultModel, pickImageModel, snapChapters, transcriptT
 import { PauseDetector } from "../src/lib/audio/dsp";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese, PRESETS } from "../src/lib/image";
+import { Diagnostics } from "../src/lib/audio/diagnostics";
 
 const SR = 44100;
 let failures = 0;
@@ -382,6 +383,98 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const withPrev = buildPrompt(DEFAULT_PROMPT_CONFIG, { previousTitles: ["#12 前回の話", "#11 その前"] });
     check("過去回のタイトルが入る", withPrev.includes("#12 前回の話") && withPrev.includes("続きの番号"));
     check("過去回が無ければ触れない", !buildPrompt(DEFAULT_PROMPT_CONFIG).includes("直近の回のタイトル"));
+  }
+
+  console.log("\n[18] 収録の診断");
+  {
+    const SR = 48000;
+    // 声らしい信号を作る。無音区間にも暗騒音を入れる(実際の収録に合わせる)
+    const speech = (n: number, amp: number) => {
+      const out = new Float32Array(n);
+      let seed = 3;
+      for (let i = 0; i < n; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        const t = i / SR;
+        out[i] = amp * (Math.sin(2 * Math.PI * 190 * t) * 0.7 + (seed / 0x7fffffff - 0.5) * 0.2);
+      }
+      return out;
+    };
+
+    const titles = (f: ReturnType<Diagnostics["result"]>) => f.map((x) => x.title).join(" / ");
+    const n = SR * 4;
+
+    // 良好な収録では何も言わない
+    {
+      const d = new Diagnostics();
+      const ch = speech(n, 0.4);
+      d.push([ch, ch], n);
+      const f = d.result(SR, -20, 0.002, 0.28);
+      check("良好な音源では警告を出さない", f.length === 0, titles(f) || "(なし)");
+    }
+
+    // 位相反転はモノラル化で音が消えるため critical
+    {
+      const d = new Diagnostics();
+      const l = speech(n, 0.4);
+      const r = Float32Array.from(l, (v) => -v);
+      d.push([l, r], n);
+      const f = d.result(SR, -20, 0.002, 0.28);
+      const phase = f.find((x) => x.title.includes("位相"));
+      check("位相反転を検出する", !!phase, titles(f));
+      check("位相反転は critical", phase?.severity === "critical", phase?.severity);
+    }
+
+    // 片チャンネルが録れていない
+    {
+      const d = new Diagnostics();
+      d.push([speech(n, 0.4), new Float32Array(n)], n);
+      const f = d.result(SR, -20, 0.002, 0.28);
+      check("無音チャンネルを検出する", f.some((x) => x.title.includes("チャンネル")), titles(f));
+    }
+
+    // クリッピング
+    {
+      const d = new Diagnostics();
+      const ch = Float32Array.from(speech(n, 1.6), (v) => Math.max(-1, Math.min(1, v)));
+      d.push([ch], n);
+      const f = d.result(SR, -12, 0.002, 0.6);
+      const clip = f.find((x) => x.title.includes("クリッピング"));
+      check("クリッピングを検出する", !!clip, titles(f));
+      check("助言が付く", !!clip?.advice?.includes("レベル"), clip?.advice?.slice(0, 20));
+    }
+
+    // 直流オフセット
+    {
+      const d = new Diagnostics();
+      const ch = Float32Array.from(speech(n, 0.3), (v) => v + 0.05);
+      d.push([ch], n);
+      const f = d.result(SR, -20, 0.002, 0.21);
+      check("直流オフセットを検出する", f.some((x) => x.title.includes("直流")), titles(f));
+    }
+
+    // 録音レベルが低い / 環境音が大きい
+    {
+      const d = new Diagnostics();
+      const ch = speech(n, 0.01);
+      d.push([ch], n);
+      const quiet = d.result(SR, -45, 0.004, 0.007);
+      check("録音レベルの低さを検出する", quiet.some((x) => x.title.includes("レベル")), titles(quiet));
+      check("環境音の大きさを検出する", quiet.some((x) => x.title.includes("環境音")), titles(quiet));
+    }
+
+    // 沈黙が多い回でも環境音の警告を誤って出さない(声の区間の RMS で比較する)
+    {
+      const d = new Diagnostics();
+      const ch = new Float32Array(n);
+      ch.set(speech(n / 4, 0.4)); // 4分の1だけ話している
+      d.push([ch], n);
+      const f = d.result(SR, -22, 0.002, 0.28);
+      check("沈黙が多くても環境音の警告を出さない",
+        !f.some((x) => x.title.includes("環境音")), titles(f) || "(なし)");
+    }
+
+    // 無音を渡しても落ちない
+    check("空の入力で落ちない", new Diagnostics().result(SR, -Infinity, 0, 0).length === 0);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);

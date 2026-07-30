@@ -3,6 +3,7 @@ import ImageCards from "./ImageCards";
 import { useEffect, useState } from "react";
 import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
 import type { AudioReport } from "../App";
+import type { Finding } from "../lib/audio/diagnostics";
 
 interface Props {
   meta: EpisodeMeta;
@@ -168,6 +169,37 @@ function Block({
   );
 }
 
+const SEVERITY_LABEL = {
+  critical: { icon: "⛔", label: "要対応" },
+  warning: { icon: "⚠️", label: "注意" },
+  info: { icon: "ℹ️", label: "参考" },
+} as const;
+
+/**
+ * 収録そのものの問題。次回の設定で直せるものが多いので、事実と助言を並べて示す。
+ * 処理は続行しているので、あくまで情報として出す。
+ */
+function DiagnosticsPanel({ findings }: { findings: Finding[] }) {
+  const critical = findings.filter((f) => f.severity === "critical").length;
+  return (
+    <div className={`card diag${critical > 0 ? " diag-critical" : ""}`}>
+      <h2>🔍 収録の診断</h2>
+      {findings.map((f, i) => (
+        <div className={`finding finding-${f.severity}`} key={i}>
+          <div className="finding-head">
+            {SEVERITY_LABEL[f.severity].icon} {f.title}
+          </div>
+          <div className="muted">{f.detail}</div>
+          {f.advice && <div className="finding-advice">→ {f.advice}</div>}
+        </div>
+      ))}
+      <p className="muted">
+        処理は完了しています。上の内容は次回の収録で改善できる点です。
+      </p>
+    </div>
+  );
+}
+
 /** 仕上がりの実測値。音量が基準内に収まったかを確認できるようにする。 */
 function AudioSpec({ report }: { report: AudioReport }) {
   const db = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : "—");
@@ -273,6 +305,10 @@ export default function ResultView({
             タイトル・番組名・説明文・アートワーク・チャプターを MP3 に埋め込んでいます。
           </p>
         </div>
+      )}
+
+      {audioReport && audioReport.findings.length > 0 && (
+        <DiagnosticsPanel findings={audioReport.findings} />
       )}
 
       {audioReport && <AudioSpec report={audioReport} />}
