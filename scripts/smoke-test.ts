@@ -15,6 +15,7 @@ import { PauseDetector } from "../src/lib/audio/dsp";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese, PRESETS } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
+import { buildImagePrompt } from "../src/lib/imagePrompt";
 
 const SR = 44100;
 let failures = 0;
@@ -475,6 +476,35 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
 
     // 無音を渡しても落ちない
     check("空の入力で落ちない", new Diagnostics().result(SR, -Infinity, 0, 0).length === 0);
+  }
+
+  console.log("\n[19] ChatGPT に渡す画像の注文文");
+  {
+    const p = buildImagePrompt({
+      headline: "AIに任せられる仕事、まだ無理な仕事",
+      showName: "ブリッジラジオ",
+      subject: "生成AIを業務で1週間使った記録",
+      accent: "#ffd400",
+      shape: "square",
+    });
+    check("題名を鍵括弧で囲んで渡す", p.includes("「AIに任せられる仕事、まだ無理な仕事」"));
+    check("一字一句そのままと指示する", p.includes("一字一句"));
+    check("指定外の文字を足させない", p.includes("透かし"));
+    check("番組名を小さく入れる", p.includes("小さく: 「ブリッジラジオ」"));
+    check("アクセント色を渡す", p.includes("#ffd400"));
+    check("話題を渡す", p.includes("生成AIを業務で1週間使った記録"));
+    check("正方形の用途を伝える", p.includes("1:1") && p.includes("Instagram"));
+    check("崩れたときの直し方を添える", p.includes("描き直して"));
+
+    const tall = buildImagePrompt({
+      headline: "題名",
+      showName: "",
+      accent: "#ffd400",
+      shape: "story",
+    });
+    check("縦長では9:16を指定する", tall.includes("9:16"));
+    check("番組名が空なら触れない", !tall.includes("小さく:"));
+    check("題材が無ければ触れない", !tall.includes("話している内容"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
