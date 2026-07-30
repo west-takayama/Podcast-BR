@@ -279,6 +279,18 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       <label className="check">
         <input
           type="checkbox"
+          checked={settings.dsp.perChannelNoise}
+          onChange={(e) => setDsp("perChannelNoise", e.target.checked)}
+        />
+        2人を別マイクで左右に分けて録っている(チャンネルごとに独立してノイズ低減)
+      </label>
+      <p className="muted">
+        話していない人のマイクの環境音を個別に抑えられます。左右で同じ音を録っている素材で有効にすると定位が崩れるため、別マイクのときだけ入れてください。
+      </p>
+
+      <label className="check">
+        <input
+          type="checkbox"
           checked={settings.dsp.trimSilence}
           onChange={(e) => setDsp("trimSilence", e.target.checked)}
         />

@@ -79,6 +79,8 @@ export interface PromptContext {
   pauses?: number[];
   /** 音声の長さ(秒)。ありえない時刻を返させないために伝える。 */
   durationSec?: number;
+  /** 直近の回のタイトル。番号の付け方や切り口の重複を避けるために渡す。 */
+  previousTitles?: string[];
 }
 
 export function buildPrompt(config: PromptConfig, context: PromptContext = {}): string {
@@ -96,6 +98,17 @@ export function buildPrompt(config: PromptConfig, context: PromptContext = {}): 
     .filter(Boolean)
     .join("\n");
   if (background) sections.push(`# 番組の背景\n${background}`);
+
+  if (context.previousTitles && context.previousTitles.length > 0) {
+    sections.push(`# 直近の回のタイトル(新しい順)
+${context.previousTitles.map((t) => `- ${t}`).join("\n")}
+
+これを踏まえて:
+- 番号や記号の付け方(「#12」「第12回」など)が使われていれば、同じ体裁で続きの番号にする。
+  使われていなければ番号を付けない。
+- 過去回と同じ切り口・同じ言い回しの繰り返しを避ける。
+- ただし今回の内容が過去回と関連する場合は、その繋がりが伝わる表現にしてよい。`);
+  }
 
   sections.push(`# 文体
 - トーン: ${TONE_LABELS[config.tone]}

@@ -318,7 +318,53 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("話者が空なら時刻だけ", text.includes("00:12\n本題です。"), JSON.stringify(text.slice(-20)));
   }
 
-  console.log("\n[16] プロンプト生成");
+  console.log("\n[16] 2人別マイクの独立ノイズ低減");
+  {
+    // 実際の対話に近い形。8秒周期で:
+    //   0-3s 左が話す / 3-3.5s 両方沈黙 / 3.5-6.5s 右が話す / 6.5-8s 両方沈黙
+    // 各マイクには常に環境音が乗っている。
+    const cycle = 8, n = SR * cycle * 3;
+    const leftSpeaks = (t: number) => (t % cycle) < 3;
+    const rightSpeaks = (t: number) => (t % cycle) >= 3.5 && (t % cycle) < 6.5;
+    const make = () => {
+      const l = new Float32Array(n), r = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const t = i / SR;
+        l[i] = (leftSpeaks(t) ? 0.25 * Math.sin(2*Math.PI*300*i/SR) : 0) + (Math.random()-0.5)*0.004;
+        r[i] = (rightSpeaks(t) ? 0.25 * Math.sin(2*Math.PI*440*i/SR) : 0) + (Math.random()-0.5)*0.004;
+      }
+      return [l, r];
+    };
+    // 「左が話していて、右は話し終えて十分に時間が経っている」区間を測る。
+    // リリース(150ms)があるため直後は減衰しない。これは語尾を切らないための挙動。
+    const from = Math.round(SR * 9.5), to = Math.round(SR * 11);
+
+    const linked = make(), independent = make();
+    const an = new Analyzer(SR); an.push(linked, n);
+    const floors = an.channelNoiseFloors();
+    check("チャンネルごとのノイズフロアが取れる",
+      floors.length === 2 && floors.every((f) => f > 0 && f < 0.01),
+      floors.map((f) => f.toExponential(1)).join(", "));
+
+    const beforeIdle = rmsDb(linked[1], from, to);
+    const beforeVoice = rmsDb(linked[0], from, to);
+
+    new NoiseReducer(SR, an.result().noiseFloor, false).process(linked, n);
+    new NoiseReducer(SR, floors, true).process(independent, n);
+
+    const idleLinked = rmsDb(linked[1], from, to), idleIndep = rmsDb(independent[1], from, to);
+    const voiceLinked = rmsDb(linked[0], from, to), voiceIndep = rmsDb(independent[0], from, to);
+
+    check("連動では話していない側の環境音が残る", idleLinked > beforeIdle - 2,
+      `処理前 ${beforeIdle.toFixed(1)}dB → 連動 ${idleLinked.toFixed(1)}dB`);
+    check("独立では話していない側の環境音が下がる", idleIndep < idleLinked - 6,
+      `連動 ${idleLinked.toFixed(1)}dB → 独立 ${idleIndep.toFixed(1)}dB`);
+    check("話している側はどちらでも保たれる",
+      Math.abs(voiceIndep - beforeVoice) < 1 && Math.abs(voiceLinked - beforeVoice) < 1,
+      `処理前 ${beforeVoice.toFixed(1)} / 連動 ${voiceLinked.toFixed(1)} / 独立 ${voiceIndep.toFixed(1)} dB`);
+  }
+
+  console.log("\n[17] プロンプト生成");
   {
     const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "", showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
     check("背景情報が入る", p.includes("テスト番組"));
@@ -333,6 +379,9 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("切り替わり候補が入る", withPauses.includes("01:02, 03:05"), "01:02, 03:05");
     check("音声長を伝える", withPauses.includes("10:00"));
     check("話者名が入る", buildPrompt({ ...DEFAULT_PROMPT_CONFIG, speakers: "たかやま" }).includes("話者: たかやま"));
+    const withPrev = buildPrompt(DEFAULT_PROMPT_CONFIG, { previousTitles: ["#12 前回の話", "#11 その前"] });
+    check("過去回のタイトルが入る", withPrev.includes("#12 前回の話") && withPrev.includes("続きの番号"));
+    check("過去回が無ければ触れない", !buildPrompt(DEFAULT_PROMPT_CONFIG).includes("直近の回のタイトル"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
