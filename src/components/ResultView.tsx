@@ -1,6 +1,7 @@
 import CopyButton from "./CopyButton";
 import ImageCards from "./ImageCards";
-import type { EpisodeMeta } from "../lib/gemini";
+import { useEffect, useState } from "react";
+import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
 import type { AudioReport } from "../App";
 
 interface Props {
@@ -14,6 +15,137 @@ interface Props {
   apiKey?: string;
   imageModel?: string | null;
   audioReport?: AudioReport | null;
+  chapterNote?: string;
+  transcript?: TranscriptSegment[] | null;
+  /** 48時間以内なら音声を送り直さずに作り直せる。 */
+  canReuseAudio?: boolean;
+  busyText?: string;
+  onRegenerate?: () => void;
+  onMakeTranscript?: () => void;
+  onEdit?: (patch: Partial<EpisodeMeta>) => void;
+}
+
+/** 投稿前の手直しをその場でできるようにする。編集は履歴にも残る。 */
+function EditableBlock({
+  title,
+  value,
+  onChange,
+  rows = 6,
+}: {
+  title: string;
+  value: string;
+  onChange?: (next: string) => void;
+  rows?: number;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    if (!editing) setDraft(value);
+  }, [value, editing]);
+
+  return (
+    <div className="result-block">
+      <div className="result-head">
+        <h2>{title}</h2>
+        <div className="head-actions">
+          {onChange &&
+            (editing ? (
+              <>
+                <button
+                  className="copy-btn"
+                  onClick={() => {
+                    onChange(draft);
+                    setEditing(false);
+                  }}
+                >
+                  保存
+                </button>
+                <button
+                  className="copy-btn"
+                  onClick={() => {
+                    setDraft(value);
+                    setEditing(false);
+                  }}
+                >
+                  取消
+                </button>
+              </>
+            ) : (
+              <button className="copy-btn" onClick={() => setEditing(true)}>
+                ✎ 編集
+              </button>
+            ))}
+          <CopyButton text={value} />
+        </div>
+      </div>
+      {editing ? (
+        <textarea rows={rows} value={draft} onChange={(e) => setDraft(e.target.value)} />
+      ) : (
+        <div className="result-body">{value}</div>
+      )}
+    </div>
+  );
+}
+
+/** 全文書き起こし。長いので折りたたんでおく。 */
+function TranscriptSection({
+  transcript,
+  canReuseAudio,
+  busy,
+  onMake,
+}: {
+  transcript?: TranscriptSegment[] | null;
+  canReuseAudio?: boolean;
+  busy: boolean;
+  onMake?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (!transcript) {
+    if (!canReuseAudio || !onMake) return null;
+    return (
+      <div className="card">
+        <h2>📝 全文書き起こし</h2>
+        <p className="muted">
+          検索対策・アクセシビリティ・引用探しに使えます。メタデータとは別の呼び出しなので、必要なときだけ作成してください。
+        </p>
+        <button onClick={onMake} disabled={busy}>
+          {busy ? "作成中…" : "書き起こしを作る"}
+        </button>
+      </div>
+    );
+  }
+
+  const full = transcriptToText(transcript);
+  const speakers = [...new Set(transcript.map((s) => s.speaker).filter(Boolean))];
+
+  return (
+    <div className="card">
+      <div className="result-head">
+        <h2>📝 全文書き起こし</h2>
+        <CopyButton text={full} label="全文コピー" />
+      </div>
+      <p className="muted">
+        {transcript.length}件の発言
+        {speakers.length > 0 && ` ・ 話者 ${speakers.join(" / ")}`} ・{" "}
+        {full.length.toLocaleString()}文字
+      </p>
+      <button onClick={() => setOpen((v) => !v)}>{open ? "閉じる" : "本文を表示"}</button>
+      {open && (
+        <div className="transcript">
+          {transcript.map((seg, i) => (
+            <div className="transcript-seg" key={i}>
+              <div className="muted">
+                {[seg.time, seg.speaker].filter(Boolean).join(" ")}
+              </div>
+              <div>{seg.text}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Block({
@@ -105,6 +237,13 @@ export default function ResultView({
   apiKey,
   imageModel,
   audioReport,
+  chapterNote,
+  transcript,
+  canReuseAudio,
+  busyText,
+  onRegenerate,
+  onMakeTranscript,
+  onEdit,
 }: Props) {
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
@@ -155,23 +294,29 @@ export default function ResultView({
           <p className="muted">タップで採用タイトルを選ぶと履歴に残ります。</p>
         </Block>
 
-        <Block title="説明文" copyText={meta.description}>
-          <div className="result-body">{meta.description}</div>
-        </Block>
+        <EditableBlock
+          title="説明文"
+          value={meta.description}
+          onChange={onEdit ? (v) => onEdit({ description: v }) : undefined}
+          rows={8}
+        />
 
         <Block title="説明欄まとめて貼り付け" copyText={fullDescription}>
           <p className="muted">説明文 + チャプター + ハッシュタグを1つにまとめたものです。</p>
         </Block>
 
         {meta.showNotes && (
-          <Block title="ショーノート" copyText={meta.showNotes}>
-            <div className="result-body">{meta.showNotes}</div>
-          </Block>
+          <EditableBlock
+            title="ショーノート"
+            value={meta.showNotes}
+            onChange={onEdit ? (v) => onEdit({ showNotes: v }) : undefined}
+          />
         )}
 
         {meta.chapters.length > 0 && (
           <Block title="チャプター" copyText={chapterText}>
             <div className="result-body">{chapterText}</div>
+            {chapterNote && <p className="muted">✓ {chapterNote}</p>}
           </Block>
         )}
 
@@ -193,6 +338,25 @@ export default function ResultView({
           </Block>
         )}
       </div>
+
+      {canReuseAudio && onRegenerate && (
+        <div className="card">
+          <h2>🔄 文章を作り直す</h2>
+          <p className="muted">
+            音声を送り直さずに作り直せます(アップロードから48時間以内)。設定でトーンや文字数を変えてから押すと、その設定で作り直します。
+          </p>
+          <button onClick={onRegenerate} disabled={!!busyText}>
+            {busyText || "この音声で作り直す"}
+          </button>
+        </div>
+      )}
+
+      <TranscriptSection
+        transcript={transcript}
+        canReuseAudio={canReuseAudio}
+        busy={!!busyText}
+        onMake={onMakeTranscript}
+      />
 
       <ImageCards
         quote={meta.imageQuote || chosenTitle || meta.titles[0]}

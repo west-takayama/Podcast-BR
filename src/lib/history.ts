@@ -2,7 +2,7 @@
 // localStorage ではなく IndexedDB を使うのは、MP3 の Blob をそのまま保持したいため。
 // 保存はすべて端末内で完結し、外部には送信されない。
 
-import type { EpisodeMeta } from "./gemini";
+import type { EpisodeMeta, TranscriptSegment, UploadedAudio } from "./gemini";
 
 const DB_NAME = "podcast-br";
 const DB_VERSION = 1;
@@ -19,6 +19,12 @@ export interface EpisodeRecord {
   meta: EpisodeMeta;
   chosenTitle: string;
   audio?: Blob; // 古い履歴では削除されている場合がある
+  /** 全文書き起こし。作った回だけ入る。 */
+  transcript?: TranscriptSegment[];
+  /** アップロード済み音声の参照。48時間以内なら文章だけ作り直せる。 */
+  uploaded?: UploadedAudio;
+  /** 端末側で検出した話の切り替わり候補(秒)。作り直しでも使う。 */
+  pauses?: number[];
 }
 
 function openDb(): Promise<IDBDatabase> {

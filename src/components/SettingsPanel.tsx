@@ -130,6 +130,19 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         />
       </label>
       <label>
+        話者の呼び名(カンマ区切り・任意)
+        <input
+          type="text"
+          value={settings.prompt.speakers}
+          placeholder="例: たかやま, ゲストの佐藤さん"
+          onChange={(e) => setPrompt("speakers", e.target.value)}
+        />
+      </label>
+      <p className="muted">
+        書き起こしで話者を具体名にできます。空欄の場合は「A」「B」になります。
+      </p>
+
+      <label>
         番組の背景情報(生成品質が大きく上がります)
         <textarea
           value={settings.prompt.showContext}

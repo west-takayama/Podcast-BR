@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { generateEpisodeMeta, type EpisodeMeta } from "./lib/gemini";
+import {
+  generateEpisodeMeta,
+  generateTranscript,
+  isAudioUsable,
+  snapChapters,
+  type EpisodeMeta,
+  type TranscriptSegment,
+  type UploadedAudio,
+} from "./lib/gemini";
 import { loadSettings, saveSettings, type Settings } from "./lib/settings";
-import { saveEpisode, updateEpisode } from "./lib/history";
+import { listEpisodes, saveEpisode, updateEpisode } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
@@ -46,6 +54,11 @@ export default function App() {
   const [fileInfo, setFileInfo] = useState("");
   const [outputName, setOutputName] = useState("episode.mp3");
   const [audioReport, setAudioReport] = useState<AudioReport | null>(null);
+  const [uploaded, setUploaded] = useState<UploadedAudio | null>(null);
+  const [pauses, setPauses] = useState<number[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
+  const [busyText, setBusyText] = useState("");
+  const [chapterNote, setChapterNote] = useState("");
 
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -113,6 +126,11 @@ export default function App() {
     setEpisodeId("");
     setChosenTitle("");
     setAudioReport(null);
+    setUploaded(null);
+    setPauses([]);
+    setTranscript(null);
+    setChapterNote("");
+    setBusyText("");
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
   };
@@ -155,6 +173,99 @@ export default function App() {
     }
   };
 
+  /**
+   * 音声を送り直さずに文章だけ作り直す。
+   * トーンや文字数の設定を変えて試したいときに、変換とアップロードを繰り返さずに済む。
+   */
+  const regenerate = async () => {
+    if (!isAudioUsable(uploaded) || !meta) return;
+    setBusyText("文章を作り直しています…");
+    setError("");
+    try {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const raw = await generateEpisodeMeta({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        audio: uploaded!,
+        config: settings.prompt,
+        context: { pauses, durationSec: audioReport ? undefined : undefined },
+        onStatus: setBusyText,
+        onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
+        signal: controller.signal,
+      });
+      abortRef.current = null;
+      const snap = snapChapters(raw.chapters, pauses);
+      const next: EpisodeMeta = { ...raw, chapters: snap.chapters };
+      const title = next.titles[0] ?? "";
+      setMeta(next);
+      setChosenTitle(title);
+      setChapterNote(
+        snap.movedCount > 0
+          ? `${snap.movedCount}件のチャプター時刻を、実際の話の切り替わり位置に合わせました。`
+          : "",
+      );
+      if (episodeId) updateEpisode(episodeId, { meta: next, chosenTitle: title });
+      window.scrollTo({ top: 0 });
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setBusyText("");
+    }
+  };
+
+  /** 全文書き起こしを作る。メタデータとは別の呼び出しなので必要なときだけ。 */
+  const makeTranscript = async () => {
+    if (!isAudioUsable(uploaded)) return;
+    setBusyText("書き起こし中…");
+    setError("");
+    try {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const segments = await generateTranscript({
+        apiKey: settings.apiKey,
+        model: settings.model,
+        audio: uploaded!,
+        speakers: settings.prompt.speakers,
+        onStatus: setBusyText,
+        onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
+        signal: controller.signal,
+      });
+      abortRef.current = null;
+      setTranscript(segments);
+      if (episodeId) updateEpisode(episodeId, { transcript: segments });
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setBusyText("");
+    }
+  };
+
+  /** 履歴側の編集。保存済みの meta に差分を当てる。 */
+  const listEpisodeAndPatch = async (
+    id: string,
+    patch: Partial<EpisodeMeta>,
+  ): Promise<void> => {
+    const all = await listEpisodes();
+    const target = all.find((r) => r.id === id);
+    if (!target) return;
+    await updateEpisode(id, { meta: { ...target.meta, ...patch } });
+  };
+
+  /** 編集した本文を履歴に残す。投稿前の手直しを次回以降も参照できるようにする。 */
+  const editMeta = (patch: Partial<EpisodeMeta>) => {
+    setMeta((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, ...patch };
+      if (episodeId) updateEpisode(episodeId, { meta: next });
+      return next;
+    });
+  };
+
   const handleFile = async (file: File) => {
     if (!settings.apiKey) {
       setTab("settings");
@@ -183,6 +294,7 @@ export default function App() {
         peakDbfs: number;
         limitedSamples: number;
         correctionDb: number;
+        pauses: number[];
       }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
@@ -228,23 +340,40 @@ export default function App() {
       advance("upload", 0);
       const controller = new AbortController();
       abortRef.current = controller;
-      const generated = await generateEpisodeMeta({
+      let uploadedAudio: UploadedAudio | null = null;
+      const raw = await generateEpisodeMeta({
         apiKey: settings.apiKey,
         model: settings.model,
         mp3: result.aiMp3,
         config: settings.prompt,
+        context: { pauses: result.pauses, durationSec: result.durationSec },
         onStatus: (text) => {
-          if (text.includes("生成")) advance("generate", 0.15, text);
+          if (text.includes("生成") || text.includes("モデル")) advance("generate", 0.15, text);
           else if (text.includes("解析")) advance("upload", 1, text);
         },
         onUploadProgress: (f) =>
           advance("upload", f, `${(result.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
         // 廃止されたモデルから自動で切り替わったら、次回以降のために保存し直す
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
+        onUploaded: (a) => {
+          uploadedAudio = a;
+          setUploaded(a);
+        },
         signal: controller.signal,
       });
       abortRef.current = null;
       void wakeLockRef.current.stop();
+
+      // AI の推定時刻を、端末側で検出した実際の切り替わり位置へ寄せる
+      const snap = snapChapters(raw.chapters, result.pauses);
+      const generated: EpisodeMeta = { ...raw, chapters: snap.chapters };
+      setPauses(result.pauses);
+      setTranscript(null);
+      setChapterNote(
+        snap.movedCount > 0
+          ? `${snap.movedCount}件のチャプター時刻を、実際の話の切り替わり位置に合わせました(最大 ${Math.round(snap.maxMoveSec)}秒の補正)。`
+          : "",
+      );
 
       const title = generated.titles[0] ?? "";
 
@@ -274,6 +403,8 @@ export default function App() {
         meta: generated,
         chosenTitle: title,
         audio: blob,
+        uploaded: uploadedAudio ?? undefined,
+        pauses: result.pauses,
       }).catch(() =>
         setError(
           "結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)",
@@ -323,6 +454,9 @@ export default function App() {
         <HistoryPanel
           onChooseTitle={(id, title) => {
             updateEpisode(id, { chosenTitle: title });
+          }}
+          onEditMeta={(id, patch) => {
+            void listEpisodeAndPatch(id, patch);
           }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
@@ -377,6 +511,13 @@ export default function App() {
                 apiKey={settings.apiKey}
                 imageModel={settings.imageModel || null}
                 audioReport={audioReport}
+                chapterNote={chapterNote}
+                transcript={transcript}
+                canReuseAudio={isAudioUsable(uploaded)}
+                busyText={busyText}
+                onRegenerate={regenerate}
+                onMakeTranscript={makeTranscript}
+                onEdit={editMeta}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する

@@ -320,6 +320,71 @@ export class SilenceTrimmer {
   }
 }
 
+/**
+ * 話の切り替わり候補を拾う。
+ *
+ * AI が音声から推定するチャプター時刻はずれやすい。端末側で「一定以上の沈黙が
+ * 終わって声が戻った位置」を測っておき、その一覧を候補として渡したうえで、
+ * 返ってきた時刻を近い候補へ吸着させる。数え上げは出力の時間軸で行うため、
+ * 無音カットを有効にしていても実際の再生位置と一致する。
+ */
+export class PauseDetector {
+  private readonly frameLen: number;
+  private readonly threshold: number;
+  private readonly minSilenceFrames: number;
+  private readonly boundaries: number[] = [];
+  private silentRun = 0;
+  private framesSeen = 0;
+  private carry = 0;
+  private carrySum = 0;
+  private started = false;
+
+  constructor(
+    private readonly sampleRate: number,
+    noiseFloor: number,
+    minSilenceSec = 0.6,
+  ) {
+    this.frameLen = Math.max(1, Math.round((sampleRate * FRAME_MS) / 1000));
+    this.threshold = Math.max(noiseFloor * 2, 1e-4);
+    this.minSilenceFrames = Math.max(1, Math.round((minSilenceSec * 1000) / FRAME_MS));
+  }
+
+  push(channels: Float32Array[], length: number): void {
+    const numChannels = channels.length;
+    for (let i = 0; i < length; i++) {
+      for (let c = 0; c < numChannels; c++) {
+        const v = channels[c][i];
+        this.carrySum += v * v;
+      }
+      this.carry++;
+      if (this.carry < this.frameLen) continue;
+
+      const rms = Math.sqrt(this.carrySum / (this.carry * numChannels));
+      this.carry = 0;
+      this.carrySum = 0;
+      this.framesSeen++;
+
+      if (rms > this.threshold) {
+        // 十分な沈黙のあとに声が戻った位置を話の切り替わり候補とする
+        if (this.started && this.silentRun >= this.minSilenceFrames) {
+          this.boundaries.push(((this.framesSeen - 1) * this.frameLen) / this.sampleRate);
+        }
+        this.silentRun = 0;
+        this.started = true;
+      } else {
+        this.silentRun++;
+      }
+    }
+  }
+
+  /** 候補の一覧(秒)。多すぎると扱えないので間隔の広いものを優先して間引く。 */
+  result(maxCount = 60): number[] {
+    if (this.boundaries.length <= maxCount) return this.boundaries;
+    const step = this.boundaries.length / maxCount;
+    return Array.from({ length: maxCount }, (_, i) => this.boundaries[Math.floor(i * step)]);
+  }
+}
+
 export function applyGain(channels: Float32Array[], length: number, gain: number): void {
   if (gain === 1) return;
   for (const ch of channels) {

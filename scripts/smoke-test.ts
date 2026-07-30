@@ -10,7 +10,8 @@ import {
 import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
-import { listModels, pickDefaultModel, pickImageModel } from "../src/lib/gemini";
+import { listModels, pickDefaultModel, pickImageModel, snapChapters, transcriptToText } from "../src/lib/gemini";
+import { PauseDetector } from "../src/lib/audio/dsp";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese, PRESETS } from "../src/lib/image";
 
@@ -267,7 +268,57 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("プリセットは3種", PRESETS.length === 3 && PRESETS.some((p) => p.width === 3000));
   }
 
-  console.log("\n[13] プロンプト生成");
+  console.log("\n[13] 話の切り替わり検出");
+  {
+    // 3秒 声 / 1.5秒 無音 / 3秒 声 / 0.2秒 無音(短いので候補にしない) / 2秒 声
+    const total = SR * 10;
+    const ch = new Float32Array(total);
+    const voiced = (t: number) => (t < 3) || (t >= 4.5 && t < 7.5) || (t >= 7.7);
+    for (let i = 0; i < total; i++) {
+      const t = i / SR;
+      ch[i] = (voiced(t) ? 0.3 * Math.sin(2*Math.PI*440*i/SR) : 0) + (Math.random()-0.5)*0.0005;
+    }
+    // ノイズフロアは実際の処理と同じく測って渡す
+    const anP = new Analyzer(SR); anP.push([ch], ch.length);
+    const det = new PauseDetector(SR, anP.result().noiseFloor);
+    for (let i = 0; i < total; i += SR) det.push([ch.subarray(i, Math.min(i+SR, total))], Math.min(SR, total-i));
+    const found = det.result();
+    check("長い沈黙の後だけを候補にする", found.length === 1, `${found.map(v=>v.toFixed(2)).join(", ")} 秒`);
+    check("再開位置がほぼ正しい", found.length === 1 && Math.abs(found[0] - 4.5) < 0.15, `${found[0]?.toFixed(2)} 秒 (期待 4.50)`);
+  }
+
+  console.log("\n[14] チャプター時刻の吸着");
+  {
+    const pauses = [0, 62.4, 185.1, 402.8];
+    const r = snapChapters(
+      [
+        { time: "00:00", label: "オープニング" },
+        { time: "01:08", label: "本題" },       // 68秒 → 62.4秒へ寄る
+        { time: "03:00", label: "話題転換" },   // 180秒 → 185.1秒へ寄る
+        { time: "09:00", label: "遠い" },       // 540秒 → 候補まで137秒あるので動かさない
+      ],
+      pauses,
+    );
+    const times = r.chapters.map((c) => c.time);
+    check("冒頭は動かさない", times[0] === "00:00");
+    check("近い候補へ寄せる", times[1] === "01:02" && times[2] === "03:05", times.join(" / "));
+    check("遠い時刻は動かさない", times[3] === "09:00", times[3]);
+    check("補正件数を報告する", r.movedCount === 2, `${r.movedCount}件`);
+    check("候補が無ければそのまま", snapChapters([{ time: "01:08", label: "x" }], []).movedCount === 0);
+    check("読めない時刻は素通し", snapChapters([{ time: "??", label: "x" }], pauses).chapters[0].time === "??");
+  }
+
+  console.log("\n[15] 書き起こしの整形");
+  {
+    const text = transcriptToText([
+      { time: "00:00", speaker: "たかやま", text: "はじめます。" },
+      { time: "00:12", speaker: "", text: "本題です。" },
+    ]);
+    check("時刻と話者が付く", text.includes("00:00 たかやま") && text.includes("はじめます。"));
+    check("話者が空なら時刻だけ", text.includes("00:12\n本題です。"), JSON.stringify(text.slice(-20)));
+  }
+
+  console.log("\n[16] プロンプト生成");
   {
     const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "", showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
     check("背景情報が入る", p.includes("テスト番組"));
@@ -278,6 +329,10 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("SNS項目が入る", p.includes('"social"'));
     const noSocial = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, generateSocial: false });
     check("SNS無効時は含まれない", !noSocial.includes('"social"'));
+    const withPauses = buildPrompt(DEFAULT_PROMPT_CONFIG, { pauses: [62.4, 185.1], durationSec: 600 });
+    check("切り替わり候補が入る", withPauses.includes("01:02, 03:05"), "01:02, 03:05");
+    check("音声長を伝える", withPauses.includes("10:00"));
+    check("話者名が入る", buildPrompt({ ...DEFAULT_PROMPT_CONFIG, speakers: "たかやま" }).includes("話者: たかやま"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
