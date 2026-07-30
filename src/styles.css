@@ -304,6 +304,10 @@ input[type="color"] {
 .transcript-seg { padding: 10px 0; border-bottom: 1px solid #2c2c2c; font-size: 0.92rem; line-height: 1.65; }
 .transcript-seg:last-child { border-bottom: none; }
 
+/* 中断された回の復帰。見落とすと変換をやり直すことになるので目立たせる */
+.resume { border: 1px solid var(--accent); }
+.resume h2 { color: var(--accent); }
+
 .diag-critical { border: 1px solid var(--danger); }
 .finding { padding: 10px 0; border-bottom: 1px solid #2c2c2c; }
 .finding:last-of-type { border-bottom: none; }

@@ -9,9 +9,21 @@ import {
   type UploadedAudio,
 } from "./lib/gemini";
 import { loadSettings, saveSettings, type Settings } from "./lib/settings";
-import { listEpisodes, saveEpisode, updateEpisode } from "./lib/history";
+import {
+  clearPending,
+  listEpisodes,
+  loadPending,
+  patchPending,
+  saveEpisode,
+  savePending,
+  updateEpisode,
+  formatDate,
+  formatDuration,
+  type PendingConversion,
+} from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import type { Finding } from "./lib/audio/diagnostics";
+import type { AudioReport } from "./lib/audio/report";
 import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
 import { ScreenWakeLock } from "./lib/wakeLock";
@@ -24,24 +36,7 @@ import ProgressPanel from "./components/ProgressPanel";
 type Tab = "create" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
 
-/** 仕上がりの実測値。狙い通りかを利用者に示すために持つ。 */
-export interface AudioReport {
-  sourceLufs: number;
-  outputLufs: number;
-  targetLufs: number;
-  peakDbfs: number;
-  channels: number;
-  bitrate: number;
-  removedSec: number;
-  limitedSamples: number;
-  sampleRate: number;
-  /** リミッターの効きを見て足し戻したゲイン(dB)。0 なら補正不要だった。 */
-  correctionDb: number;
-  /** 入力ファイルの形式(表示用)。 */
-  inputFormat: string;
-  /** 収録そのものの問題。 */
-  findings: Finding[];
-}
+export type { AudioReport };
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -65,6 +60,9 @@ export default function App() {
   const [busyText, setBusyText] = useState("");
   const [chapterNote, setChapterNote] = useState("");
   const [previousTitles, setPreviousTitles] = useState<string[]>([]);
+  // 変換だけ終わって文章が未完成のまま中断された回。開き直したときに続けられる。
+  const [pending, setPending] = useState<PendingConversion | null>(null);
+  const [pendingUrl, setPendingUrl] = useState("");
 
   // 生成が失敗しても変換をやり直さずに済むよう、変換結果を保持しておく。
   // 60分の回では変換だけで数分かかるため、レート制限のたびに捨てるのは損が大きい。
@@ -109,6 +107,24 @@ export default function App() {
   useEffect(() => {
     mp3UrlRef.current = mp3Url;
   }, [mp3Url]);
+
+  // 中断された変換が残っていれば拾う。復帰を促すのは起動直後だけでよい
+  useEffect(() => {
+    loadPending()
+      .then(setPending)
+      .catch(() => setPending(null));
+  }, []);
+
+  // 「MP3 だけ取り出す」用の URL。描画のたびに作ると解放できず溜まる
+  useEffect(() => {
+    if (!pending) {
+      setPendingUrl("");
+      return;
+    }
+    const url = URL.createObjectURL(pending.mp3);
+    setPendingUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pending]);
 
   useEffect(() => {
     const wakeLock = wakeLockRef.current;
@@ -164,6 +180,9 @@ export default function App() {
     convertedRef.current = null;
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
+    // 次の回に進む/やめる時点で、中断復帰用の控えは意味を失う
+    setPending(null);
+    void clearPending().catch(() => {});
   };
 
   const cancel = () => {
@@ -363,7 +382,7 @@ export default function App() {
         fileName: file.name,
       };
 
-      setAudioReport({
+      const report: AudioReport = {
         sourceLufs: result.sourceLufs,
         outputLufs: result.outputLufs,
         targetLufs: result.targetLufs,
@@ -376,10 +395,30 @@ export default function App() {
         correctionDb: result.correctionDb,
         inputFormat: result.inputFormat,
         findings: result.findings,
-      });
+      };
+      setAudioReport(report);
 
       // 生成前でもダウンロードできるよう、まずタグ無しで出しておく
-      setMp3Url(URL.createObjectURL(new Blob([result.mp3], { type: "audio/mpeg" })));
+      const publishBlob = new Blob([result.mp3], { type: "audio/mpeg" });
+      setMp3Url(URL.createObjectURL(publishBlob));
+
+      // ここから先(送信・生成)で中断されても変換をやり直さずに済むよう、
+      // 端末に置いておく。60分の回では変換だけで数分かかる。
+      const outName = file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3";
+      const record = {
+        createdAt: Date.now(),
+        fileName: file.name,
+        outputName: outName,
+        fileInfo: `${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`,
+        durationSec: result.durationSec,
+        removedSec: result.removedSec,
+        pauses: result.pauses,
+        mp3: publishBlob,
+        aiMp3: new Blob([result.aiMp3], { type: "audio/mpeg" }),
+        report,
+      };
+      // 保存できなくても処理は続ける(空き容量が無い端末でも生成は通す)
+      await savePending(record).catch(() => {});
 
       advance("upload", 0);
       await runGeneration();
@@ -395,19 +434,19 @@ export default function App() {
    * 変換済みの音声から生成だけを行う。失敗しても変換をやり直さずに再試行できる。
    * すでにアップロード済みなら送信も省く。
    */
-  const runGeneration = async () => {
+  const runGeneration = async (already: UploadedAudio | null = uploaded) => {
     const converted = convertedRef.current;
     if (!converted) throw new Error("変換結果がありません。もう一度アップロードしてください。");
 
     try {
       const controller = new AbortController();
       abortRef.current = controller;
-      let uploadedAudio: UploadedAudio | null = uploaded;
+      let uploadedAudio: UploadedAudio | null = already;
       const raw = await generateEpisodeMeta({
         apiKey: settings.apiKey,
         model: settings.model,
         mp3: converted.aiMp3,
-        audio: uploaded ?? undefined,
+        audio: already ?? undefined,
         config: settings.prompt,
         context: {
           pauses: converted.pauses,
@@ -425,6 +464,8 @@ export default function App() {
         onUploaded: (a) => {
           uploadedAudio = a;
           setUploaded(a);
+          // 送信済みの参照も残す。ここで落ちても復帰時に送信を省ける
+          void patchPending({ uploaded: a }).catch(() => {});
         },
         signal: controller.signal,
       });
@@ -477,11 +518,17 @@ export default function App() {
         audio: blob,
         uploaded: uploadedAudio ?? undefined,
         pauses: converted.pauses,
-      }).catch(() =>
-        setError(
-          "結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)",
-        ),
-      );
+      })
+        .then(() => {
+          // 履歴に入ったので、中断復帰用の控えは用済み
+          setPending(null);
+          return clearPending();
+        })
+        .catch(() =>
+          setError(
+            "結果は表示できましたが、履歴の保存に失敗しました(端末の空き容量をご確認ください)",
+          ),
+        );
     } finally {
       abortRef.current = null;
       void wakeLockRef.current.stop();
@@ -507,6 +554,54 @@ export default function App() {
       setError(err instanceof Error ? err.message : String(err));
       setPhase("idle");
     }
+  };
+
+  /**
+   * 中断された回を、保存してある変換結果から続ける。
+   * ブラウザに処理を止められたり、アプリを閉じてしまったりしても、
+   * 数分かけた変換をやり直さずに文章の生成だけ進められる。
+   */
+  const resumePending = async () => {
+    const saved = pending;
+    if (!saved) return;
+    setError("");
+    setPhase("running");
+    setStage("upload");
+    startedAtRef.current = Date.now();
+    smoothedRemainingRef.current = null;
+    setFileInfo(saved.fileInfo);
+    setOutputName(saved.outputName);
+    setAudioReport(saved.report);
+    setUploaded(saved.uploaded ?? null);
+    void wakeLockRef.current.start();
+
+    try {
+      convertedRef.current = {
+        mp3: await saved.mp3.arrayBuffer(),
+        aiMp3: await saved.aiMp3.arrayBuffer(),
+        durationSec: saved.durationSec,
+        removedSec: saved.removedSec,
+        pauses: saved.pauses,
+        fileName: saved.fileName,
+      };
+      setMp3Url((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(saved.mp3);
+      });
+      advance("upload", 0);
+      // uploaded は setState 直後で反映されていないため、直接渡して送信を省く
+      await runGeneration(saved.uploaded ?? null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setError(err instanceof Error ? err.message : String(err));
+      setPhase("idle");
+    }
+  };
+
+  /** 中断された回を捨てる。音声の控えも消して容量を戻す。 */
+  const discardPending = () => {
+    setPending(null);
+    void clearPending().catch(() => {});
   };
 
   return (
@@ -568,6 +663,42 @@ export default function App() {
 
       {tab === "create" && (
         <>
+          {/* 前回の変換が生き残っている場合。変換をやり直させないのが目的 */}
+          {phase === "idle" && !meta && pending && (
+            <div className="card resume">
+              <h2>🗂 中断された回が残っています</h2>
+              <p className="muted" style={{ margin: "0 0 10px" }}>
+                {pending.fileName} / {formatDuration(pending.durationSec)} /{" "}
+                {formatDate(pending.createdAt)}
+                <br />
+                変換は完了しています
+                {isAudioUsable(pending.uploaded) ? "(送信も済み)" : ""}。
+                文章の生成から続けられます。
+                <br />
+                音声の控えに {(pending.mp3.size + pending.aiMp3.size) / 1024 / 1024 < 1
+                  ? "1 MB 未満"
+                  : `${Math.round((pending.mp3.size + pending.aiMp3.size) / 1024 / 1024)} MB`}{" "}
+                使っています(破棄すると戻ります)。
+              </p>
+              <button className="primary" onClick={resumePending}>
+                ▶️ 文章の生成から続ける
+              </button>
+              <div className="row-buttons">
+                {pendingUrl && (
+                  <a
+                    className="dl"
+                    style={{ margin: 0, flex: 1 }}
+                    href={pendingUrl}
+                    download={pending.outputName}
+                  >
+                    ⬇️ MP3 だけ取り出す
+                  </a>
+                )}
+                <button onClick={discardPending}>破棄</button>
+              </div>
+            </div>
+          )}
+
           {phase === "idle" && (
             <label className="drop card">
               <input
