@@ -24,7 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   apiKey: "",
   model: "gemini-3.5-flash",
   prompt: DEFAULT_PROMPT_CONFIG,
-  dsp: { highPass: true, noiseReduction: true, trimSilence: false },
+  dsp: { highPass: true, noiseReduction: true, trimSilence: false, perChannelNoise: false },
   mono: true,
   bitrate: 96,
   accentColor: "#ffd400",

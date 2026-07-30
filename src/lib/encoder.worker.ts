@@ -28,7 +28,7 @@ import {
 } from "./audio/dsp";
 import { LoudnessMeter, gainForTarget, targetLufs } from "./audio/loudness";
 import { CEILING_DBFS, Limiter } from "./audio/limiter";
-import { HEADER_PROBE_BYTES, decodeBlock, parseWavHeader, type WavInfo } from "./audio/wav";
+import { openAudio, type BlockHandler, type BlockReader } from "./audio/source";
 import { Mp3Stream } from "./audio/mp3";
 
 const BLOCK_SECONDS = 10;
@@ -43,32 +43,6 @@ interface Request {
 
 function post(stage: "analyze" | "process", fraction: number) {
   self.postMessage({ type: "progress", stage, fraction });
-}
-
-/** ファイルをブロック単位で読み進め、デコード済みチャンネルを順に渡す。 */
-async function forEachBlock(
-  file: File,
-  info: WavInfo,
-  onBlock: (
-    channels: Float32Array[],
-    length: number,
-    index: number,
-    total: number,
-  ) => Promise<void> | void,
-): Promise<void> {
-  const blockFrames = info.sampleRate * BLOCK_SECONDS;
-  const totalBlocks = Math.max(1, Math.ceil(info.frameCount / blockFrames));
-  const channels = Array.from({ length: info.numChannels }, () => new Float32Array(blockFrames));
-
-  for (let b = 0; b < totalBlocks; b++) {
-    const startFrame = b * blockFrames;
-    const frames = Math.min(blockFrames, info.frameCount - startFrame);
-    if (frames <= 0) break;
-    const byteStart = info.dataOffset + startFrame * info.bytesPerFrame;
-    const raw = await file.slice(byteStart, byteStart + frames * info.bytesPerFrame).arrayBuffer();
-    decodeBlock(raw, info, frames, channels);
-    await onBlock(channels, frames, b, totalBlocks);
-  }
 }
 
 /** ステレオを平均してモノラルにする。左右で位相が揃った音声を前提とする。 */
@@ -87,9 +61,18 @@ self.onmessage = async (e: MessageEvent<Request>) => {
   try {
     const { file, dsp, mono, bitrate } = e.data;
 
-    const head = await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer();
-    const info = parseWavHeader(head);
-    if (info.frameCount === 0) throw new Error("音声データが空です");
+    const reader = await openAudio(file, BLOCK_SECONDS);
+    if (!(reader.durationSec > 0)) throw new Error("音声データが空です");
+    // 以降の処理はブロック単位で読み進める。WAV は専用経路、
+    // それ以外はデコーダを通すが、呼び出し側からは同じ形で扱える
+    const info = {
+      sampleRate: reader.sampleRate,
+      numChannels: reader.numChannels,
+      durationSec: reader.durationSec,
+    };
+    const forEachBlock = async (_f: unknown, _i: unknown, onBlock: BlockHandler) => {
+      await (reader as BlockReader).read(onBlock);
+    };
 
     const outChannels = mono ? 1 : info.numChannels;
     const target = targetLufs(outChannels);
@@ -100,12 +83,17 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // ハイパスを通してから測る。低域の暗騒音を含んだままだと過大評価になる。
     const analyzer = new Analyzer(info.sampleRate);
     const floorHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
-    await forEachBlock(file, info, (channels, length, index, total) => {
+    await forEachBlock(file, info, (channels, length, fraction) => {
       if (floorHp) floorHp.process(channels, length);
       analyzer.push(channels, length);
-      post("analyze", ((index + 1) / total) / 3);
+      post("analyze", fraction / 3);
     });
     const { noiseFloor } = analyzer.result();
+    // 2人別マイクの独立処理では、チャンネルごとのノイズフロアを使う
+    const perChannel = dsp.perChannelNoise && info.numChannels > 1;
+    const floors: number | number[] = perChannel ? analyzer.channelNoiseFloors() : noiseFloor;
+    const makeNr = () =>
+      dsp.noiseReduction ? new NoiseReducer(info.sampleRate, floors, perChannel) : null;
 
     // --- 2回目: 整音後のラウドネスを測る ---
     // ノイズ低減は信号の音量を下げるため、その後の状態で測らないと
@@ -114,8 +102,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // 解析を2回に分けている。読み込みは軽く、変換に比べれば僅かな時間で済む。
     const meter = new LoudnessMeter(info.sampleRate, outChannels);
     const measureHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
-    const measureNr = dsp.noiseReduction ? new NoiseReducer(info.sampleRate, noiseFloor) : null;
-    await forEachBlock(file, info, (channels, length, index, total) => {
+    const measureNr = makeNr();
+    await forEachBlock(file, info, (channels, length, fraction) => {
       if (measureHp) measureHp.process(channels, length);
       if (measureNr) measureNr.process(channels, length);
       // ラウドネスは配信されるチャンネル構成で測る
@@ -123,7 +111,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels,
         length,
       );
-      post("analyze", 1 / 3 + ((index + 1) / total) / 3);
+      post("analyze", 1 / 3 + fraction / 3);
     });
 
     const measuredLufs = meter.integratedLufs();
@@ -146,16 +134,16 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       const trialMeter = new LoudnessMeter(info.sampleRate, outChannels);
       const trialLimiter = new Limiter(info.sampleRate, outChannels);
       const trialHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
-      const trialNr = dsp.noiseReduction ? new NoiseReducer(info.sampleRate, noiseFloor) : null;
+      const trialNr = makeNr();
 
-      await forEachBlock(file, info, (channels, length, index, total) => {
+      await forEachBlock(file, info, (channels, length, fraction) => {
         if (trialHp) trialHp.process(channels, length);
         if (trialNr) trialNr.process(channels, length);
         const shaped =
           outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels;
         applyGain(shaped, length, gain);
         trialLimiter.process(shaped, length, (limited, len) => trialMeter.push(limited, len));
-        post("analyze", 2 / 3 + ((index + 1) / total) / 3);
+        post("analyze", 2 / 3 + fraction / 3);
       });
       trialLimiter.flush((limited, len) => trialMeter.push(limited, len));
 
@@ -174,7 +162,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     const forAi = new Mp3Stream(1, info.sampleRate, AI_BITRATE_KBPS);
 
     const hp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
-    const nr = dsp.noiseReduction ? new NoiseReducer(info.sampleRate, noiseFloor) : null;
+    const nr = makeNr();
     const trimmer = dsp.trimSilence
       ? new SilenceTrimmer(info.sampleRate, info.numChannels, noiseFloor)
       : null;
@@ -235,7 +223,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       await Promise.all(pending);
     };
 
-    await forEachBlock(file, info, async (channels, length, index, total) => {
+    await forEachBlock(file, info, async (channels, length, fraction) => {
       if (hp) hp.process(channels, length);
       if (nr) nr.process(channels, length);
 
@@ -245,7 +233,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       // ブロックごとに必ず書き出す。共有バッファが次のブロックで
       // 上書きされる前にエンコーダへコピーさせる必要があるため。
       await drain();
-      post("process", (index + 1) / total);
+      post("process", fraction);
     });
 
     let removedSec = 0;
@@ -271,6 +259,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         aiMp3,
         durationSec: outputFrames / info.sampleRate,
         sourceDurationSec: info.durationSec,
+        inputFormat: reader.formatLabel,
         removedSec,
         channels: outChannels,
         sampleRate: info.sampleRate,

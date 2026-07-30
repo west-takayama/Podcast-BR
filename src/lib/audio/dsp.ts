@@ -11,6 +11,13 @@ export interface DspOptions {
   highPass: boolean; // 低域のゴロつき(空調音・机の振動)を除去
   noiseReduction: boolean; // 定常ノイズ(ホワイトノイズ・ファンの音)を低減
   trimSilence: boolean; // 長い無音を詰める
+  /**
+   * ノイズ低減をチャンネルごとに独立して行うか。
+   * 2人を別マイクで左右に分けて録った素材では、話していない人のマイクの
+   * 環境音を個別に抑えられる。左右で同じ音を録っている素材に使うと
+   * 定位が崩れるため、既定は無効。
+   */
+  perChannelNoise: boolean;
 }
 
 export const FRAME_MS = 20;
@@ -67,48 +74,82 @@ export class HighPassFilter {
  * 不自然な途切れ(ポンピング)が起きにくい。声の区間はほぼ無加工で通る。
  */
 export class NoiseReducer {
-  private readonly threshold: number;
+  private readonly thresholds: number[];
   private readonly attack: number;
   private readonly release: number;
-  private env = 0;
-  private gain = 1;
+  /** 連動モードでは要素1つ、独立モードではチャンネルごとに持つ。 */
+  private readonly env: number[];
+  private readonly gain: number[];
 
   private static readonly RATIO = 2.5;
   private static readonly MAX_ATTENUATION = Math.pow(10, -18 / 20); // 下げ幅は最大 -18dB
 
-  constructor(sampleRate: number, noiseFloor: number) {
-    this.threshold = noiseFloor * 3; // ノイズフロアの約 +9.5dB を「声あり」の境目とする
+  /**
+   * @param noiseFloor 連動モードでは単一値、独立モードではチャンネルごとの配列。
+   * @param perChannel チャンネルごとに独立して処理するか。
+   */
+  constructor(
+    sampleRate: number,
+    noiseFloor: number | number[],
+    private readonly perChannel = false,
+  ) {
+    // ノイズフロアの約 +9.5dB を「声あり」の境目とする
+    const floors = Array.isArray(noiseFloor) ? noiseFloor : [noiseFloor];
+    this.thresholds = floors.map((f) => f * 3);
     this.attack = Math.exp(-1 / (0.005 * sampleRate)); // 5ms: 声の立ち上がりを削らない速さ
     this.release = Math.exp(-1 / (0.15 * sampleRate)); // 150ms: 語尾を不自然に切らない遅さ
+    const slots = perChannel ? Math.max(1, floors.length) : 1;
+    this.env = new Array(slots).fill(0);
+    this.gain = new Array(slots).fill(1);
+  }
+
+  /** 1系統ぶんのゲインを1サンプル進める。 */
+  private step(slot: number, peak: number, threshold: number): number {
+    this.env[slot] =
+      peak > this.env[slot]
+        ? peak + this.attack * (this.env[slot] - peak)
+        : peak + this.release * (this.env[slot] - peak);
+
+    let target = 1;
+    if (this.env[slot] < threshold) {
+      const below = Math.max(this.env[slot], 1e-8) / threshold;
+      target = Math.max(NoiseReducer.MAX_ATTENUATION, Math.pow(below, NoiseReducer.RATIO - 1));
+    }
+    // ゲイン自体も平滑化して、急激な音量変化を避ける
+    this.gain[slot] =
+      target < this.gain[slot]
+        ? target + this.attack * (this.gain[slot] - target)
+        : target + this.release * (this.gain[slot] - target);
+    return this.gain[slot];
   }
 
   process(channels: Float32Array[], length: number): void {
-    if (this.threshold <= 0) return;
     const numChannels = channels.length;
+
+    if (this.perChannel && numChannels > 1) {
+      for (let c = 0; c < numChannels; c++) {
+        const threshold = this.thresholds[Math.min(c, this.thresholds.length - 1)];
+        if (threshold <= 0) continue;
+        const ch = channels[c];
+        for (let i = 0; i < length; i++) {
+          ch[i] *= this.step(c, Math.abs(ch[i]), threshold);
+        }
+      }
+      return;
+    }
+
+    // 連動モード。左右で同じ音を録っている素材で定位を崩さないよう、
+    // チャンネル間で最大のピークを見て同じゲインを掛ける
+    const threshold = this.thresholds[0];
+    if (threshold <= 0) return;
     for (let i = 0; i < length; i++) {
       let peak = 0;
       for (let c = 0; c < numChannels; c++) {
         const a = Math.abs(channels[c][i]);
         if (a > peak) peak = a;
       }
-      // エンベロープフォロワ: 立ち上がりは速く、減衰は緩やかに追従させる
-      this.env =
-        peak > this.env
-          ? peak + this.attack * (this.env - peak)
-          : peak + this.release * (this.env - peak);
-
-      let target = 1;
-      if (this.env < this.threshold) {
-        const below = Math.max(this.env, 1e-8) / this.threshold;
-        target = Math.max(NoiseReducer.MAX_ATTENUATION, Math.pow(below, NoiseReducer.RATIO - 1));
-      }
-      // ゲイン自体も平滑化して、急激な音量変化を避ける
-      this.gain =
-        target < this.gain
-          ? target + this.attack * (this.gain - target)
-          : target + this.release * (this.gain - target);
-
-      for (let c = 0; c < numChannels; c++) channels[c][i] *= this.gain;
+      const gain = this.step(0, peak, threshold);
+      for (let c = 0; c < numChannels; c++) channels[c][i] *= gain;
     }
   }
 }
@@ -120,7 +161,10 @@ export class NoiseReducer {
 export class Analyzer {
   private readonly frameLen: number;
   private readonly rms: number[] = [];
+  /** チャンネルごとのフレームRMS。2人別マイクの独立処理に使う。 */
+  private readonly perChannelRms: number[][] = [];
   private acc = 0;
+  private perChannelAcc: number[] = [];
   private accCount = 0;
   private peak = 0;
 
@@ -130,20 +174,35 @@ export class Analyzer {
 
   push(channels: Float32Array[], length: number): void {
     const numChannels = channels.length;
+    if (this.perChannelAcc.length !== numChannels) {
+      this.perChannelAcc = new Array(numChannels).fill(0);
+      while (this.perChannelRms.length < numChannels) this.perChannelRms.push([]);
+    }
     for (let i = 0; i < length; i++) {
       for (let c = 0; c < numChannels; c++) {
         const v = channels[c][i];
-        this.acc += v * v;
+        const sq = v * v;
+        this.acc += sq;
+        this.perChannelAcc[c] += sq;
         const a = v < 0 ? -v : v;
         if (a > this.peak) this.peak = a;
       }
       this.accCount += numChannels;
       if (this.accCount >= this.frameLen * numChannels) {
         this.rms.push(Math.sqrt(this.acc / this.accCount));
+        for (let c = 0; c < numChannels; c++) {
+          this.perChannelRms[c].push(Math.sqrt(this.perChannelAcc[c] / this.frameLen));
+          this.perChannelAcc[c] = 0;
+        }
         this.acc = 0;
         this.accCount = 0;
       }
     }
+  }
+
+  /** チャンネルごとのノイズフロア。独立ノイズ低減に渡す。 */
+  channelNoiseFloors(): number[] {
+    return this.perChannelRms.map((list) => percentileFloor(list));
   }
 
   private flush(): void {
@@ -163,18 +222,7 @@ export class Analyzer {
     this.flush();
     if (this.rms.length === 0 || this.peak === 0) return { noiseFloor: 0, gain: 1, peak: 0 };
 
-    const sorted = Float32Array.from(this.rms).sort();
-    let firstNonZero = 0;
-    while (firstNonZero < sorted.length && sorted[firstNonZero] <= 1e-6) firstNonZero++;
-    const noiseFloor =
-      firstNonZero >= sorted.length
-        ? 0
-        : sorted[
-            Math.min(
-              firstNonZero + Math.floor((sorted.length - firstNonZero) * 0.1),
-              sorted.length - 1,
-            )
-          ];
+    const noiseFloor = percentileFloor(this.rms);
 
     // 正規化の基準は「声が鳴っている区間」の RMS にする。無音を含めて平均すると
     // 沈黙の多い回だけ不必要に大きくなり、回ごとの音量が揃わないため。
@@ -196,6 +244,20 @@ export class Analyzer {
 
     return { noiseFloor, gain: Math.pow(10, gainDb / 20), peak: this.peak };
   }
+}
+
+/**
+ * フレームRMSの下位10パーセンタイルをノイズフロアとする。
+ * 完全な無音(デジタルゼロ)は環境音の指標にならないので除く。
+ */
+function percentileFloor(list: number[]): number {
+  if (list.length === 0) return 0;
+  const sorted = Float32Array.from(list).sort();
+  let firstNonZero = 0;
+  while (firstNonZero < sorted.length && sorted[firstNonZero] <= 1e-6) firstNonZero++;
+  if (firstNonZero >= sorted.length) return 0;
+  const idx = firstNonZero + Math.floor((sorted.length - firstNonZero) * 0.1);
+  return sorted[Math.min(idx, sorted.length - 1)];
 }
 
 /**

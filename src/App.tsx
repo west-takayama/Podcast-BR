@@ -36,6 +36,8 @@ export interface AudioReport {
   sampleRate: number;
   /** リミッターの効きを見て足し戻したゲイン(dB)。0 なら補正不要だった。 */
   correctionDb: number;
+  /** 入力ファイルの形式(表示用)。 */
+  inputFormat: string;
 }
 
 export default function App() {
@@ -59,6 +61,7 @@ export default function App() {
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [busyText, setBusyText] = useState("");
   const [chapterNote, setChapterNote] = useState("");
+  const [previousTitles, setPreviousTitles] = useState<string[]>([]);
 
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -75,6 +78,20 @@ export default function App() {
   useEffect(() => {
     applyAccent(settings.accentColor);
   }, [settings.accentColor]);
+
+  // 直近の回のタイトルを持っておき、番号付けや切り口の重複を避けるために渡す
+  useEffect(() => {
+    listEpisodes()
+      .then((all) =>
+        setPreviousTitles(
+          all
+            .map((r) => r.chosenTitle || r.meta.titles[0])
+            .filter(Boolean)
+            .slice(0, 8),
+        ),
+      )
+      .catch(() => setPreviousTitles([]));
+  }, [phase]);
 
   useEffect(() => {
     mp3UrlRef.current = mp3Url;
@@ -189,7 +206,7 @@ export default function App() {
         model: settings.model,
         audio: uploaded!,
         config: settings.prompt,
-        context: { pauses, durationSec: audioReport ? undefined : undefined },
+        context: { pauses, previousTitles },
         onStatus: setBusyText,
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         signal: controller.signal,
@@ -277,7 +294,7 @@ export default function App() {
     setStage("analyze");
     startedAtRef.current = Date.now();
     setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
-    setOutputName(file.name.replace(/\.wav$/i, "") + ".mp3");
+    setOutputName(file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3");
     void wakeLockRef.current.start();
 
     try {
@@ -295,6 +312,7 @@ export default function App() {
         limitedSamples: number;
         correctionDb: number;
         pauses: number[];
+        inputFormat: string;
       }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
@@ -332,6 +350,7 @@ export default function App() {
         limitedSamples: result.limitedSamples,
         sampleRate: result.sampleRate,
         correctionDb: result.correctionDb,
+        inputFormat: result.inputFormat,
       });
 
       // 生成前でもダウンロードできるよう、まずタグ無しで出しておく
@@ -346,7 +365,11 @@ export default function App() {
         model: settings.model,
         mp3: result.aiMp3,
         config: settings.prompt,
-        context: { pauses: result.pauses, durationSec: result.durationSec },
+        context: {
+          pauses: result.pauses,
+          durationSec: result.durationSec,
+          previousTitles,
+        },
         onStatus: (text) => {
           if (text.includes("生成") || text.includes("モデル")) advance("generate", 0.15, text);
           else if (text.includes("解析")) advance("upload", 1, text);
@@ -471,7 +494,7 @@ export default function App() {
             <label className="drop card">
               <input
                 type="file"
-                accept=".wav,audio/wav,audio/x-wav"
+                accept="audio/*,.wav,.mp3,.m4a,.aac,.mp4,.ogg,.opus,.flac,.caf"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (f) handleFile(f);
@@ -479,8 +502,12 @@ export default function App() {
                 }}
               />
               <p style={{ fontSize: "2rem", margin: "0 0 8px" }}>📤</p>
-              <p style={{ margin: 0, fontWeight: 600 }}>収録した .WAV をここから選択</p>
-              <p className="muted">整音 → 変換 → タイトル・説明文の生成まで自動で進みます</p>
+              <p style={{ margin: 0, fontWeight: 600 }}>収録した音声をここから選択</p>
+              <p className="muted">
+                WAV / MP3 / M4A / AAC など。通話録音もそのまま使えます。
+                <br />
+                整音 → 変換 → タイトル・説明文の生成まで自動で進みます
+              </p>
             </label>
           )}
 

@@ -200,7 +200,8 @@ function AudioSpec({ report }: { report: AudioReport }) {
         <div>
           <dt>形式</dt>
           <dd>
-            MP3 {report.bitrate} kbps ・ {report.channels === 1 ? "モノラル" : "ステレオ"} ・{" "}
+            {report.inputFormat} → MP3 {report.bitrate} kbps ・{" "}
+            {report.channels === 1 ? "モノラル" : "ステレオ"} ・{" "}
             {(report.sampleRate / 1000).toFixed(1)} kHz
           </dd>
         </div>
