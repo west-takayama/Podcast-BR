@@ -1,6 +1,7 @@
 import CopyButton from "./CopyButton";
 import ImageCards from "./ImageCards";
 import type { EpisodeMeta } from "../lib/gemini";
+import type { AudioReport } from "../App";
 
 interface Props {
   meta: EpisodeMeta;
@@ -12,6 +13,7 @@ interface Props {
   accentColor: string;
   apiKey?: string;
   imageModel?: string | null;
+  audioReport?: AudioReport | null;
 }
 
 function Block({
@@ -34,6 +36,64 @@ function Block({
   );
 }
 
+/** 仕上がりの実測値。音量が基準内に収まったかを確認できるようにする。 */
+function AudioSpec({ report }: { report: AudioReport }) {
+  const db = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : "—");
+  const withinTolerance = Math.abs(report.outputLufs - report.targetLufs) <= 1;
+  const limitedSec = report.limitedSamples / report.sampleRate;
+
+  return (
+    <div className="card">
+      <h2>🎚 音声の仕上がり</h2>
+      <dl className="spec">
+        <div>
+          <dt>音量(ラウドネス)</dt>
+          <dd>
+            <strong className={withinTolerance ? "ok" : "warn"}>
+              {db(report.outputLufs)} LUFS
+            </strong>
+            <span className="muted">
+              {" "}
+              目標 {report.targetLufs} ± 1 ・ 元の音源 {db(report.sourceLufs)}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>ピーク</dt>
+          <dd>
+            {db(report.peakDbfs)} dBFS
+            <span className="muted"> 上限 -1.2</span>
+          </dd>
+        </div>
+        <div>
+          <dt>形式</dt>
+          <dd>
+            MP3 {report.bitrate} kbps ・ {report.channels === 1 ? "モノラル" : "ステレオ"} ・{" "}
+            {(report.sampleRate / 1000).toFixed(1)} kHz
+          </dd>
+        </div>
+        {report.removedSec > 0 && (
+          <div>
+            <dt>無音カット</dt>
+            <dd>{Math.round(report.removedSec)} 秒を短縮</dd>
+          </div>
+        )}
+        {limitedSec > 0.01 && (
+          <div>
+            <dt>リミッター</dt>
+            <dd>{limitedSec.toFixed(1)} 秒ぶんのピークを抑制</dd>
+          </div>
+        )}
+      </dl>
+      <p className="muted">
+        Apple Podcasts の基準(ステレオ -16 / モノラル -19 LUFS、許容 ±1dB)に合わせています。
+        {!withinTolerance &&
+          " 目標から外れているのは、リミッターが強く働いたか元音源の音量差が大きい場合です。"}
+      </p>
+    </div>
+  );
+}
+
 export default function ResultView({
   meta,
   chosenTitle,
@@ -44,6 +104,7 @@ export default function ResultView({
   accentColor,
   apiKey,
   imageModel,
+  audioReport,
 }: Props) {
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
@@ -68,8 +129,13 @@ export default function ResultView({
           <a className="dl" href={audioUrl} download={fileName ?? "episode.mp3"}>
             ⬇️ 変換済み MP3 をダウンロード
           </a>
+          <p className="muted" style={{ marginTop: 8 }}>
+            タイトル・番組名・説明文・アートワーク・チャプターを MP3 に埋め込んでいます。
+          </p>
         </div>
       )}
+
+      {audioReport && <AudioSpec report={audioReport} />}
 
       <div className="card">
         <Block title="タイトル案">

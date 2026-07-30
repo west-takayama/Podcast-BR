@@ -3,6 +3,8 @@ import { generateEpisodeMeta, type EpisodeMeta } from "./lib/gemini";
 import { loadSettings, saveSettings, type Settings } from "./lib/settings";
 import { saveEpisode, updateEpisode } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
+import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
+import { renderArtworkJpeg } from "./lib/image";
 import { ScreenWakeLock } from "./lib/wakeLock";
 import { applyAccent } from "./lib/theme";
 import SettingsPanel from "./components/SettingsPanel";
@@ -12,6 +14,21 @@ import ProgressPanel from "./components/ProgressPanel";
 
 type Tab = "create" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
+
+/** 仕上がりの実測値。狙い通りかを利用者に示すために持つ。 */
+export interface AudioReport {
+  sourceLufs: number;
+  outputLufs: number;
+  targetLufs: number;
+  peakDbfs: number;
+  channels: number;
+  bitrate: number;
+  removedSec: number;
+  limitedSamples: number;
+  sampleRate: number;
+  /** リミッターの効きを見て足し戻したゲイン(dB)。0 なら補正不要だった。 */
+  correctionDb: number;
+}
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
@@ -28,6 +45,7 @@ export default function App() {
   const [mp3Url, setMp3Url] = useState("");
   const [fileInfo, setFileInfo] = useState("");
   const [outputName, setOutputName] = useState("episode.mp3");
+  const [audioReport, setAudioReport] = useState<AudioReport | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -94,6 +112,7 @@ export default function App() {
     smoothedRemainingRef.current = null;
     setEpisodeId("");
     setChosenTitle("");
+    setAudioReport(null);
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
   };
@@ -105,6 +124,35 @@ export default function App() {
     abortRef.current = null;
     void wakeLockRef.current.stop();
     reset();
+  };
+
+  /** MP3 に ID3 タグ(タイトル・番組名・説明・アートワーク・チャプター)を付ける。 */
+  const buildTaggedMp3 = async (
+    mp3: ArrayBuffer,
+    generated: EpisodeMeta,
+    title: string,
+    durationSec: number,
+  ): Promise<Blob> => {
+    try {
+      const artwork = await renderArtworkJpeg({
+        quote: generated.imageQuote || title,
+        title,
+        showName: settings.prompt.showName,
+        accent: settings.accentColor,
+      });
+      const tag = buildId3Tag({
+        title,
+        showName: settings.prompt.showName,
+        description: generated.description,
+        artwork: { data: artwork, mime: "image/jpeg" },
+        chapters: toId3Chapters(generated.chapters, durationSec * 1000),
+        durationMs: durationSec * 1000,
+      });
+      return attachId3(mp3, tag);
+    } catch {
+      // タグ付けに失敗しても音声そのものは渡せるようにする
+      return new Blob([mp3], { type: "audio/mpeg" });
+    }
   };
 
   const handleFile = async (file: File) => {
@@ -127,6 +175,14 @@ export default function App() {
         aiMp3: ArrayBuffer;
         durationSec: number;
         removedSec: number;
+        channels: number;
+        sampleRate: number;
+        sourceLufs: number;
+        outputLufs: number;
+        targetLufs: number;
+        peakDbfs: number;
+        limitedSamples: number;
+        correctionDb: number;
       }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
@@ -153,8 +209,21 @@ export default function App() {
       workerRef.current?.terminate();
       workerRef.current = null;
 
-      const blob = new Blob([result.mp3], { type: "audio/mpeg" });
-      setMp3Url(URL.createObjectURL(blob));
+      setAudioReport({
+        sourceLufs: result.sourceLufs,
+        outputLufs: result.outputLufs,
+        targetLufs: result.targetLufs,
+        peakDbfs: result.peakDbfs,
+        channels: result.channels,
+        bitrate: settings.bitrate,
+        removedSec: result.removedSec,
+        limitedSamples: result.limitedSamples,
+        sampleRate: result.sampleRate,
+        correctionDb: result.correctionDb,
+      });
+
+      // 生成前でもダウンロードできるよう、まずタグ無しで出しておく
+      setMp3Url(URL.createObjectURL(new Blob([result.mp3], { type: "audio/mpeg" })));
 
       advance("upload", 0);
       const controller = new AbortController();
@@ -177,8 +246,19 @@ export default function App() {
       abortRef.current = null;
       void wakeLockRef.current.stop();
 
+      const title = generated.titles[0] ?? "";
+
+      // タイトルとチャプターが揃ってから ID3 タグを付ける。
+      // アートワークも埋め込むので、プレイヤーで番組として正しく表示される。
+      // 結果画面を出す前に差し替えないと、タグ無しの MP3 をダウンロードされうる。
+      const blob = await buildTaggedMp3(result.mp3, generated, title, result.durationSec);
+      setMp3Url((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+
       setMeta(generated);
-      setChosenTitle(generated.titles[0] ?? "");
+      setChosenTitle(title);
       setPhase("done");
       window.scrollTo({ top: 0 });
 
@@ -192,7 +272,7 @@ export default function App() {
         durationSec: result.durationSec,
         removedSec: result.removedSec,
         meta: generated,
-        chosenTitle: generated.titles[0] ?? "",
+        chosenTitle: title,
         audio: blob,
       }).catch(() =>
         setError(
@@ -296,6 +376,7 @@ export default function App() {
                 accentColor={settings.accentColor}
                 apiKey={settings.apiKey}
                 imageModel={settings.imageModel || null}
+                audioReport={audioReport}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する

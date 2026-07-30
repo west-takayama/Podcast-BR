@@ -14,9 +14,9 @@ export const STAGE_LABELS: Record<Stage, string> = {
  * 残り時間の推定はここから始めて経過時間で自己補正される。
  */
 export const STAGE_WEIGHTS: Record<Stage, number> = {
-  analyze: 0.12,
-  process: 0.5,
-  upload: 0.23,
+  analyze: 0.2, // ノイズフロアとラウドネスの2回分
+  process: 0.44,
+  upload: 0.21,
   generate: 0.15,
 };
 

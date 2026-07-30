@@ -214,11 +214,33 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
   return canvas;
 }
 
-export function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+export function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  type = "image/png",
+  quality?: number,
+): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (blob) => (blob ? resolve(blob) : reject(new Error("画像の書き出しに失敗しました"))),
-      "image/png",
+      type,
+      quality,
     );
   });
+}
+
+/**
+ * MP3 に埋め込むアートワーク。
+ * PNG のままだと 3000px で 4MB を超えて音声ファイルを不必要に重くするため、
+ * 1400px の JPEG にする(Spotify の推奨サイズでもある)。
+ */
+export async function renderArtworkJpeg(content: CardContent): Promise<Uint8Array> {
+  const spec: PresetSpec = {
+    id: "cover",
+    label: "アートワーク",
+    width: 1400,
+    height: 1400,
+    note: "MP3 埋め込み用",
+  };
+  const blob = await canvasToBlob(renderCard(spec, content), "image/jpeg", 0.85);
+  return new Uint8Array(await blob.arrayBuffer());
 }

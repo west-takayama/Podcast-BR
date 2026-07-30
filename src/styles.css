@@ -279,3 +279,16 @@ input[type="color"] {
 }
 
 .illust { margin-top: 14px; padding-top: 12px; border-top: 1px solid #333; }
+
+.spec { margin: 0; font-size: 0.9rem; }
+.spec > div {
+  display: flex;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid #2c2c2c;
+}
+.spec > div:last-child { border-bottom: none; }
+.spec dt { color: var(--muted); min-width: 8.5em; flex-shrink: 0; }
+.spec dd { margin: 0; }
+.spec strong.ok { color: var(--accent); }
+.spec strong.warn { color: #ffb257; }
