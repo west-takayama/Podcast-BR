@@ -13,6 +13,7 @@ import ResultView from "./ResultView";
 
 interface Props {
   onChooseTitle: (id: string, title: string) => void;
+  onEditMeta: (id: string, patch: Partial<EpisodeRecord["meta"]>) => void;
   showName: string;
   accentColor: string;
   apiKey?: string;
@@ -26,6 +27,7 @@ function formatBytes(bytes: number): string {
 
 export default function HistoryPanel({
   onChooseTitle,
+  onEditMeta,
   showName,
   accentColor,
   apiKey,
@@ -171,6 +173,14 @@ export default function HistoryPanel({
                 accentColor={accentColor}
                 apiKey={apiKey}
                 imageModel={imageModel}
+                transcript={r.transcript}
+                onEdit={(patch) => {
+                  onEditMeta(r.id, patch);
+                  setRecords((prev) =>
+                    prev?.map((x) => (x.id === r.id ? { ...x, meta: { ...x.meta, ...patch } } : x)) ??
+                    prev,
+                  );
+                }}
               />
             )}
           </div>

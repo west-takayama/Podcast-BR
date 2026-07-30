@@ -2,7 +2,8 @@
 // Files API に MP3 をアップロードし、文字起こしとメタデータ生成を1回の呼び出しで行う。
 // API キーは端末の localStorage にのみ保存され、Google 以外へは送信されない。
 
-import { buildPrompt, type PromptConfig } from "./prompt";
+import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
+import { parseTimestamp } from "./id3";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
@@ -161,16 +162,38 @@ export interface EpisodeMeta {
   social?: SocialPosts;
 }
 
+export interface TranscriptSegment {
+  time: string;
+  speaker: string;
+  text: string;
+}
+
+/**
+ * アップロード済みの音声。Gemini の Files API は48時間保持するため、
+ * この間は音声を送り直さずに文章だけ作り直せる。
+ */
+export interface UploadedAudio {
+  uri: string;
+  name: string;
+  expiresAt: number;
+  bytes: number;
+}
+
 export interface GenerateOptions {
   apiKey: string;
   model: string;
-  mp3: ArrayBuffer;
+  /** 音声を送る場合。すでにアップロード済みなら audio を渡す。 */
+  mp3?: ArrayBuffer;
+  audio?: UploadedAudio;
   config: PromptConfig;
+  context?: PromptContext;
   onStatus: (status: string) => void;
   /** アップロードの進捗 (0〜1)。回線が遅いほど支配的になるので実測値を返す。 */
   onUploadProgress?: (fraction: number) => void;
   /** モデル廃止で別のモデルに切り替わったときに呼ばれる。設定へ保存し直すために使う。 */
   onModelChanged?: (model: string) => void;
+  /** アップロードが済んだ時点で呼ばれる。作り直しのために保持しておくため。 */
+  onUploaded?: (audio: UploadedAudio) => void;
   signal?: AbortSignal;
 }
 
@@ -314,6 +337,116 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
   };
 }
 
+/**
+ * チャプター時刻を、端末側で検出した実際の切り替わり位置へ吸着させる。
+ *
+ * AI が音声から読み取る時刻は数秒から十数秒ずれることがあり、ずれたチャプターは
+ * 無いより悪い。近い候補があればそこへ寄せ、無ければ元の値を残す。
+ */
+export function snapChapters(
+  chapters: { time: string; label: string }[],
+  pauses: number[],
+  toleranceSec = 20,
+): { chapters: { time: string; label: string }[]; movedCount: number; maxMoveSec: number } {
+  if (pauses.length === 0) return { chapters, movedCount: 0, maxMoveSec: 0 };
+
+  let movedCount = 0;
+  let maxMoveSec = 0;
+  const snapped = chapters.map((c) => {
+    const ms = parseTimestamp(c.time);
+    if (ms === null) return c;
+    const sec = ms / 1000;
+    // 冒頭は 00:00 のままが自然なので触らない
+    if (sec === 0) return c;
+
+    let best = sec;
+    let bestDiff = Infinity;
+    for (const p of pauses) {
+      const diff = Math.abs(p - sec);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = p;
+      }
+    }
+    if (bestDiff > toleranceSec || bestDiff < 0.05) return c;
+    movedCount++;
+    if (bestDiff > maxMoveSec) maxMoveSec = bestDiff;
+    return { time: formatTimecode(best), label: c.label };
+  });
+
+  return { chapters: snapped, movedCount, maxMoveSec };
+}
+
+/** 音声をアップロードして、生成に使える状態になるまで待つ。 */
+export async function uploadEpisodeAudio(
+  apiKey: string,
+  mp3: ArrayBuffer,
+  onStatus: (status: string) => void,
+  onProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<UploadedAudio> {
+  onStatus("音声をアップロード中…");
+  const file = await uploadFile(apiKey, mp3, onProgress, signal);
+
+  let uri = file.uri;
+  if (file.state !== "ACTIVE") {
+    onStatus("音声を解析待ち…");
+    uri = await waitUntilActive(apiKey, file.name, signal);
+  }
+  // Files API の保持期間は48時間。この間は送り直さずに作り直せる
+  return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: mp3.byteLength };
+}
+
+export function isAudioUsable(audio: UploadedAudio | null | undefined): boolean {
+  return !!audio && audio.expiresAt > Date.now();
+}
+
+/** モデル廃止で 404 になったら一覧を引き直して一度だけやり直す。 */
+async function callWithModelFallback(
+  apiKey: string,
+  model: string,
+  body: unknown,
+  onStatus: (status: string) => void,
+  onModelChanged?: (model: string) => void,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const call = (id: string) =>
+    fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  let res = await call(model);
+  if (res.status === 404) {
+    onStatus("モデルが更新されたため切り替え中…");
+    const models = await listModels(apiKey, signal);
+    const replacement = pickDefaultModel(models);
+    if (!replacement || replacement === model) {
+      throw new Error(
+        `モデル ${model} は利用できなくなっています。設定画面でモデルを選び直してください。`,
+      );
+    }
+    res = await call(replacement);
+    if (res.ok) onModelChanged?.(replacement);
+  }
+  return res;
+}
+
+function throwForStatus(status: number, body: string, what: string): never {
+  if (status === 400 && body.includes("API_KEY_INVALID")) {
+    throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
+  }
+  if (status === 429) {
+    throw new Error("無料枠のレート制限に達しました。1分ほど待って再試行してください。");
+  }
+  if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
+    throw new Error("音声の保持期限(48時間)が切れている可能性があります。もう一度アップロードしてください。");
+  }
+  throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
+}
+
 export async function generateEpisodeMeta(opts: GenerateOptions): Promise<EpisodeMeta> {
   try {
     return await generateEpisodeMetaInner(opts);
@@ -329,68 +462,40 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
 }
 
 async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeMeta> {
-  const { apiKey, model, mp3, config, onStatus, onUploadProgress, onModelChanged, signal } = opts;
+  const {
+    apiKey, model, mp3, audio, config, context, onStatus,
+    onUploadProgress, onModelChanged, onUploaded, signal,
+  } = opts;
 
-  onStatus("音声をアップロード中…");
-  const file = await uploadFile(apiKey, mp3, onUploadProgress, signal);
-
-  let fileUri = file.uri;
-  if (file.state !== "ACTIVE") {
-    onStatus("音声を解析待ち…");
-    fileUri = await waitUntilActive(apiKey, file.name, signal);
+  let source = audio;
+  if (!isAudioUsable(source)) {
+    if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
+    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal);
+    onUploaded?.(source);
   }
 
   onStatus("タイトル・説明文を生成中…");
-  const prompt = buildPrompt(config);
-  const call = (modelId: string) =>
-    fetch(`${API_BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
-      method: "POST",
-      signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { file_data: { mime_type: "audio/mpeg", file_uri: fileUri } },
-              { text: prompt },
-            ],
-          },
-        ],
-        generationConfig: {
-          response_mime_type: "application/json",
-          temperature: 0.7,
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [
+        {
+          parts: [
+            { file_data: { mime_type: "audio/mpeg", file_uri: source!.uri } },
+            { text: buildPrompt(config, context ?? {}) },
+          ],
         },
-      }),
-    });
+      ],
+      generationConfig: { response_mime_type: "application/json", temperature: 0.7 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
 
-  let res = await call(model);
+  if (!res.ok) throwForStatus(res.status, await res.text(), "生成");
 
-  // Google はモデルを予告より早く廃止することがある。ここで諦めると変換済みの
-  // 音声が無駄になるので、利用可能なモデルを引き直して一度だけやり直す。
-  if (res.status === 404) {
-    onStatus("モデルが更新されたため切り替え中…");
-    const models = await listModels(apiKey, signal);
-    const replacement = pickDefaultModel(models);
-    if (!replacement || replacement === model) {
-      throw new Error(
-        `モデル ${model} は利用できなくなっています。設定画面でモデルを選び直してください。`,
-      );
-    }
-    onStatus("タイトル・説明文を生成中…");
-    res = await call(replacement);
-    if (res.ok) onModelChanged?.(replacement);
-  }
-
-  if (!res.ok) {
-    const body = await res.text();
-    if (res.status === 400 && body.includes("API_KEY_INVALID")) {
-      throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
-    }
-    if (res.status === 429) {
-      throw new Error("無料枠のレート制限に達しました。1分ほど待って再試行してください。");
-    }
-    throw new Error(`生成に失敗しました (${res.status}): ${body.slice(0, 300)}`);
-  }
   const data = await res.json();
   const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("生成結果が空でした。もう一度お試しください。");
@@ -402,4 +507,94 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     throw new Error("生成結果がJSONとして読み取れませんでした。もう一度お試しください。");
   }
   return normalizeMeta(parsed);
+}
+
+export interface TranscriptOptions {
+  apiKey: string;
+  model: string;
+  audio: UploadedAudio;
+  /** 話者の呼び名。分かっていれば渡すと「Aさん」より具体的になる。 */
+  speakers?: string;
+  onStatus: (status: string) => void;
+  onModelChanged?: (model: string) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * 全文書き起こし。メタデータとは別の呼び出しにしている。
+ * 1回のレスポンスに詰め込むと出力上限に当たって全体が壊れるため、
+ * また書き起こしは必要なときだけ作れば無料枠を節約できるため。
+ */
+export async function generateTranscript(opts: TranscriptOptions): Promise<TranscriptSegment[]> {
+  const { apiKey, model, audio, speakers, onStatus, onModelChanged, signal } = opts;
+  if (!isAudioUsable(audio)) {
+    throw new Error("音声の保持期限(48時間)が切れています。もう一度アップロードしてください。");
+  }
+
+  onStatus("書き起こし中…");
+  const prompt = `添付の音声を日本語で書き起こしてください。
+
+要件:
+- 発言のまとまりごとに区切り、それぞれに開始時刻を付ける。
+- time は "MM:SS"(60分を超える場合も分表記のまま)。
+- 複数の話者がいる場合は話者を区別する。${speakers ? `話者は次のとおり: ${speakers}` : "名前が分からない場合は「A」「B」とする。"}
+- 話者が1人の場合、speaker は空文字にする。
+- 「えー」「あのー」などのつなぎ言葉は省いて読みやすくする。ただし発言の意味は変えない。
+- 聞き取れない箇所は「(聞き取り不明)」とする。推測で埋めない。
+
+次の構造の JSON のみを出力する:
+{"segments": [{"time": string, "speaker": string, "text": string}]}`;
+
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [
+        {
+          parts: [
+            { file_data: { mime_type: "audio/mpeg", file_uri: audio.uri } },
+            { text: prompt },
+          ],
+        },
+      ],
+      // 書き起こしは創作ではないので温度を下げる
+      generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
+
+  if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし");
+
+  const data = await res.json();
+  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("書き起こしが空でした。もう一度お試しください。");
+
+  let parsed: { segments?: unknown };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("書き起こしを読み取れませんでした。もう一度お試しください。");
+  }
+  const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
+  const cleaned = (segments as Record<string, unknown>[])
+    .filter((s) => s && typeof s.text === "string" && s.text.trim())
+    .map((s) => ({
+      time: typeof s.time === "string" ? s.time : "",
+      speaker: typeof s.speaker === "string" ? s.speaker : "",
+      text: (s.text as string).trim(),
+    }));
+  if (cleaned.length === 0) throw new Error("書き起こしが得られませんでした。");
+  return cleaned;
+}
+
+/** 書き起こしを貼り付けやすい平文にする。 */
+export function transcriptToText(segments: TranscriptSegment[]): string {
+  return segments
+    .map((s) => {
+      const head = [s.time, s.speaker].filter(Boolean).join(" ");
+      return head ? `${head}\n${s.text}` : s.text;
+    })
+    .join("\n\n");
 }

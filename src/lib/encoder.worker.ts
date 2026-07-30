@@ -21,6 +21,7 @@ import {
   Analyzer,
   HighPassFilter,
   NoiseReducer,
+  PauseDetector,
   SilenceTrimmer,
   applyGain,
   type DspOptions,
@@ -181,6 +182,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // 仕上がりのラウドネスを実測して報告する。リミッターが働いた分だけ
     // 目標から下がるため、狙い通りかを利用者が確認できるようにする
     const outMeter = new LoudnessMeter(info.sampleRate, outChannels);
+    // 話の切り替わり候補。出力の時間軸で拾うので、無音カット後でも再生位置と一致する
+    const pauses = new PauseDetector(info.sampleRate, noiseFloor);
 
     let outputFrames = 0;
 
@@ -201,6 +204,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     const writeLimited = async (limited: Float32Array[], length: number) => {
       outputFrames += length;
       outMeter.push(limited, length);
+      pauses.push(limited, length);
       const monoView =
         outChannels === 1 ? limited[0].subarray(0, length) : downmix(limited, length, monoOut);
       await publish.write(limited, length);
@@ -277,6 +281,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         correctionDb,
         peakDbfs: outMeter.peakDbfs(),
         limitedSamples: limiter.reducedSamples,
+        // チャプター時刻を吸着させるための候補位置(秒)
+        pauses: pauses.result(),
       },
       [publishMp3, aiMp3],
     );

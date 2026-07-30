@@ -292,3 +292,14 @@ input[type="color"] {
 .spec dd { margin: 0; }
 .spec strong.ok { color: var(--accent); }
 .spec strong.warn { color: #ffb257; }
+
+.head-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+
+.transcript {
+  margin-top: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+  border-top: 1px solid #333;
+}
+.transcript-seg { padding: 10px 0; border-bottom: 1px solid #2c2c2c; font-size: 0.92rem; line-height: 1.65; }
+.transcript-seg:last-child { border-bottom: none; }

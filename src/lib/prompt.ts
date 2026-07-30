@@ -23,6 +23,8 @@ export interface PromptConfig {
   /** 番組名。プロンプトと告知画像の両方で使う。 */
   showName: string;
   showContext: string;
+  /** 話者の呼び名(カンマ区切り)。書き起こしで話者を具体名にするために使う。 */
+  speakers: string;
   tone: Tone;
   titleStyle: TitleStyle;
   descriptionLength: number; // 説明文の目安文字数
@@ -34,6 +36,7 @@ export interface PromptConfig {
 export const DEFAULT_PROMPT_CONFIG: PromptConfig = {
   showName: "",
   showContext: "",
+  speakers: "",
   tone: "friendly",
   titleStyle: "curiosity",
   descriptionLength: 350,
@@ -64,7 +67,21 @@ function schemaBlock(generateSocial: boolean): string {
 }`;
 }
 
-export function buildPrompt(config: PromptConfig): string {
+/** 秒を "MM:SS" に整える。60分を超えても分表記のまま(例 "72:30")。 */
+export function formatTimecode(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+export interface PromptContext {
+  /** 端末側で検出した話の切り替わり候補(秒)。チャプター時刻の精度を上げるために渡す。 */
+  pauses?: number[];
+  /** 音声の長さ(秒)。ありえない時刻を返させないために伝える。 */
+  durationSec?: number;
+}
+
+export function buildPrompt(config: PromptConfig, context: PromptContext = {}): string {
   const sections: string[] = [];
 
   sections.push(
@@ -73,6 +90,7 @@ export function buildPrompt(config: PromptConfig): string {
 
   const background = [
     config.showName.trim() && `番組名: ${config.showName.trim()}`,
+    config.speakers.trim() && `話者: ${config.speakers.trim()}`,
     config.showContext.trim(),
   ]
     .filter(Boolean)
@@ -102,7 +120,19 @@ export function buildPrompt(config: PromptConfig): string {
 
 ## chapters
 - 話題が実際に切り替わった箇所のみ。無理に細分化しない。
-- time は音声の実時間に基づく "MM:SS"。60分を超える場合も分表記のまま(例 "72:30")。
+- time は音声の実時間に基づく "MM:SS"。60分を超える場合も分表記のまま(例 "72:30")。${
+    context.durationSec
+      ? `\n- この音声の長さは ${formatTimecode(context.durationSec)} です。これを超える時刻は返さない。`
+      : ""
+  }${
+    context.pauses && context.pauses.length > 0
+      ? `
+- 下に「一定以上の沈黙のあとに話が再開した位置」を挙げます。話題の切り替わりは
+  ここで起きている可能性が高いので、チャプターの time は**原則この一覧から選ぶ**こと。
+  一覧に該当が無いと判断した場合のみ、それ以外の時刻を使ってよい。
+  候補: ${context.pauses.map(formatTimecode).join(", ")}`
+      : ""
+  }
 
 ## imageQuote
 - SNSの告知画像に大きく載せる一言。この回で最も引きの強い言葉を選ぶ。
