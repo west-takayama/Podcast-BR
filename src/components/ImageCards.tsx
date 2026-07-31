@@ -4,11 +4,13 @@ import {
   canvasToBlob,
   renderCard,
   renderPlainImage,
+  TEMPLATES,
   type CardContent,
   type Preset,
+  type Template,
 } from "../lib/image";
 import { generateIllustration } from "../lib/gemini";
-import { buildImagePrompt } from "../lib/imagePrompt";
+import { buildImagePrompt, type PromptMode } from "../lib/imagePrompt";
 import CopyButton from "./CopyButton";
 
 interface Props {
@@ -44,9 +46,15 @@ export default function ImageCards({
   const [background, setBackground] = useState<ImageBitmap | null>(null);
   const [generating, setGenerating] = useState(false);
   const [imported, setImported] = useState<ImageBitmap | null>(null);
+  // 背景が無いうちは「全面」のほうが締まる。画像を入れたら「帯」に寄せる。
+  // ただし利用者が自分で選んだあとは、その選択を勝手に変えない
+  const [template, setTemplate] = useState<Template>("full");
+  const [templateChosen, setTemplateChosen] = useState(false);
   // 取り込んだ画像に文字まで描かれている場合は、こちらで重ねると二重になる
   const [importedAsIs, setImportedAsIs] = useState(true);
   const [promptShape, setPromptShape] = useState<"square" | "story">("square");
+  // 既定は「絵だけ作らせて文字はこちらで載せる」。日本語が崩れないため
+  const [promptMode, setPromptMode] = useState<PromptMode>("background");
 
   const content: CardContent = useMemo(
     () => ({
@@ -55,8 +63,9 @@ export default function ImageCards({
       showName,
       accent,
       background: (imported && !importedAsIs ? imported : background) ?? undefined,
+      template,
     }),
-    [quote, title, showName, accent, background, imported, importedAsIs],
+    [quote, title, showName, accent, background, imported, importedAsIs, template],
   );
 
   useEffect(() => {
@@ -102,6 +111,7 @@ export default function ImageCards({
       // 古い bitmap は上の useEffect の後片付けで閉じられる
       setImportedAsIs(true);
       setImported(bitmap);
+      if (!templateChosen) setTemplate("band");
     } catch {
       setError("この画像は読み込めませんでした(PNG / JPEG をお試しください)");
     }
@@ -139,8 +149,9 @@ export default function ImageCards({
         subject,
         accent,
         shape: promptShape,
+        mode: promptMode,
       }),
-    [title, quote, showName, subject, accent, promptShape],
+    [title, quote, showName, subject, accent, promptShape, promptMode],
   );
 
   const current = rendered[selected];
@@ -169,10 +180,65 @@ export default function ImageCards({
     }
   };
 
+  const templateSpec = TEMPLATES.find((t) => t.id === template)!;
+  const showTemplatePicker = !(imported && importedAsIs);
+
   return (
     <div className="card">
       <h2>🖼 告知画像</h2>
       {error && <p className="muted">⚠️ {error}</p>}
+
+      {/*
+        素材の差が仕上がりを決めるので、画像の読み込みを最初に置く。
+        ChatGPT などで作った絵に、崩れない文字をこちらで載せる形が一番きれいになる。
+      */}
+      <div className="source">
+        <div className="row-buttons" style={{ marginTop: 0 }}>
+          <label className="dl" style={{ margin: 0, flex: 1, cursor: "pointer" }}>
+            <input
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void importImage(f);
+                e.target.value = "";
+              }}
+            />
+            {imported ? "🖼 別の画像に差し替える" : "🖼 背景にする画像を読み込む"}
+          </label>
+          {imported && (
+            <button
+              onClick={() => {
+                setImported(null);
+                setImportedAsIs(true);
+              }}
+            >
+              外す
+            </button>
+          )}
+        </div>
+        {imported ? (
+          <label className="check" style={{ marginTop: 12, marginBottom: 0 }}>
+            <input
+              type="checkbox"
+              checked={!importedAsIs}
+              onChange={(e) => setImportedAsIs(!e.target.checked)}
+            />
+            <span>
+              この画像に文字を入れる
+              <br />
+              <span className="muted">
+                外すと画像をそのまま使います(すでに題名が描かれている場合)。
+              </span>
+            </span>
+          </label>
+        ) : (
+          <p className="muted" style={{ margin: "10px 0 0" }}>
+            ChatGPT などで作った絵を読み込むと、その上に崩れない文字を載せます。読み込まない場合は単色の背景になります。
+          </p>
+        )}
+      </div>
 
       <div className="preset-tabs">
         {PRESETS.map((p) => (
@@ -188,6 +254,26 @@ export default function ImageCards({
       <p className="muted">
         {spec.note} ・ {spec.width}×{spec.height}
       </p>
+
+      {showTemplatePicker && (
+        <>
+          <div className="preset-tabs">
+            {TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                className={template === t.id ? "active" : ""}
+                onClick={() => {
+                  setTemplate(t.id);
+                  setTemplateChosen(true);
+                }}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <p className="muted">{templateSpec.note}</p>
+        </>
+      )}
 
       {current ? (
         <>
@@ -211,12 +297,29 @@ export default function ImageCards({
       */}
       <div className="illust">
         <h3 style={{ marginTop: 0, borderTop: "none", paddingTop: 0 }}>
-          ✍️ 題名を絵の中に描く(ChatGPT)
+          ✍️ ChatGPT で素材を作る
         </h3>
         <p className="muted">
-          下の文をコピーして ChatGPT に貼ると、題名が入った画像を作れます。追加費用はかかりません。
-          <br />
-          できた画像を保存して、この下から読み込んでください。
+          下の文をコピーして ChatGPT に貼ると、この回に合った画像が作れます。追加費用はかかりません。
+        </p>
+        <div className="preset-tabs">
+          <button
+            className={promptMode === "background" ? "active" : ""}
+            onClick={() => setPromptMode("background")}
+          >
+            絵だけ作る
+          </button>
+          <button
+            className={promptMode === "poster" ? "active" : ""}
+            onClick={() => setPromptMode("poster")}
+          >
+            題名も描かせる
+          </button>
+        </div>
+        <p className="muted">
+          {promptMode === "background"
+            ? "文字はアプリが載せるので日本語が崩れません。読み込んだあと「この画像に文字を入れる」を有効にしてください。"
+            : "絵と文字が一体になりますが、日本語が崩れることがあります。読み込んだあと「この画像に文字を入れる」を外してください。"}
         </p>
         <div className="preset-tabs">
           <button
@@ -238,47 +341,9 @@ export default function ImageCards({
         </div>
         <textarea readOnly value={chatgptPrompt} rows={7} />
 
-        <label className="dl" style={{ cursor: "pointer" }}>
-          <input
-            type="file"
-            accept="image/*"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void importImage(f);
-              e.target.value = "";
-            }}
-          />
-          🖼 作った画像を読み込む
-        </label>
-
-        {imported && (
-          <>
-            <label className="check" style={{ marginTop: 12 }}>
-              <input
-                type="checkbox"
-                checked={importedAsIs}
-                onChange={(e) => setImportedAsIs(e.target.checked)}
-              />
-              <span>
-                画像に文字が描かれている(そのまま使う)
-                <br />
-                <span className="muted">
-                  外すと背景として扱い、崩れない文字をこちらで重ねます。文字が読みにくい・崩れている
-                  ときはこちらが安全です。
-                </span>
-              </span>
-            </label>
-            <button
-              onClick={() => {
-                setImported(null);
-                setImportedAsIs(true);
-              }}
-            >
-              取り込んだ画像を外す
-            </button>
-          </>
-        )}
+        <p className="muted" style={{ marginBottom: 0 }}>
+          できた画像は、上の「背景にする画像を読み込む」から取り込んでください。
+        </p>
       </div>
 
       {apiKey && imageModel && (

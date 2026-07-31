@@ -20,6 +20,24 @@ export const PRESETS: PresetSpec[] = [
   { id: "cover", label: "カバー画像", width: 3000, height: 3000, note: "Spotify エピソード画像" },
 ];
 
+/**
+ * 文字の載せ方。素材(背景画像)の見せ方と、文字の読みやすさの折り合いが
+ * 回ごとに違うため、選べるようにしている。
+ */
+export type Template = "band" | "full" | "minimal";
+
+export interface TemplateSpec {
+  id: Template;
+  label: string;
+  note: string;
+}
+
+export const TEMPLATES: TemplateSpec[] = [
+  { id: "band", label: "帯", note: "下に帯を敷いて文字を置く。絵を大きく見せたいとき" },
+  { id: "full", label: "全面", note: "画面いっぱいに文字。言葉を主役にしたいとき" },
+  { id: "minimal", label: "余白", note: "絵をほぼそのまま見せ、下に小さく添える" },
+];
+
 export interface CardContent {
   quote: string; // 大きく載せる一言
   title: string;
@@ -27,6 +45,8 @@ export interface CardContent {
   accent: string; // #RRGGBB
   /** 背景に敷く AI イラスト。無ければ単色の背景になる。 */
   background?: CanvasImageSource & { width: number; height: number };
+  /** 文字の載せ方。既定は「帯」。 */
+  template?: Template;
 }
 
 const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif`;
@@ -89,6 +109,15 @@ function fitText(
   return { size, lines: wrapJapanese(ctx, text, maxWidth).slice(0, maxLines) };
 }
 
+/**
+ * 字間。日本語の見出しは詰め気味のほうが締まって見える。
+ * letterSpacing は比較的新しい API なので、無い環境では黙って無視される。
+ */
+function setTracking(ctx: CanvasRenderingContext2D, px: number): void {
+  const c = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+  if ("letterSpacing" in c) c.letterSpacing = `${px}px`;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
   if (!m) return [29, 185, 84];
@@ -96,31 +125,75 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** 音の波形を模した装飾。ポッドキャストであることを一目で伝える。 */
-function drawWaveform(
+/**
+ * 背景を敷く。縦横比が違うプリセットでも歪ませないよう短辺に合わせて切り出す。
+ * 画像が無いときは、アクセント色をごく薄く効かせた単色にする。
+ */
+function drawBackground(
   ctx: CanvasRenderingContext2D,
+  W: number,
+  H: number,
+  content: CardContent,
+  rgb: [number, number, number],
+): void {
+  const [r, g, b] = rgb;
+  ctx.fillStyle = "#0a0a0a";
+  ctx.fillRect(0, 0, W, H);
+
+  const bg = content.background;
+  if (bg) {
+    const scale = Math.max(W / bg.width, H / bg.height);
+    ctx.drawImage(bg, (W - bg.width * scale) / 2, (H - bg.height * scale) / 2, bg.width * scale, bg.height * scale);
+    return;
+  }
+  const glow = ctx.createRadialGradient(W * 0.72, H * 0.15, 0, W * 0.72, H * 0.15, W * 0.95);
+  glow.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.3)`);
+  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+}
+
+/** 番組名。小さく、字間を開けて、見出しの前に置く。 */
+function drawShowName(
+  ctx: CanvasRenderingContext2D,
+  text: string,
   x: number,
   y: number,
-  width: number,
-  maxHeight: number,
-  accent: string,
-  seed: number,
-): void {
-  const bars = 34;
-  const gap = width / bars;
-  const barWidth = gap * 0.42;
-  ctx.fillStyle = accent;
-  for (let i = 0; i < bars; i++) {
-    // 疑似乱数で自然な凹凸を作る(毎回同じ回なら同じ形になる)
-    const n = Math.abs(Math.sin((i + 1) * 12.9898 + seed) * 43758.5453) % 1;
-    const h = maxHeight * (0.18 + n * 0.82);
-    ctx.globalAlpha = 0.35 + n * 0.5;
-    const bx = x + i * gap;
-    ctx.beginPath();
-    ctx.roundRect(bx, y - h / 2, barWidth, h, barWidth / 2);
-    ctx.fill();
+  size: number,
+  color: string,
+): number {
+  if (!text) return y;
+  setTracking(ctx, size * 0.14);
+  ctx.font = `700 ${size}px ${FONT_STACK}`;
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  setTracking(ctx, 0);
+  return y + size * 1.05;
+}
+
+/**
+ * 見出しを描く。行間は 1.3。日本語の見出しは行間を空けすぎると
+ * 一続きの言葉に見えなくなるため、既定の 1.45 から詰めた。
+ */
+function drawHeadline(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  x: number,
+  y: number,
+  size: number,
+  color = "#ffffff",
+): number {
+  setTracking(ctx, -size * 0.02);
+  ctx.font = `bold ${size}px ${FONT_STACK}`;
+  ctx.fillStyle = color;
+  const lineHeight = size * 1.3;
+  let cursor = y;
+  for (const line of lines) {
+    ctx.fillText(line, x, cursor);
+    cursor += lineHeight;
   }
-  ctx.globalAlpha = 1;
+  setTracking(ctx, 0);
+  return cursor;
 }
 
 export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasElement {
@@ -131,85 +204,116 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("画像を描画できませんでした");
 
-  const [r, g, b] = hexToRgb(content.accent);
+  const rgb = hexToRgb(content.accent);
+  const [r, g, b] = rgb;
   const accent = `rgb(${r}, ${g}, ${b})`;
-  const pad = W * 0.085;
+  const pad = W * 0.078;
   const inner = W - pad * 2;
+  const template = content.template ?? "band";
+  const quote = content.quote || content.title;
 
-  ctx.fillStyle = "#0a0a0a";
-  ctx.fillRect(0, 0, W, H);
+  // ストーリーは上下に SNS の UI が重なるため、その内側に収める
+  const isStory = H / W > 1.5;
+  const safeBottom = isStory ? H * 0.14 : pad;
 
-  if (content.background) {
-    // 縦横比が違うプリセットでも歪ませないよう、短辺に合わせて切り出す
-    const bg = content.background;
-    const scale = Math.max(W / bg.width, H / bg.height);
-    const dw = bg.width * scale;
-    const dh = bg.height * scale;
-    ctx.drawImage(bg, (W - dw) / 2, (H - dh) / 2, dw, dh);
-
-    // 文字を確実に読ませるための暗幕。下ほど濃くして下部の情報を守る
-    const scrim = ctx.createLinearGradient(0, 0, 0, H);
-    scrim.addColorStop(0, "rgba(8, 8, 8, 0.55)");
-    scrim.addColorStop(0.45, "rgba(8, 8, 8, 0.72)");
-    scrim.addColorStop(1, "rgba(8, 8, 8, 0.92)");
-    ctx.fillStyle = scrim;
-    ctx.fillRect(0, 0, W, H);
-  } else {
-    // イラストが無いときはアクセント色をごく薄く敷いて単調さを避ける
-    const glow = ctx.createRadialGradient(W * 0.75, H * 0.12, 0, W * 0.75, H * 0.12, W * 0.9);
-    glow.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.28)`);
-    glow.addColorStop(1, "rgba(0, 0, 0, 0)");
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, W, H);
-  }
-
-  // 縦長ほど余白が増えるので、中身の基準位置を高さに合わせて調整する
-  const isTall = H / W > 1.3;
-  const topAnchor = isTall ? H * 0.3 : pad * 1.5;
-
+  drawBackground(ctx, W, H, content, rgb);
   ctx.textBaseline = "top";
 
-  // 番組名
-  let y = topAnchor;
-  if (content.showName) {
-    const size = W * 0.036;
-    ctx.font = `600 ${size}px ${FONT_STACK}`;
+  if (template === "band") {
+    // --- 帯: 絵を大きく見せ、下に敷いた面の中だけで文字を読ませる ---
+    const showSize = W * 0.032;
+    const head = fitText(ctx, quote, inner, W * 0.078, 3);
+    const headBlock = head.lines.length * head.size * 1.3;
+    const rule = Math.max(4, W * 0.0075);
+    const bandPad = W * 0.075;
+    const bandHeight =
+      bandPad + (content.showName ? showSize * 1.05 + W * 0.03 : 0) + headBlock + bandPad * 0.9;
+    const bandTop = H - safeBottom - bandHeight;
+
+    // 帯の上端が硬い線にならないよう、少し上から溶かす
+    const fade = ctx.createLinearGradient(0, bandTop - H * 0.09, 0, bandTop);
+    fade.addColorStop(0, "rgba(8, 8, 8, 0)");
+    fade.addColorStop(1, "rgba(8, 8, 8, 0.88)");
+    ctx.fillStyle = fade;
+    ctx.fillRect(0, bandTop - H * 0.09, W, H * 0.09);
+    ctx.fillStyle = "rgba(8, 8, 8, 0.9)";
+    ctx.fillRect(0, bandTop, W, H - bandTop);
+
+    // 帯の上端に細線を通す。これが無いと暗い絵では帯が「ただの暗がり」に見える
     ctx.fillStyle = accent;
-    ctx.fillText(`🎙 ${content.showName}`, pad, y);
-    y += size * 1.9;
-  }
+    ctx.fillRect(0, bandTop, W, Math.max(3, W * 0.005));
+    // 左端の縦線で番組の色を効かせる
+    ctx.fillRect(pad - W * 0.028, bandTop + bandPad, rule, bandHeight - bandPad * 1.9);
 
-  // 引用(この画像の主役)
-  const quote = content.quote || content.title;
-  const fitted = fitText(ctx, quote, inner, W * 0.115, 5);
-  ctx.font = `bold ${fitted.size}px ${FONT_STACK}`;
-  ctx.fillStyle = "#ffffff";
-  const lineHeight = fitted.size * 1.45;
-  for (const line of fitted.lines) {
-    ctx.fillText(line, pad, y);
-    y += lineHeight;
-  }
+    let y = bandTop + bandPad;
+    y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
+    if (content.showName) y += W * 0.03;
+    drawHeadline(ctx, head.lines, pad, y, head.size);
+  } else if (template === "full") {
+    // --- 全面: 言葉が主役。絵は質感として残す ---
+    const scrim = ctx.createLinearGradient(0, 0, 0, H);
+    scrim.addColorStop(0, "rgba(8, 8, 8, 0.62)");
+    scrim.addColorStop(0.5, "rgba(8, 8, 8, 0.74)");
+    scrim.addColorStop(1, "rgba(8, 8, 8, 0.93)");
+    ctx.fillStyle = scrim;
+    ctx.fillRect(0, 0, W, H);
 
-  // アクセントの区切り線
-  y += lineHeight * 0.25;
-  ctx.fillStyle = accent;
-  ctx.fillRect(pad, y, W * 0.16, Math.max(4, W * 0.008));
-  y += W * 0.05;
+    const showSize = W * 0.034;
+    const head = fitText(ctx, quote, inner, W * 0.098, 4);
+    const headBlock = head.lines.length * head.size * 1.3;
+    const rule = Math.max(5, W * 0.009);
+    const titleShown = content.title && content.title !== quote;
+    const t = titleShown ? fitText(ctx, content.title, inner, W * 0.04, 2, "500") : null;
+    const titleBlock = t ? W * 0.055 + t.lines.length * t.size * 1.5 : 0;
+    const total =
+      (content.showName ? showSize * 1.05 + W * 0.045 : 0) + headBlock + titleBlock;
 
-  // タイトル(引用と別の文言のときだけ出す)
-  if (content.title && content.title !== quote) {
-    const t = fitText(ctx, content.title, inner, W * 0.045, 3, "500");
-    ctx.font = `500 ${t.size}px ${FONT_STACK}`;
-    ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
-    for (const line of t.lines) {
-      ctx.fillText(line, pad, y);
-      y += t.size * 1.5;
+    // 上下の余白を釣り合わせる。文字量が変わっても重心がぶれない
+    let y = Math.max(pad * 1.2, (H - total) / 2);
+    y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
+    if (content.showName) y += W * 0.045;
+    y = drawHeadline(ctx, head.lines, pad, y, head.size);
+    if (t) {
+      y += W * 0.03;
+      ctx.fillStyle = accent;
+      ctx.fillRect(pad, y, W * 0.13, rule);
+      y += W * 0.025 + rule;
+      setTracking(ctx, 0);
+      ctx.font = `500 ${t.size}px ${FONT_STACK}`;
+      ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
+      for (const line of t.lines) {
+        ctx.fillText(line, pad, y);
+        y += t.size * 1.5;
+      }
     }
-  }
+  } else {
+    // --- 余白: 絵をほぼそのまま見せ、下端に最小限だけ添える ---
+    const showSize = W * 0.028;
+    const head = fitText(ctx, quote, inner, W * 0.064, 3, "700");
+    const headBlock = head.lines.length * head.size * 1.3;
+    const barHeight = W * 0.06 + (content.showName ? showSize * 1.05 + W * 0.022 : 0) + headBlock + W * 0.06;
+    const barTop = H - safeBottom - barHeight;
 
-  // 波形は下部に固定して、文字量が変わってもレイアウトが崩れないようにする
-  const seed = quote.length + content.title.length;
-  drawWaveform(ctx, pad, H - pad - W * 0.03, inner, W * 0.1, accent, seed);
+    const fade = ctx.createLinearGradient(0, barTop - H * 0.16, 0, barTop + barHeight);
+    fade.addColorStop(0, "rgba(8, 8, 8, 0)");
+    fade.addColorStop(1, "rgba(8, 8, 8, 0.82)");
+    ctx.fillStyle = fade;
+    ctx.fillRect(0, barTop - H * 0.16, W, barHeight + H * 0.16);
+
+    let y = barTop + W * 0.06;
+    y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
+    if (content.showName) y += W * 0.022;
+    setTracking(ctx, 0);
+    ctx.font = `700 ${head.size}px ${FONT_STACK}`;
+    ctx.fillStyle = "#ffffff";
+    for (const line of head.lines) {
+      ctx.fillText(line, pad, y);
+      y += head.size * 1.3;
+    }
+    // 下端のアクセント線。番組として並んだときの目印になる
+    ctx.fillStyle = accent;
+    ctx.fillRect(0, H - Math.max(6, W * 0.011), W, Math.max(6, W * 0.011));
+  }
 
   return canvas;
 }

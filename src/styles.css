@@ -280,6 +280,14 @@ input[type="color"] {
 
 .illust { margin-top: 14px; padding-top: 12px; border-top: 1px solid #333; }
 
+/* 素材の読み込み。仕上がりを一番左右するので、告知画像の先頭に置く */
+.source {
+  background: #262626;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
 .spec { margin: 0; font-size: 0.9rem; }
 .spec > div {
   display: flex;
