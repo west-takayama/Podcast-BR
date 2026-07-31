@@ -486,6 +486,7 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       subject: "生成AIを業務で1週間使った記録",
       accent: "#ffd400",
       shape: "square",
+      mode: "poster",
     });
     check("題名を鍵括弧で囲んで渡す", p.includes("「AIに任せられる仕事、まだ無理な仕事」"));
     check("一字一句そのままと指示する", p.includes("一字一句"));
@@ -501,10 +502,27 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       showName: "",
       accent: "#ffd400",
       shape: "story",
+      mode: "poster",
     });
     check("縦長では9:16を指定する", tall.includes("9:16"));
     check("番組名が空なら触れない", !tall.includes("小さく:"));
     check("題材が無ければ触れない", !tall.includes("話している内容"));
+
+    // 既定は「絵だけ作らせて文字はアプリが載せる」経路
+    const bg = buildImagePrompt({
+      headline: "AIに任せられる仕事",
+      showName: "ブリッジラジオ",
+      subject: "生成AIを業務で1週間使った記録",
+      accent: "#ffd400",
+      shape: "square",
+    });
+    check("既定は絵だけの注文文", bg.includes("背景イラスト"));
+    check("文字を一切描かせない", bg.includes("文字・ロゴ・記号・数字を一切描かない"));
+    check("題名を絵に入れさせない", !bg.includes("「AIに任せられる仕事」"));
+    check("文字を置く余地を残させる", bg.includes("文字を置く余地"));
+    check("話題を渡す(絵だけ)", bg.includes("生成AIを業務で1週間使った記録"));
+    const bgStory = buildImagePrompt({ headline: "題名", showName: "", accent: "#ffd400", shape: "story" });
+    check("縦長では下半分を空けさせる", bgStory.includes("下半分"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
