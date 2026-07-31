@@ -7,6 +7,31 @@ import { parseTimestamp } from "./id3";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
+/**
+ * 混雑(503)など、待てば直る種類の応答。
+ * 利用量とは無関係にモデル側が詰まっているだけなので、少し待って投げ直す。
+ * 429 は含めない。無料枠の上限に当たっている状態で急いで投げ直すと、
+ * 待ち時間が延びるだけで得がないため。
+ */
+const TRANSIENT_STATUS = [500, 502, 503, 504];
+/** 待ち時間。混雑は数十秒で解けることが多いので、そこまで粘る。 */
+const RETRY_WAIT_MS = [3000, 8000, 20000];
+
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("中止しました", "AbortError"));
+    };
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+
 export interface ModelInfo {
   id: string; // "gemini-3.5-flash"
   displayName: string;
@@ -254,13 +279,25 @@ async function uploadFile(
   mp3: ArrayBuffer,
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
+  onStatus?: (status: string) => void,
 ): Promise<UploadedFile> {
-  const { status, text } = await xhrUpload(
-    `${API_BASE}/upload/v1beta/files?key=${apiKey}&uploadType=media`,
-    mp3,
-    onProgress,
-    signal,
-  );
+  const send = () =>
+    xhrUpload(
+      `${API_BASE}/upload/v1beta/files?key=${apiKey}&uploadType=media`,
+      mp3,
+      onProgress,
+      signal,
+    );
+
+  let { status, text } = await send();
+  // 送信も混雑で弾かれることがある。数十MB を捨てずに待って投げ直す
+  for (let i = 0; i < RETRY_WAIT_MS.length && TRANSIENT_STATUS.includes(status); i++) {
+    const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
+    onStatus?.(`Gemini が混雑しています。${sec}秒待って送信し直します(${i + 1}/${RETRY_WAIT_MS.length})…`);
+    await sleep(RETRY_WAIT_MS[i], signal);
+    ({ status, text } = await send());
+  }
+
   if (status < 200 || status >= 300) {
     if (status === 400 && text.includes("API_KEY_INVALID")) {
       throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
@@ -268,6 +305,11 @@ async function uploadFile(
     if (status === 413) {
       throw new Error(
         "音声ファイルが大きすぎてアップロードできませんでした。設定で無音カットを有効にするか、エピソードを分割してください。",
+      );
+    }
+    if (TRANSIENT_STATUS.includes(status)) {
+      throw new Error(
+        "Gemini が混雑していて音声を受け付けられませんでした(自動で3回試しました)。数分待ってから「生成だけやり直す」を押してください。",
       );
     }
     throw new Error(`音声のアップロードに失敗しました (${status}): ${text.slice(0, 200)}`);
@@ -386,7 +428,7 @@ export async function uploadEpisodeAudio(
   signal?: AbortSignal,
 ): Promise<UploadedAudio> {
   onStatus("音声をアップロード中…");
-  const file = await uploadFile(apiKey, mp3, onProgress, signal);
+  const file = await uploadFile(apiKey, mp3, onProgress, signal, onStatus);
 
   let uri = file.uri;
   if (file.state !== "ACTIVE") {
@@ -401,7 +443,10 @@ export function isAudioUsable(audio: UploadedAudio | null | undefined): boolean 
   return !!audio && audio.expiresAt > Date.now();
 }
 
-/** モデル廃止で 404 になったら一覧を引き直して一度だけやり直す。 */
+/**
+ * モデル廃止で 404 になったら一覧を引き直して一度だけやり直す。
+ * 混雑で 503 が返った場合は、間を空けて自動で投げ直す。
+ */
 async function callWithModelFallback(
   apiKey: string,
   model: string,
@@ -419,6 +464,16 @@ async function callWithModelFallback(
     });
 
   let res = await call(model);
+
+  // 混雑はこちらに原因が無く待てば解ける。利用者に押し直させる必要はない
+  for (let i = 0; i < RETRY_WAIT_MS.length && TRANSIENT_STATUS.includes(res.status); i++) {
+    const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
+    onStatus(`Gemini が混雑しています。${sec}秒待って自動で再試行します(${i + 1}/${RETRY_WAIT_MS.length})…`);
+    await sleep(RETRY_WAIT_MS[i], signal);
+    onStatus("再試行中…");
+    res = await call(model);
+  }
+
   if (res.status === 404) {
     onStatus("モデルが更新されたため切り替え中…");
     const models = await listModels(apiKey, signal);
@@ -443,6 +498,13 @@ function throwForStatus(status: number, body: string, what: string): never {
   }
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
     throw new Error("音声の保持期限(48時間)が切れている可能性があります。もう一度アップロードしてください。");
+  }
+  // ここに来るのは自動再試行を使い切った場合。原因は Google 側の混雑で、
+  // 生の JSON を見せても打つ手は変わらないため、待つべきことだけ伝える
+  if (TRANSIENT_STATUS.includes(status)) {
+    throw new Error(
+      "Gemini が混雑しているため受け付けられませんでした(自動で3回試しました)。数分待ってから「生成だけやり直す」を押してください。変換済みMP3はそのまま使えます。",
+    );
   }
   throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
 }

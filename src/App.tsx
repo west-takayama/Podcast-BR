@@ -454,8 +454,10 @@ export default function App() {
           previousTitles,
         },
         onStatus: (text) => {
-          if (text.includes("生成") || text.includes("モデル")) advance("generate", 0.15, text);
+          if (text.includes("生成中") || text.includes("モデル")) advance("generate", 0.15, text);
           else if (text.includes("解析")) advance("upload", 1, text);
+          // 混雑の待機など、進捗は変わらないが状況は伝えたいもの
+          else setDetail(text);
         },
         onUploadProgress: (f) =>
           advance("upload", f, `${(converted.aiMp3.byteLength / 1024 / 1024).toFixed(0)} MB 送信中`),
