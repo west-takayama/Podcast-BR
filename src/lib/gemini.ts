@@ -98,32 +98,20 @@ export function pickImageModel(models: ModelInfo[]): string | null {
 export interface IllustrationOptions {
   apiKey: string;
   model: string;
-  /** エピソードの内容(要約やキーワード)。絵柄の題材にする。 */
-  subject: string;
-  /** 番組のメインカラー。回ごとに絵柄が変わっても色で統一感が保てる。 */
-  accent: string;
+  /** 画像生成に渡す指示文。告知画像と同じ文を使い、指示を一箇所にまとめている。 */
+  prompt: string;
   signal?: AbortSignal;
 }
 
 /**
- * 告知画像の背景に敷くイラストを生成する。
+ * 告知画像の素材を Gemini に作らせる。
  *
- * 文字は必ず除外させる。画像生成モデルの日本語文字は崩れることが多く、
- * こちらで重ねる文字とも競合するため。
+ * 指示文はアプリ側(lib/imagePrompt.ts)で組み立てたものをそのまま渡す。
+ * ChatGPT に貼る文と同じにしておかないと、どちらで作ったかで絵の方向性が
+ * 変わってしまい、番組としての見た目が揃わない。
  */
 export async function generateIllustration(opts: IllustrationOptions): Promise<Blob> {
-  const { apiKey, model, subject, accent, signal } = opts;
-
-  const prompt = `日本語ポッドキャストの告知画像に使う背景イラストを1枚生成してください。
-
-題材: ${subject}
-
-条件:
-- 文字・ロゴ・記号を一切含めない(重要)。後から文字を重ねるため。
-- ${accent} と黒を基調とした配色。
-- ミニマルで洗練された抽象的・編集的なイラスト。写実的な人物は避ける。
-- 中央付近は落ち着いた面にし、余白を残す。文字を重ねても読めるようにするため。
-- 正方形の構図。`;
+  const { apiKey, model, prompt, signal } = opts;
 
   const res = await fetch(`${API_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: "POST",

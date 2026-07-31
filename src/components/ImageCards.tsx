@@ -23,6 +23,8 @@ interface Props {
   imageModel?: string | null;
   /** 絵柄の題材にする内容(要約やキーワード)。 */
   subject?: string;
+  /** 設定の話者欄。写真に写す人数に使う。 */
+  speakers?: string;
 }
 
 interface Rendered {
@@ -38,6 +40,7 @@ export default function ImageCards({
   apiKey,
   imageModel,
   subject,
+  speakers,
 }: Props) {
   const [selected, setSelected] = useState<Preset>("square");
   const [rendered, setRendered] = useState<Partial<Record<Preset, Rendered>>>({});
@@ -122,11 +125,11 @@ export default function ImageCards({
     setGenerating(true);
     setError("");
     try {
+      // ChatGPT に貼る文と同じ指示を渡す。作り手が変わっても絵の方向性を揃える
       const blob = await generateIllustration({
         apiKey,
         model: imageModel,
-        subject: subject || quote || title,
-        accent,
+        prompt: chatgptPrompt,
       });
       const bitmap = await createImageBitmap(blob);
       setBackground((prev) => {
@@ -150,8 +153,9 @@ export default function ImageCards({
         accent,
         shape: promptShape,
         mode: promptMode,
+        speakers,
       }),
-    [title, quote, showName, subject, accent, promptShape, promptMode],
+    [title, quote, showName, subject, accent, promptShape, promptMode, speakers],
   );
 
   const current = rendered[selected];
@@ -205,7 +209,7 @@ export default function ImageCards({
                 e.target.value = "";
               }}
             />
-            {imported ? "🖼 別の画像に差し替える" : "🖼 背景にする画像を読み込む"}
+            {imported ? "🖼 別の画像に差し替える" : "🖼 使う画像を読み込む"}
           </label>
           {imported && (
             <button
@@ -235,7 +239,7 @@ export default function ImageCards({
           </label>
         ) : (
           <p className="muted" style={{ margin: "10px 0 0" }}>
-            ChatGPT などで作った絵を読み込むと、その上に崩れない文字を載せます。読み込まない場合は単色の背景になります。
+            ChatGPT などで作った写真を読み込むと、その上に崩れない文字を載せます。読み込まない場合は単色の背景になります。
           </p>
         )}
       </div>
@@ -300,26 +304,26 @@ export default function ImageCards({
           ✍️ ChatGPT で素材を作る
         </h3>
         <p className="muted">
-          下の文をコピーして ChatGPT に貼ると、この回に合った画像が作れます。追加費用はかかりません。
+          下の文をコピーして ChatGPT に貼ると、その回の話が実際に交わされている場面の写真が作れます。追加費用はかかりません。
         </p>
         <div className="preset-tabs">
           <button
             className={promptMode === "background" ? "active" : ""}
             onClick={() => setPromptMode("background")}
           >
-            絵だけ作る
+            写真だけ作る
           </button>
           <button
             className={promptMode === "poster" ? "active" : ""}
             onClick={() => setPromptMode("poster")}
           >
-            題名も描かせる
+            題名も入れる
           </button>
         </div>
         <p className="muted">
           {promptMode === "background"
-            ? "文字はアプリが載せるので日本語が崩れません。読み込んだあと「この画像に文字を入れる」を有効にしてください。"
-            : "絵と文字が一体になりますが、日本語が崩れることがあります。読み込んだあと「この画像に文字を入れる」を外してください。"}
+            ? "題名はアプリが載せるので日本語が崩れません。読み込んだあと「この画像に文字を入れる」を有効にしてください。"
+            : "写真と題名が一体になりますが、日本語が崩れることがあります。読み込んだあと「この画像に文字を入れる」を外してください。"}
         </p>
         <div className="preset-tabs">
           <button
@@ -350,7 +354,7 @@ export default function ImageCards({
         <div className="illust">
           <div className="row-buttons">
             <button onClick={makeIllustration} disabled={generating}>
-              {generating ? "生成中…" : background ? "🎨 別の絵にする" : "🎨 AIイラストを背景に"}
+              {generating ? "生成中…" : background ? "🎨 別の写真にする" : "🎨 Gemini で写真を作る"}
             </button>
             {background && (
               <button
@@ -366,8 +370,7 @@ export default function ImageCards({
             )}
           </div>
           <p className="muted">
-            エピソードの内容に合わせた背景を生成します(無料枠内・1日あたりの上限あり)。文字は
-            AI に描かせず、こちらで重ねるため崩れません。
+            上と同じ指示で Gemini に作らせます(無料枠内・1日あたりの上限あり)。ChatGPT を開かずに試せますが、写真らしさは ChatGPT のほうが上です。
           </p>
         </div>
       )}

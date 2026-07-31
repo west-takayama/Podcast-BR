@@ -478,51 +478,50 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("空の入力で落ちない", new Diagnostics().result(SR, -Infinity, 0, 0).length === 0);
   }
 
-  console.log("\n[19] ChatGPT に渡す画像の注文文");
+  console.log("\n[19] 画像生成の注文文");
   {
-    const p = buildImagePrompt({
-      headline: "AIに任せられる仕事、まだ無理な仕事",
+    const scene = buildImagePrompt({
+      headline: "ねぎ塩を超える最強のコラボを考える〜ジャガイモは全てを壊す〜 #64",
       showName: "ブリッジラジオ",
-      subject: "生成AIを業務で1週間使った記録",
+      subject: "ねぎ塩に勝てる食材の組み合わせを出し合う回",
       accent: "#ffd400",
       shape: "square",
-      mode: "poster",
+      speakers: "たかやま, にし",
     });
-    check("題名を鍵括弧で囲んで渡す", p.includes("「AIに任せられる仕事、まだ無理な仕事」"));
-    check("一字一句そのままと指示する", p.includes("一字一句"));
-    check("指定外の文字を足させない", p.includes("透かし"));
-    check("番組名を小さく入れる", p.includes("小さく: 「ブリッジラジオ」"));
-    check("アクセント色を渡す", p.includes("#ffd400"));
-    check("話題を渡す", p.includes("生成AIを業務で1週間使った記録"));
-    check("正方形の用途を伝える", p.includes("1:1") && p.includes("Instagram"));
-    check("崩れたときの直し方を添える", p.includes("描き直して"));
+    check("実写の写真だと伝える", scene.includes("実写の写真として仕上げて"));
+    check("タイトルを渡す", scene.includes("「ねぎ塩を超える最強のコラボを考える〜ジャガイモは全てを壊す〜 #64」"));
+    check("話している内容を渡す", scene.includes("ねぎ塩に勝てる食材の組み合わせを出し合う回"));
+    check("場面に翻訳させる", scene.includes("実際に交わされている場面"));
+    check("記号的な絵を避けさせる", scene.includes("記号的な比喩やアイコンではなく"));
+    check("話者の人数を反映する", scene.includes("日本人 2人"), "たかやま/にし → 2人");
+    check("撮影の指定を入れる", scene.includes("50mm") && scene.includes("f/2.0"));
+    check("差し色を無理強いしない", scene.includes("無理に入れないでください"));
+    check("題名は画像に載せさせない", scene.includes("題名やロゴを画像に載せないでください"));
+    check("場面の中の文字は許す", scene.includes("ホワイトボードの手書き"));
+    check("文字を置く余地を残させる", scene.includes("あとから文字を重ねます"));
+    check("正方形の用途を伝える", scene.includes("正方形(1:1)"));
 
-    const tall = buildImagePrompt({
-      headline: "題名",
-      showName: "",
-      accent: "#ffd400",
-      shape: "story",
-      mode: "poster",
+    const solo = buildImagePrompt({
+      headline: "ひとりで話した回", showName: "", accent: "#ffd400", shape: "story", speakers: "たかやま",
     });
-    check("縦長では9:16を指定する", tall.includes("9:16"));
-    check("番組名が空なら触れない", !tall.includes("小さく:"));
-    check("題材が無ければ触れない", !tall.includes("話している内容"));
+    check("1人なら1人と伝える", solo.includes("日本人 1人"));
+    check("話者未設定なら2人にする",
+      buildImagePrompt({ headline: "x", showName: "", accent: "#ffd400", shape: "square" }).includes("日本人 2人"));
+    check("縦長では9:16を指定する", solo.includes("9:16"));
+    check("縦長では下半分を空けさせる", solo.includes("下半分"));
+    check("話題が無ければ触れない", !solo.includes("話している内容"));
 
-    // 既定は「絵だけ作らせて文字はアプリが載せる」経路
-    const bg = buildImagePrompt({
-      headline: "AIに任せられる仕事",
-      showName: "ブリッジラジオ",
-      subject: "生成AIを業務で1週間使った記録",
-      accent: "#ffd400",
-      shape: "square",
+    // 題名まで描かせるモード
+    const poster = buildImagePrompt({
+      headline: "AIに任せられる仕事", showName: "ブリッジラジオ",
+      accent: "#ffd400", shape: "square", mode: "poster",
     });
-    check("既定は絵だけの注文文", bg.includes("背景イラスト"));
-    check("文字を一切描かせない", bg.includes("文字・ロゴ・記号・数字を一切描かない"));
-    check("題名を絵に入れさせない", !bg.includes("「AIに任せられる仕事」"));
-    check("文字を置く余地を残させる", bg.includes("文字を置く余地"));
-    check("話題を渡す(絵だけ)", bg.includes("生成AIを業務で1週間使った記録"));
-    const bgStory = buildImagePrompt({ headline: "題名", showName: "", accent: "#ffd400", shape: "story" });
-    check("縦長では下半分を空けさせる", bgStory.includes("下半分"));
+    check("題名を鍵括弧で囲んで渡す", poster.includes("「AIに任せられる仕事」"));
+    check("一字一句そのままと指示する", poster.includes("一字一句"));
+    check("指定外の文字を足させない", poster.includes("透かし"));
+    check("番組名を小さく入れる", poster.includes("小さく: 「ブリッジラジオ」"));
+    check("ポスターでも実写を保つ", poster.includes("実写の写真として仕上げて"));
+    check("ポスターでは余地の指示を出さない", !poster.includes("あとから文字を重ねます"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
