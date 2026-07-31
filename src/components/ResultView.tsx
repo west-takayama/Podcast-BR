@@ -12,6 +12,7 @@ interface Props {
   audioUrl?: string;
   fileName?: string;
   showName: string;
+  speakers?: string;
   accentColor: string;
   apiKey?: string;
   imageModel?: string | null;
@@ -266,6 +267,7 @@ export default function ResultView({
   audioUrl,
   fileName,
   showName,
+  speakers,
   accentColor,
   apiKey,
   imageModel,
@@ -399,6 +401,7 @@ export default function ResultView({
         quote={meta.imageQuote || chosenTitle || meta.titles[0]}
         title={chosenTitle || meta.titles[0]}
         showName={showName}
+        speakers={speakers}
         accent={accentColor}
         apiKey={apiKey}
         imageModel={imageModel}

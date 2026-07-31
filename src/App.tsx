@@ -745,6 +745,7 @@ export default function App() {
                 audioUrl={mp3Url}
                 fileName={outputName}
                 showName={settings.prompt.showName}
+                speakers={settings.prompt.speakers}
                 accentColor={settings.accentColor}
                 apiKey={settings.apiKey}
                 imageModel={settings.imageModel || null}
