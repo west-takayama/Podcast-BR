@@ -13,6 +13,11 @@ const STATIC_FILES = ["manifest.webmanifest", "icon.svg", "icon-192.png", "icon-
  *
  * キャッシュ名にはファイル一覧のハッシュを使う。デプロイして中身が変われば
  * 名前が変わり、古い世代は activate 時にまとめて捨てられる。
+ *
+ * 新しい版は「待機」させ、勝手に切り替えない。以前は install で skipWaiting して
+ * いたため、古いページが動いている最中に古いキャッシュが消え、そのページが後から
+ * 読むファイルが消滅して "Load failed" になっていた(実際に利用者の端末で発生)。
+ * 切り替えるのは、画面の「更新する」を押してもらったときだけにする。
  */
 export function serviceWorker(): Plugin {
   return {
@@ -50,9 +55,14 @@ self.addEventListener("install", (event) => {
       await Promise.all(
         PRECACHE.map((url) => cache.add(new Request(url, { cache: "reload" })).catch(() => {})),
       );
-      await self.skipWaiting();
+      // ここで skipWaiting はしない。動いているページの資材を奪わないため
     })(),
   );
+});
+
+// 画面から「更新する」を押されたときだけ、待機をやめて交代する
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "skip-waiting") void self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
