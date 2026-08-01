@@ -63,7 +63,8 @@ function schemaBlock(generateSocial: boolean): string {
   "hashtags": string[],   // "#"付きのハッシュタグ5つ
   "transcriptSummary": string,  // 200文字以内の要約
   "keywords": string[],   // 検索されうるキーワード5〜8語(#なし)
-  "imageQuote": string    // 告知画像に載せる一言。30文字以内${social}
+  "imageQuote": string,   // 告知画像に載せる一言。30文字以内
+  "clips": [{ "start": string, "end": string, "hook": string, "why": string }]  // 切り抜き候補3つ${social}
 }`;
 }
 
@@ -151,6 +152,21 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
 - SNSの告知画像に大きく載せる一言。この回で最も引きの強い言葉を選ぶ。
 - 全角30文字以内。体言止めか短い問いかけが望ましい。
 - エピソード内で実際に語られた言葉を優先する。
+
+## clips(切り抜き候補)
+- 縦型ショート動画(TikTok / Reels / YouTube Shorts)にする箇所を3つ選ぶ。
+- 音声を実際に聴いて、**それ単体で完結して面白い**区間を選ぶこと。前後の文脈が
+  無いと意味が通らない箇所は選ばない。
+- 長さは30〜60秒。start と end は "MM:SS"。
+- 選ぶ基準(この順に強い):
+  1. 笑いが起きている、声が跳ねている
+  2. 言い切っている・断言している(「結局これは〇〇です」)
+  3. 意外な事実や数字が出てくる
+  4. 話が急に転換して引きが立つ
+- **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。
+- hook は縦動画の1行目に大きく出す見出し。20文字以内。続きを聴きたくなる言葉にする。
+  ネタバレで完結させず、答えは音声の中に残す。
+- why は「なぜここが伸びると思うか」を20文字程度で。選び直す判断に使う。
 
 ## hashtags / keywords
 - hashtags は日本語圏のリスナーが実際に使う語を選ぶ。

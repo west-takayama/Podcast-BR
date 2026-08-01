@@ -25,6 +25,8 @@ interface Props {
   subject?: string;
   /** 設定の話者欄。写真に写す人数に使う。 */
   speakers?: string;
+  /** 取り込んだ写真を親へ渡す。切り抜き動画と MP3 のカバーでも使うため。 */
+  onBackground?: (bitmap: ImageBitmap | null) => void;
 }
 
 interface Rendered {
@@ -41,6 +43,7 @@ export default function ImageCards({
   imageModel,
   subject,
   speakers,
+  onBackground,
 }: Props) {
   const [selected, setSelected] = useState<Preset>("square");
   const [rendered, setRendered] = useState<Partial<Record<Preset, Rendered>>>({});
@@ -114,6 +117,7 @@ export default function ImageCards({
       // 古い bitmap は上の useEffect の後片付けで閉じられる
       setImportedAsIs(true);
       setImported(bitmap);
+      onBackground?.(bitmap);
       if (!templateChosen) setTemplate("band");
     } catch {
       setError("この画像は読み込めませんでした(PNG / JPEG をお試しください)");
@@ -136,6 +140,7 @@ export default function ImageCards({
         prev?.close();
         return bitmap;
       });
+      onBackground?.(bitmap);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -216,6 +221,7 @@ export default function ImageCards({
               onClick={() => {
                 setImported(null);
                 setImportedAsIs(true);
+                onBackground?.(null);
               }}
             >
               外す

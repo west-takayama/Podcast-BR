@@ -16,6 +16,7 @@ import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib
 import { wrapJapanese, PRESETS } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
 import { buildImagePrompt } from "../src/lib/imagePrompt";
+import { captionsForRange, splitCaption } from "../src/lib/video/clip";
 
 const SR = 44100;
 let failures = 0;
@@ -522,6 +523,39 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("番組名を小さく入れる", poster.includes("小さく: 「ブリッジラジオ」"));
     check("ポスターでも実写を保つ", poster.includes("実写の写真として仕上げて"));
     check("ポスターでは余地の指示を出さない", !poster.includes("あとから文字を重ねます"));
+  }
+
+  console.log("\n[20] 切り抜きの字幕");
+  {
+    const parts = splitCaption("結論から言うと、ジャガイモは全てを壊します。理由は単純で、味が全部それになるからです。");
+    check("句点で分ける", parts.length === 2, parts.join(" / "));
+    check("全文が保たれる", parts.join("") .length === "結論から言うと、ジャガイモは全てを壊します。理由は単純で、味が全部それになるからです。".length);
+    check("句点が無くても落ちない", splitCaption("句点のない発言").length === 1);
+
+    const transcript = [
+      { time: "00:04", speaker: "A", text: "結論から言うと、ジャガイモは全てを壊します。" },
+      { time: "00:09", speaker: "B", text: "いや待ってください。なぜそこでジャガイモなんですか。" },
+      { time: "02:00", speaker: "A", text: "区間の外の発言。" },
+    ];
+    const caps = captionsForRange(transcript, 5, 23);
+    check("区間に重なる発言だけ拾う", caps.length === 3, `${caps.length}行`);
+    check("区間外は捨てる", !caps.some((c) => c.text.includes("区間の外")));
+    check("時刻の順に並ぶ", caps.every((c, i) => i === 0 || caps[i - 1].atSec <= c.atSec));
+    check("長い発言は分割される", caps.filter((c) => c.atSec >= 9 && c.atSec < 20).length === 2,
+      caps.map((c) => `${c.atSec.toFixed(1)}s`).join(" "));
+    // 次の発言が遠くても、字幕が何十秒も先へずれないこと
+    const drift = captionsForRange(
+      [
+        { time: "00:00", speaker: "A", text: "短い一言。もう一つの短い一言。" },
+        { time: "05:00", speaker: "B", text: "ずっと後の発言。" },
+      ],
+      0,
+      30,
+    );
+    check("次の発言が遠くても字幕がずれない", drift[1].atSec < 5, `2行目 ${drift[1].atSec.toFixed(1)}秒`);
+    check("書き起こしが無ければ空", captionsForRange(null, 0, 60).length === 0);
+    check("時刻が読めない行は捨てる",
+      captionsForRange([{ time: "??", speaker: "", text: "x" }], 0, 60).length === 0);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);

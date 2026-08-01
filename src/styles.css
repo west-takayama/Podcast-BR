@@ -280,6 +280,17 @@ input[type="color"] {
 
 .illust { margin-top: 14px; padding-top: 12px; border-top: 1px solid #333; }
 
+/* 切り抜きの範囲調整 */
+.clip-trim {
+  background: #262626;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px 0;
+}
+.clip-trim .row-buttons { flex-wrap: wrap; }
+.clip-trim .row-buttons button { flex: 1 1 40%; font-size: 0.85rem; padding: 9px; }
+video.card-preview { background: #000; }
+
 /* 素材の読み込み。仕上がりを一番左右するので、告知画像の先頭に置く */
 .source {
   background: #262626;
