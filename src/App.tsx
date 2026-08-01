@@ -63,6 +63,8 @@ export default function App() {
   // 変換だけ終わって文章が未完成のまま中断された回。開き直したときに続けられる。
   const [pending, setPending] = useState<PendingConversion | null>(null);
   const [pendingUrl, setPendingUrl] = useState("");
+  // 新しい版が届いたときに押してもらう。勝手に切り替えると処理中の回が壊れる
+  const [applyUpdate, setApplyUpdate] = useState<(() => void) | null>(null);
 
   // 生成が失敗しても変換をやり直さずに済むよう、変換結果を保持しておく。
   // 60分の回では変換だけで数分かかるため、レート制限のたびに捨てるのは損が大きい。
@@ -107,6 +109,16 @@ export default function App() {
   useEffect(() => {
     mp3UrlRef.current = mp3Url;
   }, [mp3Url]);
+
+  // Service Worker が新しい版を用意したら知らせる(切り替えは利用者の操作で)
+  useEffect(() => {
+    const onUpdate = (e: Event) => {
+      const apply = (e as CustomEvent<() => void>).detail;
+      setApplyUpdate(() => apply);
+    };
+    window.addEventListener("sw-update", onUpdate);
+    return () => window.removeEventListener("sw-update", onUpdate);
+  }, []);
 
   // 中断された変換が残っていれば拾う。復帰を促すのは起動直後だけでよい
   useEffect(() => {
@@ -655,6 +667,22 @@ export default function App() {
           </button>
         </nav>
       </header>
+
+      {applyUpdate && (
+        <div className="update">
+          🎉 新しい版があります
+          <button
+            className="primary"
+            onClick={() => {
+              setApplyUpdate(null);
+              applyUpdate();
+            }}
+            disabled={phase === "running"}
+          >
+            {phase === "running" ? "処理が終わってから更新できます" : "更新する"}
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="error">

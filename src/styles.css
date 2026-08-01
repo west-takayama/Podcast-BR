@@ -154,6 +154,17 @@ label.check input[type="checkbox"] {
   transition: width 0.2s;
 }
 
+/* 新しい版のお知らせ。処理中は押させない */
+.update {
+  background: #2a2410;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 14px;
+  font-size: 0.9rem;
+}
+.update button.primary { margin-top: 10px; }
+
 .error {
   background: #3a1518;
   border: 1px solid var(--danger);
