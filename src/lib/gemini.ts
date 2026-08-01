@@ -162,6 +162,17 @@ export interface SocialPosts {
   newsletter: string;
 }
 
+/** 縦型ショート動画にする候補。バズの入り口はここ。 */
+export interface Clip {
+  /** "MM:SS" */
+  start: string;
+  end: string;
+  /** 動画の1行目に大きく出す見出し。 */
+  hook: string;
+  /** なぜ伸びると思うか。選び直しの判断に使う。 */
+  why: string;
+}
+
 export interface EpisodeMeta {
   titles: string[];
   description: string;
@@ -172,6 +183,8 @@ export interface EpisodeMeta {
   keywords: string[];
   /** 告知画像に載せる一言。 */
   imageQuote: string;
+  /** 切り抜き候補。音声を聴いて選ばせる。 */
+  clips?: Clip[];
   social?: SocialPosts;
 }
 
@@ -344,6 +357,31 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
         .map((c) => ({ time: c.time as string, label: c.label as string }))
     : [];
 
+  // 時刻が読めない候補は捨てる。壊れた区間で書き出そうとしても意味がない
+  const clips = Array.isArray(o.clips)
+    ? (o.clips as Record<string, unknown>[])
+        .filter(
+          (c) =>
+            c &&
+            typeof c.start === "string" &&
+            typeof c.end === "string" &&
+            parseTimestamp(c.start) !== null &&
+            parseTimestamp(c.end) !== null,
+        )
+        .map((c) => ({
+          start: c.start as string,
+          end: c.end as string,
+          hook: typeof c.hook === "string" ? c.hook : "",
+          why: typeof c.why === "string" ? c.why : "",
+        }))
+        .filter((c) => {
+          const a = parseTimestamp(c.start)!;
+          const b = parseTimestamp(c.end)!;
+          // 短すぎる・長すぎる候補は縦動画に向かない
+          return b - a >= 10000 && b - a <= 120000;
+        })
+    : [];
+
   const socialRaw = o.social as Record<string, unknown> | undefined;
   const social =
     socialRaw && typeof socialRaw === "object"
@@ -363,6 +401,7 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
     transcriptSummary: typeof o.transcriptSummary === "string" ? o.transcriptSummary : "",
     keywords: strArray(o.keywords),
     imageQuote: typeof o.imageQuote === "string" ? o.imageQuote : "",
+    clips,
     social,
   };
 }

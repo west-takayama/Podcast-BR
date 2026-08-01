@@ -1,5 +1,6 @@
 import CopyButton from "./CopyButton";
 import ImageCards from "./ImageCards";
+import ClipStudio from "./ClipStudio";
 import { useEffect, useState } from "react";
 import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
 import type { AudioReport } from "../App";
@@ -25,6 +26,8 @@ interface Props {
   onRegenerate?: () => void;
   onMakeTranscript?: () => void;
   onEdit?: (patch: Partial<EpisodeMeta>) => void;
+  /** 取り込んだ写真。MP3 のカバーを付け直すために親へ渡す。 */
+  onBackgroundChange?: (bitmap: ImageBitmap | null) => void;
 }
 
 /** 投稿前の手直しをその場でできるようにする。編集は履歴にも残る。 */
@@ -279,7 +282,11 @@ export default function ResultView({
   onRegenerate,
   onMakeTranscript,
   onEdit,
+  onBackgroundChange,
 }: Props) {
+  // 取り込んだ写真は告知画像・切り抜き動画・MP3のカバーで共有する。
+  // ここで持たないと、同じ写真を3回読み込ませることになる
+  const [background, setBackground] = useState<ImageBitmap | null>(null);
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
   const fullDescription = [
@@ -406,7 +413,23 @@ export default function ResultView({
         apiKey={apiKey}
         imageModel={imageModel}
         subject={[meta.transcriptSummary, meta.keywords.join("、")].filter(Boolean).join(" / ")}
+        onBackground={(b) => {
+          setBackground(b);
+          onBackgroundChange?.(b);
+        }}
       />
+
+      {meta.clips && meta.clips.length > 0 && (
+        <ClipStudio
+          clips={meta.clips}
+          audioUrl={audioUrl}
+          transcript={transcript}
+          showName={showName}
+          accent={accentColor}
+          background={background}
+          fileName={fileName || "episode.mp3"}
+        />
+      )}
 
       {meta.social && (
         <div className="card">

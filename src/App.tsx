@@ -200,6 +200,7 @@ export default function App() {
     generated: EpisodeMeta,
     title: string,
     durationSec: number,
+    background?: ImageBitmap | null,
   ): Promise<Blob> => {
     try {
       const artwork = await renderArtworkJpeg({
@@ -207,6 +208,8 @@ export default function App() {
         title,
         showName: settings.prompt.showName,
         accent: settings.accentColor,
+        background: background ?? undefined,
+        template: "band",
       });
       const tag = buildId3Tag({
         title,
@@ -220,6 +223,36 @@ export default function App() {
     } catch {
       // タグ付けに失敗しても音声そのものは渡せるようにする
       return new Blob([mp3], { type: "audio/mpeg" });
+    }
+  };
+
+  /**
+   * 告知画像で取り込んだ写真を、MP3 に埋め込むカバーにも反映する。
+   *
+   * タグ付けは生成直後に走るため、その時点ではまだ写真が無い。
+   * 告知画像だけ立派で、配信側のカバーは単色のまま、という状態を避ける。
+   */
+  const applyArtwork = async (bitmap: ImageBitmap | null) => {
+    const converted = convertedRef.current;
+    if (!converted || !meta) return;
+    setBusyText("MP3 のカバーを付け直しています…");
+    try {
+      const blob = await buildTaggedMp3(
+        converted.mp3,
+        meta,
+        chosenTitle || meta.titles[0] || "",
+        converted.durationSec,
+        bitmap,
+      );
+      setMp3Url((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      if (episodeId) await updateEpisode(episodeId, { audio: blob });
+    } catch {
+      // カバーの差し替えに失敗しても、元の MP3 はそのまま使える
+    } finally {
+      setBusyText("");
     }
   };
 
@@ -757,6 +790,7 @@ export default function App() {
                 onRegenerate={regenerate}
                 onMakeTranscript={makeTranscript}
                 onEdit={editMeta}
+                onBackgroundChange={(b) => void applyArtwork(b)}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する
