@@ -12,6 +12,7 @@
 
 import {
   ALL_FORMATS,
+  VideoSampleSink,
   AudioBufferSource,
   AudioSampleSink,
   BlobSource,
@@ -37,8 +38,13 @@ const FPS = 30;
 const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif`;
 
 export interface ClipOptions {
-  /** 配信用の MP3。ここから該当区間だけデコードする。 */
-  mp3: ArrayBuffer;
+  /**
+   * 音声の入り口。MP3(音声だけの回)か、動画ファイルそのもの。
+   * 動画を渡した場合は、その映像を切り出して縦型に収める。
+   */
+  mp3?: ArrayBuffer;
+  /** 動画から作る場合の元ファイル。映像と音声の両方をここから取る。 */
+  videoFile?: Blob;
   startSec: number;
   endSec: number;
   /** 画面上部に大きく出す見出し。 */
@@ -188,14 +194,10 @@ function drawBars(
  * 60分ぶんを丸ごと展開するとスマホでは落ちるため、必要な秒数だけ取り出す。
  */
 async function decodeRange(
-  mp3: ArrayBuffer,
+  input: Input,
   startSec: number,
   endSec: number,
 ): Promise<{ buffer: AudioBuffer; levels: Float32Array }> {
-  const input = new Input({
-    formats: ALL_FORMATS,
-    source: new BlobSource(new Blob([mp3], { type: "audio/mpeg" })),
-  });
   const track = await input.getPrimaryAudioTrack();
   if (!track) throw new Error("音声を読み取れませんでした");
 
@@ -242,6 +244,13 @@ async function decodeRange(
   return { buffer, levels };
 }
 
+/** 元動画のコマ。VideoSample は width/height を持たないので別扱いにする。 */
+interface Frame {
+  width: number;
+  height: number;
+  image: CanvasImageSource;
+}
+
 /** 1フレーム描く。区間内の経過秒 t を受け取る。 */
 function drawFrame(
   ctx: CanvasRenderingContext2D,
@@ -250,6 +259,7 @@ function drawFrame(
   levels: Float32Array,
   t: number,
   duration: number,
+  frame?: Frame | null,
 ): void {
   const W = CLIP_WIDTH;
   const H = CLIP_HEIGHT;
@@ -259,11 +269,14 @@ function drawFrame(
   ctx.fillStyle = "#0a0a0a";
   ctx.fillRect(0, 0, W, H);
 
-  if (opts.background) {
-    const bg = opts.background;
+  // 元動画のコマがあればそれを、無ければ静止画を敷く。
+  // どちらも短辺に合わせて中央で切り出す(横長の動画は左右が切れる)
+  const bg = frame ?? opts.background;
+  if (bg) {
+    const image = "image" in bg ? bg.image : bg;
     const scale = Math.max(W / bg.width, H / bg.height);
     ctx.drawImage(
-      bg,
+      image,
       (W - bg.width * scale) / 2,
       (H - bg.height * scale) / 2,
       bg.width * scale,
@@ -271,14 +284,20 @@ function drawFrame(
     );
   }
 
-  // 上下を落として、見出しと字幕を必ず読ませる
-  const scrim = ctx.createLinearGradient(0, 0, 0, H);
-  scrim.addColorStop(0, "rgba(8, 8, 8, 0.82)");
-  scrim.addColorStop(0.32, "rgba(8, 8, 8, 0.35)");
-  scrim.addColorStop(0.62, "rgba(8, 8, 8, 0.55)");
-  scrim.addColorStop(1, "rgba(8, 8, 8, 0.92)");
-  ctx.fillStyle = scrim;
-  ctx.fillRect(0, 0, W, H);
+  // 文字を読ませるための暗幕は、上下の帯だけに掛ける。
+  // 全面に掛けると元の映像が潰れる。動画から作る場合はそれが主役なので、
+  // 中央は触らない(字幕は縁取りで読ませる)。
+  const top = ctx.createLinearGradient(0, 0, 0, H * 0.26);
+  top.addColorStop(0, "rgba(8, 8, 8, 0.7)");
+  top.addColorStop(1, "rgba(8, 8, 8, 0)");
+  ctx.fillStyle = top;
+  ctx.fillRect(0, 0, W, H * 0.26);
+
+  const bottom = ctx.createLinearGradient(0, H * 0.74, 0, H);
+  bottom.addColorStop(0, "rgba(8, 8, 8, 0)");
+  bottom.addColorStop(1, "rgba(8, 8, 8, 0.8)");
+  ctx.fillStyle = bottom;
+  ctx.fillRect(0, H * 0.74, W, H * 0.26);
 
   ctx.textBaseline = "top";
 
@@ -302,8 +321,13 @@ function drawFrame(
       if (lines.length <= 3) break;
       size = Math.round(size * 0.92);
     }
-    ctx.fillStyle = "#ffffff";
+    // 明るい映像の上でも読めるよう、見出しにも縁取りを入れる
+    ctx.lineWidth = size * 0.16;
+    ctx.strokeStyle = "rgba(8, 8, 8, 0.8)";
+    ctx.lineJoin = "round";
     for (const line of lines) {
+      ctx.strokeText(line, pad, y);
+      ctx.fillStyle = "#ffffff";
       ctx.fillText(line, pad, y);
       y += size * 1.28;
     }
@@ -357,7 +381,12 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const duration = Math.max(1, endSec - startSec);
 
   onProgress?.(0.02);
-  const { buffer, levels } = await decodeRange(opts.mp3, startSec, endSec);
+  const source = opts.videoFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
+  const { buffer, levels } = await decodeRange(input, startSec, endSec);
+  // 動画から作る場合は、その映像を背景として使う
+  const videoTrack = opts.videoFile ? await input.getPrimaryVideoTrack() : null;
+  const frameSink = videoTrack ? new VideoSampleSink(videoTrack) : null;
   if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
   onProgress?.(0.25);
 
@@ -388,15 +417,48 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   audioSource.close();
 
   const totalFrames = Math.round(duration * FPS);
-  for (let i = 0; i < totalFrames; i++) {
-    if (signal?.aborted) {
-      await output.cancel();
-      throw new DOMException("中止しました", "AbortError");
+
+  if (frameSink) {
+    // 元動画のコマを1枚ずつ受け取りながら書き出す。
+    // samplesAtTimestamps は時刻が昇順なら各パケットを一度しかデコードしないので、
+    // 1コマずつ getSample を呼ぶより桁違いに速い。
+    const stamps = Array.from({ length: totalFrames }, (_, i) => startSec + i / FPS);
+    let i = 0;
+    let last: Frame | null = null;
+    for await (const sample of frameSink.samplesAtTimestamps(stamps)) {
+      if (signal?.aborted) {
+        sample?.close();
+        await output.cancel();
+        throw new DOMException("中止しました", "AbortError");
+      }
+      const t = i / FPS;
+      if (sample) {
+        last = {
+          width: sample.displayWidth,
+          height: sample.displayHeight,
+          image: sample.toCanvasImageSource(),
+        };
+        drawFrame(ctx, opts, captions, levels, t, duration, last);
+        sample.close();
+      } else {
+        // コマが取れない時刻は直前のコマを出す(黒落ちさせない)
+        drawFrame(ctx, opts, captions, levels, t, duration, last);
+      }
+      await videoSource.add(t, 1 / FPS);
+      if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
+      i++;
     }
-    const t = i / FPS;
-    drawFrame(ctx, opts, captions, levels, t, duration);
-    await videoSource.add(t, 1 / FPS);
-    if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
+  } else {
+    for (let i = 0; i < totalFrames; i++) {
+      if (signal?.aborted) {
+        await output.cancel();
+        throw new DOMException("中止しました", "AbortError");
+      }
+      const t = i / FPS;
+      drawFrame(ctx, opts, captions, levels, t, duration);
+      await videoSource.add(t, 1 / FPS);
+      if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
+    }
   }
   videoSource.close();
 

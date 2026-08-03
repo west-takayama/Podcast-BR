@@ -32,8 +32,9 @@ import SettingsPanel from "./components/SettingsPanel";
 import ResultView from "./components/ResultView";
 import HistoryPanel from "./components/HistoryPanel";
 import ProgressPanel from "./components/ProgressPanel";
+import ShortsPanel from "./components/ShortsPanel";
 
-type Tab = "create" | "history" | "settings";
+type Tab = "create" | "shorts" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -659,6 +660,9 @@ export default function App() {
           <button className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
             作成
           </button>
+          <button className={tab === "shorts" ? "active" : ""} onClick={() => setTab("shorts")}>
+            ショート
+          </button>
           <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
             履歴
           </button>
@@ -707,6 +711,13 @@ export default function App() {
 
       {tab === "settings" && (
         <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setTab("create")} />
+      )}
+
+      {tab === "shorts" && (
+        <ShortsPanel
+          settings={settings}
+          onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
+        />
       )}
 
       {tab === "history" && (
