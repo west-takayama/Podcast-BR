@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   findClips,
-  isAudioUsable,
   transcribeRange,
+  uploadEpisodeAudio,
   type Clip,
   type TranscriptSegment,
-  type UploadedAudio,
 } from "../lib/gemini";
 import { parseTimestamp } from "../lib/id3";
 import type { Settings } from "../lib/settings";
@@ -23,6 +22,20 @@ type Phase = "idle" | "extracting" | "finding" | "ready" | "rendering";
 
 const fmt = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+
+/** 秒を "MM:SS.S" に。字幕の時刻は小数第1位まで持つ。 */
+const fmtFine = (sec: number) =>
+  `${String(Math.floor(sec / 60)).padStart(2, "0")}:${(sec % 60).toFixed(1).padStart(4, "0")}`;
+
+/**
+ * 切り出した音声だけを聴かせて書き起こすので、返ってくる時刻は 0 起点。
+ * 動画全体の時間軸に戻してから字幕として使う。
+ */
+const shiftSegments = (segments: TranscriptSegment[], offsetSec: number): TranscriptSegment[] =>
+  segments.map((s) => {
+    const ms = parseTimestamp(s.time);
+    return ms === null ? s : { ...s, time: fmtFine(ms / 1000 + offsetSec) };
+  });
 
 /**
  * 動画から縦型ショートを作るページ。
@@ -48,7 +61,6 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const [shared, setShared] = useState(false);
 
   const fileRef = useRef<File | null>(null);
-  const uploadedRef = useRef<UploadedAudio | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -68,13 +80,17 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
 
   useEffect(() => {
     setNudge({ start: 0, end: 0 });
+  }, [selected]);
+
+  // 範囲を動かしたら字幕は作り直す。切り出して聴かせる音声そのものが変わる
+  useEffect(() => {
     setCaptions(null);
     setVideoBlob(null);
     setVideoUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return "";
     });
-  }, [selected]);
+  }, [selected, nudge.start, nudge.end]);
 
   /** 動画から AI に聴かせる用の音声だけを取り出す(無音カットはしない)。 */
   const extractAudio = (file: File): Promise<{ mp3: ArrayBuffer; durationSec: number }> =>
@@ -113,7 +129,6 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       return;
     }
     fileRef.current = file;
-    uploadedRef.current = null;
     setClips([]);
     setSelected(0);
     setError("");
@@ -136,7 +151,6 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         onStatus: setStatus,
         onUploadProgress: setProgress,
         onModelChanged,
-        onUploaded: (a) => (uploadedRef.current = a),
         signal: controller.signal,
       });
       setClips(found);
@@ -166,26 +180,39 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      // 字幕はこの区間だけ書き起こす。全編より速く、無料枠も食わない
+      const { extractRangeMp3, renderClip } = await loadClipLib();
+
+      // 字幕はこの区間だけ書き起こす。全編より速く、無料枠も食わない。
+      // しかも「この区間の音声」だけを切り出して渡す。全編を聴かせて
+      // 「12:34 から」と頼むと AI はファイルの頭から数えることになり、
+      // 後ろの回ほど時刻がずれる(実際に数秒ずれていた)。
       let segments = captions;
-      if (withCaptions && !segments && isAudioUsable(uploadedRef.current)) {
-        setStatus("字幕を作っています…");
-        segments = await transcribeRange({
+      if (withCaptions && !segments) {
+        setStatus("この区間の音声を取り出しています…");
+        const rangeMp3 = await extractRangeMp3(file, startSec, endSec);
+        const audio = await uploadEpisodeAudio(
+          settings.apiKey,
+          rangeMp3,
+          setStatus,
+          setProgress,
+          controller.signal,
+        );
+        const raw = await transcribeRange({
           apiKey: settings.apiKey,
           model: settings.model,
-          audio: uploadedRef.current!,
-          startSec,
-          endSec,
+          audio,
+          startSec: 0,
+          endSec: endSec - startSec,
           speakers: settings.prompt.speakers,
           onStatus: setStatus,
           onModelChanged,
           signal: controller.signal,
         });
+        segments = shiftSegments(raw, startSec);
         setCaptions(segments);
       }
 
       setStatus("動画を書き出しています…");
-      const { renderClip } = await loadClipLib();
       const blob = await renderClip({
         videoFile: file,
         startSec,
@@ -374,7 +401,6 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               setClips([]);
               setPhase("idle");
               fileRef.current = null;
-              uploadedRef.current = null;
               setVideoBlob(null);
               setVideoUrl((prev) => {
                 if (prev) URL.revokeObjectURL(prev);
