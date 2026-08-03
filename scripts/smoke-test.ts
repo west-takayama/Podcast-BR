@@ -18,6 +18,7 @@ import { Diagnostics } from "../src/lib/audio/diagnostics";
 import { buildImagePrompt } from "../src/lib/imagePrompt";
 import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/clip";
 import { decimationFactor } from "../src/lib/audio/mp3";
+import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips } from "../src/lib/gemini";
@@ -702,6 +703,125 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("子音の帯域も残る(6kHz)", db(voice, pass) > -8, `${db(voice, pass).toFixed(1)}dB`);
     check("折り返す帯域を落とす(12kHz)", db(edge, pass) < -24, `${db(edge, pass).toFixed(1)}dB`);
     check("さらに上も落とす(18kHz)", db(high, pass) < -40, `${db(high, pass).toFixed(1)}dB`);
+  }
+
+  console.log("\n[23] これまでの傾向");
+  {
+    const DAY = 86400000;
+    const now = Date.UTC(2026, 7, 3);
+    // 7日おきに10回。話題を意図的に散らす
+    const ep = (i: number, opts: {
+      keywords?: string[]; hashtags?: string[]; title?: string; titles?: string[];
+      minutes?: number; chapters?: number; gapDays?: number;
+    } = {}) => ({
+      id: `e${i}`,
+      // i=0 が最古。7日おき
+      createdAt: now - (10 - i) * 7 * DAY,
+      fileName: `ep${i}.wav`,
+      durationSec: (opts.minutes ?? 30) * 60,
+      removedSec: 0,
+      chosenTitle: opts.title ?? `第${i}回`,
+      meta: {
+        titles: opts.titles ?? [opts.title ?? `第${i}回`, "別案", "もう1案"],
+        description: "",
+        showNotes: "",
+        chapters: Array.from({ length: opts.chapters ?? 4 }, (_, k) => ({ time: "00:00", label: `話題${k}` })),
+        hashtags: opts.hashtags ?? [],
+        transcriptSummary: `${i}回目の要約`,
+        keywords: opts.keywords ?? [],
+        imageQuote: "",
+      },
+    });
+
+    const eps = [
+      ep(1, { keywords: ["ねぎ塩", "ラーメン"] }),
+      ep(2, { keywords: ["ねぎ塩", "餃子"] }),
+      ep(3, { keywords: ["ラーメン", "旅行"] }),
+      ep(4, { keywords: ["旅行"] }),
+      ep(5, { keywords: ["映画"] }),
+      ep(6, { keywords: ["映画", "音楽"], minutes: 40 }),
+      ep(7, { keywords: ["音楽"], minutes: 40 }),
+      ep(8, { keywords: ["音楽", "ジャガイモ"], minutes: 40 }),
+      ep(9, { keywords: ["ジャガイモ"], minutes: 40 }),
+      ep(10, { keywords: ["カメラ"], hashtags: ["#カメラ"], minutes: 40 }),
+    ] as unknown as Parameters<typeof buildInsights>[0];
+
+    const ins = buildInsights(eps, now);
+    check("回数を数える", ins.count === 10, `${ins.count}回`);
+    check("投稿間隔の中央値", ins.medianGapDays === 7, `${ins.medianGapDays}日`);
+    check("最後の回からの日数", ins.daysSinceLast === 0, `${ins.daysSinceLast}日`);
+    // 30分が5回、40分が5回 → 中央値は 35
+    check("長さの中央値", ins.medianMinutes === 35, `${ins.medianMinutes}分`);
+    check("直近が長くなっているのを拾う", ins.minutesTrend === 10, `${ins.minutesTrend}分`);
+    check("1回あたりの話題数", ins.medianChapters === 4, `${ins.medianChapters}個`);
+
+    const top = ins.topTopics.map((t) => t.word);
+    check("2回以上の語だけを「よく扱う」に入れる",
+      top.includes("音楽") && top.includes("ねぎ塩") && !top.includes("カメラ"), top.join(","));
+    check("回数の多い語が先頭", ins.topTopics[0].word === "音楽",
+      `${ins.topTopics[0].word}(${ins.topTopics[0].episodes}回)`);
+
+    // 「最近出てきた」は直近5回で初めて出た語だけ。
+    // 「最後に出たのが直近」にすると昔からある語まで入り、上の一覧と丸かぶりになる
+    const rising = ins.risingTopics.map((t) => t.word);
+    // 音楽は6回目が初出(=4回前)なので「最近出てきて、いま伸びている」で正しい。
+    // 映画は5回目が初出(=5回前)なので入らない
+    check("直近で初めて出た語を「最近出てきた」に入れる",
+      rising.includes("カメラ") && rising.includes("ジャガイモ") && rising.includes("音楽"),
+      rising.join(","));
+    check("直近5回より前から出ている語は入れない",
+      !rising.includes("映画") && !rising.includes("ねぎ塩"), rising.join(","));
+
+    const dormant = ins.dormantTopics.map((t) => t.word);
+    check("しばらく触れていない語を拾う",
+      dormant.includes("ねぎ塩") && dormant.includes("ラーメン"), dormant.join(","));
+    check("直近に出た語は「触れていない」に入れない",
+      !dormant.includes("音楽") && !dormant.includes("ジャガイモ"), dormant.join(","));
+
+    // ハッシュタグとキーワードは同じ語として数える
+    const same = buildInsights([
+      ep(1, { keywords: ["カメラ"] }),
+      ep(2, { hashtags: ["#カメラ"] }),
+    ] as unknown as Parameters<typeof buildInsights>[0], now);
+    check("# 付きと素の語を同じものとして数える",
+      same.topTopics.length === 1 && same.topTopics[0].episodes === 2,
+      same.topTopics.map((t) => `${t.word}:${t.episodes}`).join(","));
+    check("語のならし", normalizeWord("＃ＡＢＣ ") === "abc", normalizeWord("＃ＡＢＣ "));
+    check("1文字の語は数えない",
+      buildInsights([ep(1, { keywords: ["回", "ねぎ塩"] })] as never, now).count === 1 &&
+      !buildInsights([ep(1, { keywords: ["回"] }), ep(2, { keywords: ["回"] })] as never, now)
+        .topTopics.some((t) => t.word === "回"));
+
+    // 第1案の採用率
+    const picks = buildInsights([
+      ep(1, { title: "A", titles: ["A", "B", "C"] }),
+      ep(2, { title: "B", titles: ["A", "B", "C"] }),
+      ep(3, { title: "A", titles: ["A", "B", "C"] }),
+      ep(4, { title: "C", titles: ["A", "B", "C"] }),
+    ] as never, now);
+    check("第1案の採用率", picks.firstPickRate === 0.5, `${picks.firstPickRate}`);
+
+    const q = buildInsights([
+      ep(1, { title: "これは何だろう" }),
+      ep(2, { title: "ねぎ塩とは" }),
+      ep(3, { title: "言い切る回" }),
+      ep(4, { title: "終わりの話" }),
+    ] as never, now);
+    check("問いかけ型のタイトルの割合", q.questionRate === 0.5, `${q.questionRate}`);
+
+    // 履歴が少なくても落ちない
+    const one = buildInsights([ep(1, {})] as never, now);
+    check("1回だけでも落ちない", one.count === 1 && one.medianGapDays === null && one.minutesTrend === null);
+    const none = buildInsights([], now);
+    check("履歴ゼロでも落ちない", none.count === 0 && none.topTopics.length === 0);
+
+    // AI に渡す抜粋。音声も書き起こし本文も入らないこと
+    const digest = digestForPrompt(eps as never, 3);
+    check("抜粋は新しい順", digest.indexOf("第10回") < digest.indexOf("第9回"));
+    check("抜粋は指定した件数まで", digest.split("\n- ").length === 3, `${digest.split("\n- ").length}件`);
+    check("抜粋に日付が入る", /2026\/\d\d\/\d\d/.test(digest));
+    check("抜粋に要約と流れが入る",
+      digest.includes("要約:") && digest.includes("流れ:"));
   }
 
   console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");

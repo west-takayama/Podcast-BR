@@ -408,3 +408,70 @@ video.card-preview { background: #000; }
 .finding-critical .finding-head { color: #ff9d9d; }
 .finding-warning .finding-head { color: #ffb257; }
 .finding-advice { font-size: 0.85rem; color: var(--accent); margin-top: 5px; line-height: 1.5; }
+
+/* 傾向と次のお題 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 12px 0 4px;
+}
+.stat {
+  background: #262626;
+  border-radius: 10px;
+  padding: 10px 6px;
+  text-align: center;
+}
+.stat-value {
+  display: block;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.stat .muted { font-size: 0.72rem; }
+
+.findings { margin: 12px 0 0; padding-left: 1.1em; font-size: 0.9rem; line-height: 1.7; }
+.findings li { margin-bottom: 6px; }
+.findings strong { color: var(--accent); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 0.85rem;
+}
+.chip .muted { font-size: 0.75rem; }
+.chip.rising { border-color: var(--accent); color: var(--accent); }
+.chip.dormant { border-style: dashed; }
+
+.idea {
+  background: #262626;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.idea-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.idea-title { font-weight: 700; font-size: 0.98rem; line-height: 1.4; }
+.idea-hook {
+  color: var(--accent);
+  font-weight: 600;
+  margin: 8px 0 4px;
+  font-size: 0.92rem;
+}
+.idea .muted { margin: 4px 0; }
+.idea-angles {
+  margin: 8px 0 0;
+  padding-left: 1.1em;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: var(--text);
+}

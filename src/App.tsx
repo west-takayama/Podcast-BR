@@ -32,10 +32,11 @@ import { applyAccent } from "./lib/theme";
 import SettingsPanel from "./components/SettingsPanel";
 import ResultView from "./components/ResultView";
 import HistoryPanel from "./components/HistoryPanel";
+import InsightsPanel from "./components/InsightsPanel";
 import ProgressPanel from "./components/ProgressPanel";
 import ShortsPanel from "./components/ShortsPanel";
 
-type Tab = "create" | "shorts" | "history" | "settings";
+type Tab = "create" | "shorts" | "next" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -666,6 +667,9 @@ export default function App() {
           <button className={tab === "shorts" ? "active" : ""} onClick={() => setTab("shorts")}>
             ショート
           </button>
+          <button className={tab === "next" ? "active" : ""} onClick={() => setTab("next")}>
+            次の回
+          </button>
           <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
             履歴
           </button>
@@ -720,6 +724,13 @@ export default function App() {
         <ShortsPanel
           settings={settings}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
+        />
+      )}
+
+      {tab === "next" && (
+        <InsightsPanel
+          settings={settings}
+          onModelChanged={(m) => setSettings((s) => ({ ...s, model: m }))}
         />
       )}
 
