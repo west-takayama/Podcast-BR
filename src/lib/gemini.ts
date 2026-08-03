@@ -339,6 +339,34 @@ async function waitUntilActive(
   throw new Error("音声処理がタイムアウトしました");
 }
 
+/**
+ * 切り抜き候補を整える。時刻が読めないものと、縦動画に向かない長さのものは捨てる。
+ * 壊れた区間で書き出そうとしても意味がない。
+ */
+function normalizeClips(raw: unknown): Clip[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as Record<string, unknown>[])
+    .filter(
+      (c) =>
+        c &&
+        typeof c.start === "string" &&
+        typeof c.end === "string" &&
+        parseTimestamp(c.start) !== null &&
+        parseTimestamp(c.end) !== null,
+    )
+    .map((c) => ({
+      start: c.start as string,
+      end: c.end as string,
+      hook: typeof c.hook === "string" ? c.hook : "",
+      why: typeof c.why === "string" ? c.why : "",
+    }))
+    .filter((c) => {
+      const a = parseTimestamp(c.start)!;
+      const b = parseTimestamp(c.end)!;
+      return b - a >= 10000 && b - a <= 120000;
+    });
+}
+
 /** 生成物の欠けを埋める。項目が1つ欠けただけで全体を失敗させない。 */
 function normalizeMeta(raw: unknown): EpisodeMeta {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -357,30 +385,7 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
         .map((c) => ({ time: c.time as string, label: c.label as string }))
     : [];
 
-  // 時刻が読めない候補は捨てる。壊れた区間で書き出そうとしても意味がない
-  const clips = Array.isArray(o.clips)
-    ? (o.clips as Record<string, unknown>[])
-        .filter(
-          (c) =>
-            c &&
-            typeof c.start === "string" &&
-            typeof c.end === "string" &&
-            parseTimestamp(c.start) !== null &&
-            parseTimestamp(c.end) !== null,
-        )
-        .map((c) => ({
-          start: c.start as string,
-          end: c.end as string,
-          hook: typeof c.hook === "string" ? c.hook : "",
-          why: typeof c.why === "string" ? c.why : "",
-        }))
-        .filter((c) => {
-          const a = parseTimestamp(c.start)!;
-          const b = parseTimestamp(c.end)!;
-          // 短すぎる・長すぎる候補は縦動画に向かない
-          return b - a >= 10000 && b - a <= 120000;
-        })
-    : [];
+  const clips = normalizeClips(o.clips);
 
   const socialRaw = o.social as Record<string, unknown> | undefined;
   const social =
@@ -464,6 +469,154 @@ export async function uploadEpisodeAudio(
   }
   // Files API の保持期間は48時間。この間は送り直さずに作り直せる
   return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: mp3.byteLength };
+}
+
+/**
+ * 音声を聴かせて、切り抜き候補だけを返させる。
+ *
+ * 動画から作る場合はタイトルも説明文も要らないので、
+ * エピソード生成の一式ではなく候補だけを取りに行く(その分速く、枠も食わない)。
+ */
+export async function findClips(opts: {
+  apiKey: string;
+  model: string;
+  mp3?: ArrayBuffer;
+  audio?: UploadedAudio;
+  onStatus: (status: string) => void;
+  onUploadProgress?: (fraction: number) => void;
+  onModelChanged?: (model: string) => void;
+  onUploaded?: (audio: UploadedAudio) => void;
+  signal?: AbortSignal;
+}): Promise<Clip[]> {
+  const { apiKey, model, mp3, audio, onStatus, onUploadProgress, onModelChanged, onUploaded, signal } = opts;
+
+  let source = audio;
+  if (!isAudioUsable(source)) {
+    if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
+    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal);
+    onUploaded?.(source);
+  }
+
+  onStatus("面白い区間を探しています…");
+  const prompt = `添付の音声を聴いて、縦型ショート動画(TikTok / Reels / YouTube Shorts)に
+切り出す区間を3つ選んでください。
+
+選ぶ基準(この順に強い):
+1. 笑いが起きている、声が跳ねている
+2. 言い切っている・断言している
+3. 意外な事実や数字が出てくる
+4. 話が急に転換して引きが立つ
+
+条件:
+- **それ単体で完結して面白い**こと。前後の文脈が無いと意味が通らない箇所は選ばない。
+- 長さは30〜60秒。
+- **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。
+- hook は動画の1行目に大きく出す見出し。20文字以内。続きを見たくなる言葉にし、
+  答えは動画の中に残す。
+- why は「なぜ伸びると思うか」を20文字程度で。
+
+次の構造の JSON のみを出力する:
+{"clips": [{"start": "MM:SS", "end": "MM:SS", "hook": string, "why": string}]}`;
+
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [
+        {
+          parts: [
+            { file_data: { mime_type: "audio/mpeg", file_uri: source!.uri } },
+            { text: prompt },
+          ],
+        },
+      ],
+      generationConfig: { response_mime_type: "application/json", temperature: 0.4 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
+  if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出");
+
+  const data = await res.json();
+  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("候補が返りませんでした。もう一度お試しください。");
+  let parsed: { clips?: unknown };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("候補を読み取れませんでした。もう一度お試しください。");
+  }
+  const clips = normalizeClips(parsed.clips);
+  if (clips.length === 0) throw new Error("切り出せそうな区間が見つかりませんでした。");
+  return clips;
+}
+
+/**
+ * 指定した区間だけを書き起こす。字幕用。
+ * 全編を書き起こすより速く、無料枠も食わない。時刻のずれも小さい。
+ */
+export async function transcribeRange(opts: {
+  apiKey: string;
+  model: string;
+  audio: UploadedAudio;
+  startSec: number;
+  endSec: number;
+  speakers: string;
+  onStatus: (status: string) => void;
+  onModelChanged?: (model: string) => void;
+  signal?: AbortSignal;
+}): Promise<TranscriptSegment[]> {
+  const { apiKey, model, audio, startSec, endSec, speakers, onStatus, onModelChanged, signal } = opts;
+  onStatus("字幕を作っています…");
+
+  const prompt = `添付の音声のうち、${formatTimecode(startSec)} から ${formatTimecode(endSec)} までの
+区間だけを日本語で書き起こしてください。
+
+要件:
+- 発言のまとまりごとに区切り、それぞれに開始時刻を付ける(音声全体の先頭からの時刻)。
+- 時刻は "MM:SS"。
+- 聞き取れない箇所は推測で埋めず「(聞き取り不明)」とする。
+${speakers.trim() ? `- 話者は次の呼び名を使う: ${speakers}` : "- 話者は A / B のように区別する。"}
+
+次の構造の JSON のみを出力する:
+{"segments": [{"time": string, "speaker": string, "text": string}]}`;
+
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [
+        {
+          parts: [
+            { file_data: { mime_type: "audio/mpeg", file_uri: audio.uri } },
+            { text: prompt },
+          ],
+        },
+      ],
+      generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
+  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成");
+
+  const data = await res.json();
+  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text) as { segments?: Record<string, unknown>[] };
+    return (parsed.segments ?? [])
+      .filter((s) => s && typeof s.text === "string" && (s.text as string).trim())
+      .map((s) => ({
+        time: typeof s.time === "string" ? s.time : "",
+        speaker: typeof s.speaker === "string" ? s.speaker : "",
+        text: (s.text as string).trim(),
+      }));
+  } catch {
+    return [];
+  }
 }
 
 export function isAudioUsable(audio: UploadedAudio | null | undefined): boolean {
