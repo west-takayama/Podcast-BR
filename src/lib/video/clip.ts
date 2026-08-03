@@ -102,9 +102,16 @@ export async function detectCapability(): Promise<ClipCapability | null> {
 /** 日本語の話速の目安。字幕の表示時間を見積もるために使う。 */
 const SPEECH_CHARS_PER_SEC = 7;
 /** 1枚の字幕に載せる文字数の上限。これを超えたら分割する。 */
-const CAPTION_MAX_CHARS = 24;
+const CAPTION_MAX_CHARS = 20;
+/** 分割した字幕の最小文字数。これを下回る端切れは前の行に戻す。 */
+const CAPTION_MIN_CHARS = 6;
 /** 字幕を実際の発話開始へ寄せる許容範囲。AI の時刻はこの程度ずれる。 */
 const SNAP_TOLERANCE_SEC = 1.2;
+/**
+ * 吸着先を採用する条件。文字数から引いた基準線とこれ以上食い違うなら、
+ * 1つ隣の発話に飛んだとみなして捨てる。
+ */
+const ANCHOR_AGREE_SEC = 1.0;
 /** 声が止まってからこれだけ経ったら字幕を消す。出しっぱなしにしない。 */
 const CAPTION_TAIL_SEC = 0.4;
 /**
@@ -132,25 +139,72 @@ function toCaptions(transcript: TranscriptSegment[] | null | undefined): { atSec
     .sort((a, b) => a.atSec - b.atSec);
 }
 
+/** 行末に来ると自然な助詞・助動詞。ここで切ると読みやすい。 */
+const TAIL_PARTICLES = "はがのにをでともへやかねよなさばら";
+/** 行頭に置いてはいけない字(禁則)。 */
+const NO_LEAD = "、。,.・!?！？)）]｝」』】〉》ー〜…ゝ々ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ";
+/** 行末に置いてはいけない字(開き括弧)。 */
+const NO_TRAIL = "（(「『【〈《[｛";
+
 /**
- * 長い一文はそのままだと画面に入りきらないので、句読点で切る。
- * 書き起こし側にも短く区切るよう頼んでいるが、守られないことがあるため
- * ここでも保険をかけておく。
+ * 切れ目としての良さ。大きいほど自然な位置で切れる。
+ * i は「i 文字目までを1枚に載せる」という切り位置。
+ */
+function breakScore(text: string, i: number): number {
+  const prev = text[i - 1] ?? "";
+  const next = text[i] ?? "";
+  if (NO_LEAD.includes(next) || NO_TRAIL.includes(prev)) return -1;
+  if ("。！？!?".includes(prev)) return 100;
+  if ("、,".includes(prev)) return 80;
+  // 助詞の直後。「〜という/ことです」のような不自然な分断を避ける
+  if (TAIL_PARTICLES.includes(prev)) return 60;
+  // 漢字→ひらがな のような字種の変わり目は語の切れ目であることが多い
+  const kanji = (c: string) => /[一-鿿]/.test(c);
+  const kana = (c: string) => /[぀-ゟ]/.test(c);
+  if (kana(prev) && kanji(next)) return 40;
+  return 10;
+}
+
+/**
+ * 長い一文はそのままだと画面に入りきらないので分割する。
+ *
+ * 単純に文字数で切ると「〜という/ことです」のように語の途中で切れて、
+ * 読み手がつっかえる。句点 → 読点 → 助詞の直後 → 字種の変わり目 の順に
+ * 自然な切れ目を探し、最後に短すぎる端切れを前の行へ戻す。
  */
 export function splitCaption(text: string): string[] {
-  if (text.length <= CAPTION_MAX_CHARS) return [text];
+  const src = text.trim();
+  if (src.length <= CAPTION_MAX_CHARS) return src ? [src] : [];
+
   const parts: string[] = [];
-  let buf = "";
-  for (const ch of text) {
-    buf += ch;
-    const atBreak = "。！？!?".includes(ch) || (buf.length >= CAPTION_MAX_CHARS * 0.7 && "、,".includes(ch));
-    if (atBreak || buf.length >= CAPTION_MAX_CHARS) {
-      parts.push(buf.trim());
-      buf = "";
+  let from = 0;
+  while (src.length - from > CAPTION_MAX_CHARS) {
+    const max = from + CAPTION_MAX_CHARS;
+    const min = from + Math.max(CAPTION_MIN_CHARS, Math.round(CAPTION_MAX_CHARS * 0.5));
+    let cut = max;
+    let best = -1;
+    for (let i = max; i >= min; i--) {
+      const s = breakScore(src, i);
+      // 同点なら後ろを採る(1枚に載る量を減らさない)
+      if (s > best) {
+        best = s;
+        cut = i;
+      }
+      if (s >= 80) break; // 句読点が見つかればそれ以上は探さない
+    }
+    parts.push(src.slice(from, cut).trim());
+    from = cut;
+  }
+  const tail = src.slice(from).trim();
+  if (tail) {
+    // 「です。」だけが1枚になると読む間もなく消える。前の行へ戻す
+    if (tail.length < CAPTION_MIN_CHARS && parts.length > 0) {
+      parts[parts.length - 1] += tail;
+    } else {
+      parts.push(tail);
     }
   }
-  if (buf.trim()) parts.push(buf.trim());
-  return parts.length > 0 ? parts : [text];
+  return parts.filter(Boolean);
 }
 
 /**
@@ -169,14 +223,81 @@ function speechFlags(levels: Float32Array): boolean[] {
   return Array.from(levels, (v) => v > threshold);
 }
 
-/** 声が始まる位置(無音 → 有音の変わり目)を秒で返す。 */
-function speechOnsets(flags: boolean[], stepSec: number): number[] {
-  const out: number[] = [];
-  for (let i = 1; i < flags.length; i++) {
-    if (flags[i] && !flags[i - 1]) out.push(i * stepSec);
+/** ひと続きに声が出ている区間。 */
+interface SpeechRun {
+  start: number;
+  end: number;
+}
+
+/**
+ * 声が出ている区間をまとめる。
+ * MIN_SILENCE_SEC より短い谷は区間の途中(促音・単語の切れ目)とみなす。
+ */
+export function speechRuns(levels: Float32Array, stepSec = 0.05): SpeechRun[] {
+  const flags = speechFlags(levels);
+  if (flags.length === 0) return [];
+  const gap = Math.max(1, Math.round(MIN_SILENCE_SEC / stepSec));
+  const runs: SpeechRun[] = [];
+  let from = -1;
+  let silent = 0;
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i]) {
+      if (from < 0) from = i;
+      silent = 0;
+    } else if (from >= 0) {
+      silent++;
+      if (silent >= gap) {
+        runs.push({ start: from * stepSec, end: (i - silent + 1) * stepSec });
+        from = -1;
+        silent = 0;
+      }
+    }
   }
-  if (flags[0]) out.unshift(0);
-  return out;
+  if (from >= 0) runs.push({ start: from * stepSec, end: flags.length * stepSec });
+  // ごく短い物音は発話とみなさない
+  return runs.filter((r) => r.end - r.start >= 0.2);
+}
+
+/**
+ * 「声が出ている時間だけを詰めた時計」と実時間の相互変換。
+ *
+ * 字幕がずれる一番の原因は、AI が耳で推定した時刻そのものにある。
+ * 長い音声では推定誤差が数秒に達し、しかも後ろへ行くほど積み上がる。
+ * そこで位置決めには AI の時刻を使わず、**実際に声が出ている区間**を
+ * 物差しにして、文字数の比で割り当てる。こうすると誤差が溜まらない。
+ */
+function speechClock(runs: SpeechRun[]) {
+  const prefix: number[] = [0];
+  for (const r of runs) prefix.push(prefix[prefix.length - 1] + (r.end - r.start));
+  const total = prefix[prefix.length - 1];
+
+  /**
+   * 詰めた時計 → 実時間。
+   * 区間の継ぎ目ちょうどは「前の区間の終わり」ではなく「次の区間の頭」を返す。
+   * 字幕の開始位置に使うので、無音の直前ではなく声の頭に置きたい。
+   */
+  const toReal = (s: number): number => {
+    if (runs.length === 0) return s;
+    const clamped = Math.max(0, Math.min(s, total));
+    for (let i = 0; i < runs.length; i++) {
+      if (clamped < prefix[i + 1] || i === runs.length - 1) {
+        return runs[i].start + (clamped - prefix[i]);
+      }
+    }
+    return runs[runs.length - 1].end;
+  };
+
+  /** 実時間 → 詰めた時計(無音の中なら次の声の頭) */
+  const toSpeech = (t: number): number => {
+    if (runs.length === 0) return t;
+    for (let i = 0; i < runs.length; i++) {
+      if (t < runs[i].start) return prefix[i];
+      if (t <= runs[i].end) return prefix[i] + (t - runs[i].start);
+    }
+    return total;
+  };
+
+  return { total, toReal, toSpeech };
 }
 
 /**
@@ -213,63 +334,131 @@ export function captionsForRange(
   stepSec = 0.05,
 ): Caption[] {
   const all = toCaptions(transcript);
-  const rough: { atSec: number; text: string }[] = [];
+
+  // 1行ずつに割る。AI の時刻は「だいたいこの辺」の手がかりとしてだけ持つ
+  const lines: { hint: number; text: string }[] = [];
   for (let i = 0; i < all.length; i++) {
     const seg = all[i];
     const nextAt = all[i + 1]?.atSec ?? seg.atSec + 12;
     if (nextAt <= startSec || seg.atSec >= endSec) continue;
     const pieces = splitCaption(seg.text);
-    const total = pieces.reduce((n, p) => n + p.length, 0) || 1;
-    // 次の発言が遠いと、分割した字幕が何十秒もかけて出ることになる。
-    // 日本語の話速で見積もった長さで頭打ちにする。
-    const span = Math.max(0.8, Math.min(nextAt - seg.atSec, total / SPEECH_CHARS_PER_SEC));
+    const chars = pieces.reduce((n, p) => n + p.length, 0) || 1;
+    const span = Math.max(0.8, Math.min(nextAt - seg.atSec, chars / SPEECH_CHARS_PER_SEC));
     let cursor = seg.atSec;
     for (const piece of pieces) {
-      rough.push({ atSec: cursor, text: piece });
-      cursor += (span * piece.length) / total;
+      lines.push({ hint: cursor - startSec, text: piece });
+      cursor += (span * piece.length) / chars;
     }
   }
-  rough.sort((a, b) => a.atSec - b.atSec);
+  if (lines.length === 0) return [];
 
   const flags = levels ? speechFlags(levels) : [];
-  const onsets = flags.length > 0 ? speechOnsets(flags, stepSec) : [];
+  const runs = levels ? speechRuns(levels, stepSec) : [];
+
+  // 声の位置が取れないときだけ、AI の時刻をそのまま使う
+  const starts =
+    runs.length > 0
+      ? placeOnSpeech(lines, runs)
+      : lines.map((l) => Math.max(0, l.hint));
 
   const out: Caption[] = [];
-  for (let i = 0; i < rough.length; i++) {
-    const c = rough[i];
-    let at = c.atSec;
-
-    // 実際に声が始まった位置が近くにあれば、そこへ寄せる
-    if (onsets.length > 0) {
-      const rel = at - startSec;
-      let best = -1;
-      let bestDiff = SNAP_TOLERANCE_SEC;
-      for (const onset of onsets) {
-        const diff = Math.abs(onset - rel);
-        if (diff < bestDiff) {
-          bestDiff = diff;
-          best = onset;
-        }
-      }
-      if (best >= 0) at = startSec + best;
-    }
-
-    // 前の字幕より前には出さない
+  for (let i = 0; i < lines.length; i++) {
+    let at = startSec + starts[i];
     if (out.length > 0 && at <= out[out.length - 1].atSec) {
       at = out[out.length - 1].atSec + 0.25;
     }
-
-    const nextAt = rough[i + 1]?.atSec ?? Infinity;
+    const nextAt = i + 1 < starts.length ? startSec + starts[i + 1] : Infinity;
     // 声が途切れたら消す。次の字幕が来るまで出しっぱなしにしない
     const silence =
       flags.length > 0
         ? startSec + speechEndAfter(flags, stepSec, at - startSec) + CAPTION_TAIL_SEC
         : Infinity;
     const end = Math.min(nextAt - 0.05, silence, at + CAPTION_MAX_SEC);
-
-    out.push({ atSec: at, endSec: Math.max(at + 0.4, end), text: c.text });
+    out.push({ atSec: at, endSec: Math.max(at + 0.4, end), text: lines[i].text });
   }
   return out;
+}
+
+/**
+ * 各行の開始位置を、実際に声が出ている区間の上に置き直す(区間の先頭からの秒)。
+ *
+ * やり方は2段構え。
+ *
+ * 1. **錨(いかり)を打つ**: AI の時刻が声の始まりの近くを指している行は、
+ *    そこを信じて固定する。話者交代のような大きな切れ目を拾える。
+ * 2. **錨と錨の間を文字数で割る**: 日本語は1秒あたりの文字数がおおむね
+ *    一定なので、「声が出ている時間」を文字数の比で分ければ実際の発話に近づく。
+ *
+ * 錨が1つも無くても、先頭と末尾を錨とみなすので必ず区間全体に収まる。
+ * 時刻を積み上げていく方式と違い、誤差がうしろに溜まらない。
+ */
+function placeOnSpeech(lines: { hint: number; text: string }[], runs: SpeechRun[]): number[] {
+  const clock = speechClock(runs);
+
+  // 1. まず錨なしで置く。これが「誤差の溜まらない基準線」になる
+  const baseline = distributeByChars(lines, new Map(), clock);
+
+  // 2. 基準線と食い違わない錨だけを採る。
+  //    近くの声の頭に吸着させるだけだと、AI の時刻が1つ隣の発話に
+  //    寄ってしまうことがある(実際にこれで全体が1秒ずれていた)。
+  //    基準線から離れた吸着先は「隣に飛んだ」とみなして捨てる。
+  const anchors = new Map<number, number>();
+  let prev = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const hint = lines[i].hint;
+    if (!Number.isFinite(hint)) continue;
+    let best = -1;
+    let bestDiff = SNAP_TOLERANCE_SEC;
+    for (const r of runs) {
+      const diff = Math.abs(r.start - hint);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = r.start;
+      }
+    }
+    if (best < 0) continue;
+    if (Math.abs(best - baseline[i]) > ANCHOR_AGREE_SEC) continue;
+    const s = clock.toSpeech(best);
+    if (s <= prev) continue;
+    anchors.set(i, s);
+    prev = s;
+  }
+
+  // 3. 採用した錨で置き直す
+  return distributeByChars(lines, anchors, clock);
+}
+
+/** 錨と錨の間を、文字数の比で「詰めた時計」の上に配る。 */
+function distributeByChars(
+  lines: { hint: number; text: string }[],
+  anchors: Map<number, number>,
+  clock: ReturnType<typeof speechClock>,
+): number[] {
+  const { total, toReal } = clock;
+  const starts = new Array<number>(lines.length).fill(0);
+  const points = [...anchors.keys()].sort((a, b) => a - b);
+  const bounds = [-1, ...points, lines.length];
+  for (let b = 0; b < bounds.length - 1; b++) {
+    const from = bounds[b];
+    const to = bounds[b + 1];
+    const fromSpeech = from < 0 ? 0 : anchors.get(from)!;
+    const toSpeechAt = to >= lines.length ? total : anchors.get(to)!;
+    if (from >= 0) starts[from] = toReal(fromSpeech);
+
+    const between: number[] = [];
+    for (let i = from + 1; i < to; i++) between.push(i);
+    if (between.length === 0) continue;
+    // 先頭に錨が無い区間は、その錨自身のぶんを含めない
+    const chars = between.reduce((n, i) => n + Math.max(1, lines[i].text.length), 0);
+    const head = from < 0 ? 0 : Math.max(1, lines[from].text.length);
+    const width = Math.max(0, toSpeechAt - fromSpeech);
+    let cursor = fromSpeech + (width * head) / (chars + head);
+    for (const i of between) {
+      starts[i] = toReal(cursor);
+      cursor += (width * Math.max(1, lines[i].text.length)) / (chars + head);
+    }
+  }
+  return starts;
 }
 
 /** 波形の帯。音が鳴っていることを目で分からせる(無音再生への対策)。 */
@@ -353,6 +542,31 @@ async function decodeRange(
   }
 
   return { buffer, levels };
+}
+
+/**
+ * 区間の音声だけを MP3 にする。字幕を作らせるときの素材に使う。
+ *
+ * 全編を聴かせて「12:34 から 13:20 まで」と頼むと、AI はファイルの頭から
+ * 数えることになり、後ろへ行くほど推定がずれる(実際に数秒ずれていた)。
+ * その区間だけを渡せば AI は 0 から数えれば済むので、時刻がぐっと合う。
+ * 32kbps モノラルなので、60秒でも 250KB ほどにしかならない。
+ */
+export async function extractRangeMp3(
+  file: Blob,
+  startSec: number,
+  endSec: number,
+): Promise<ArrayBuffer> {
+  // エンコーダ(WASM)は重い。字幕を作るときだけ取りに行く
+  const { encodeMp3 } = await import("../audio/mp3");
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  const { buffer } = await decodeRange(input, startSec, endSec);
+  const mono = new Float32Array(buffer.length);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const ch = buffer.getChannelData(c);
+    for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / buffer.numberOfChannels;
+  }
+  return encodeMp3([mono], buffer.sampleRate, 32);
 }
 
 /** 元動画のコマ。VideoSample は width/height を持たないので別扱いにする。 */
