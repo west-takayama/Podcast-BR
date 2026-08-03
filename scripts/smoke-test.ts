@@ -17,6 +17,8 @@ import { wrapJapanese, PRESETS } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
 import { buildImagePrompt } from "../src/lib/imagePrompt";
 import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/clip";
+import { decimationFactor } from "../src/lib/audio/mp3";
+import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips } from "../src/lib/gemini";
 
@@ -663,7 +665,46 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       `${kept[0].endSec.toFixed(2)}秒まで表示(声は8.0秒まで続く)`);
   }
 
-  console.log("\n[21] 切り抜き候補の受け取り(AIの返し方の揺れ)");
+  console.log("\n[21] AI に聴かせる音声の速い経路");
+  {
+    check("44.1kHz は半分に間引く", decimationFactor(44100) === 2, `${44100 / decimationFactor(44100)}Hz`);
+    check("48kHz は1/3に間引く", decimationFactor(48000) === 3, `${48000 / decimationFactor(48000)}Hz`);
+    check("32kHz は半分に間引く", decimationFactor(32000) === 2, `${32000 / decimationFactor(32000)}Hz`);
+    check("22.05kHz はそのまま", decimationFactor(22050) === 1);
+    check("16kHz はそのまま", decimationFactor(16000) === 1);
+    check("8kHz はそのまま(これ以上落とさない)", decimationFactor(8000) === 1);
+    // 割り切れない変な値でも壊れない
+    check("半端な周波数はそのまま", decimationFactor(37800) === 1);
+    check("行き先は MPEG-2 が受け付ける値だけ",
+      [44100, 48000, 32000, 22050, 16000, 8000, 37800]
+        .every((r) => { const o = r / decimationFactor(r);
+          return decimationFactor(r) === 1 || [16000, 22050, 24000, 32000].includes(o); }));
+
+    // 折り返し防止のローパス。間引いたあとに化けて残る高い音を落とせているか
+    const sr = 44100;
+    const tone = (hz: number) => {
+      const n = sr; // 1秒
+      const ch = new Float32Array(n);
+      for (let i = 0; i < n; i++) ch[i] = Math.sin((2 * Math.PI * hz * i) / sr);
+      // ワーカーと同じ3段重ね
+      for (let k = 0; k < 3; k++) new LowPassFilter(sr, 1, 22050 * 0.4).process([ch], n);
+      // 立ち上がりを避けて後半だけ測る
+      let sum = 0;
+      for (let i = n / 2; i < n; i++) sum += ch[i] * ch[i];
+      return Math.sqrt(sum / (n / 2));
+    };
+    const db = (v: number, ref: number) => 20 * Math.log10(v / ref);
+    const pass = tone(1000);
+    const voice = tone(6000);
+    const edge = tone(12000); // 新しいナイキスト(11.025kHz)のすぐ上。ここが折り返す
+    const high = tone(18000);
+    check("声の帯域は通す(1kHz)", pass > 0.6, pass.toFixed(3));
+    check("子音の帯域も残る(6kHz)", db(voice, pass) > -8, `${db(voice, pass).toFixed(1)}dB`);
+    check("折り返す帯域を落とす(12kHz)", db(edge, pass) < -24, `${db(edge, pass).toFixed(1)}dB`);
+    check("さらに上も落とす(18kHz)", db(high, pass) < -40, `${db(high, pass).toFixed(1)}dB`);
+  }
+
+  console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");
   {
     const n = (raw: unknown, dur?: number) => __testNormalizeClips(raw, dur);
 

@@ -116,6 +116,9 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       worker.onerror = () => reject(new Error("動画から音声を取り出せませんでした"));
       worker.postMessage({
         file,
+        // 配信用 MP3 も音量合わせも要らない。AI に聴かせるぶんだけ1回で作る
+        // (10分の素材で 17秒 → 4秒 になる)
+        purpose: "ai",
         // 無音カットを有効にすると音声と映像の時刻がずれるため、必ず切っておく
         dsp: { ...settings.dsp, trimSilence: false },
         mono: true,

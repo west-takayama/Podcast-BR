@@ -14,6 +14,28 @@ import {
 } from "mediabunny";
 import { registerMp3Encoder } from "@mediabunny/mp3-encoder";
 
+/**
+ * 間引いた先として認めるサンプリングレート。
+ * MPEG-2 / 2.5 Layer III が受け付けるのはこの並びで、ここに着地しないと
+ * エンコーダが受け取れない。
+ */
+const AI_RATES = [16000, 22050, 24000, 32000];
+
+/**
+ * AI に聴かせる音声を何分の1に間引くか。整数比にならないなら 1(間引かない)。
+ *
+ * 声を聞き取るのに 44.1kHz は要らない。半分にすれば MP3 のエンコード量が
+ * そのまま半分になり、同じ 32kbps でも1サンプルあたりに使えるビットが
+ * 増えるので、むしろ聞き取りやすくなる。
+ */
+export function decimationFactor(sampleRate: number): number {
+  for (const f of [3, 2]) {
+    const rate = sampleRate / f;
+    if (Number.isInteger(rate) && AI_RATES.includes(rate)) return f;
+  }
+  return 1;
+}
+
 let encoderReady: Promise<void> | null = null;
 
 function ensureEncoder(): Promise<void> {
