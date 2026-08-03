@@ -180,8 +180,13 @@ export function buildId3Tag(opts: Id3Options): Uint8Array {
 
 /** "MM:SS" または "HH:MM:SS" をミリ秒に変換する。読めない場合は null。 */
 export function parseTimestamp(text: string): number | null {
-  const parts = text.trim().split(":").map((p) => Number(p));
+  // AI は "01:23" のほかに "83"(秒)や "1:23.4" のように返してくることがある。
+  // 読めないものを捨てると候補が全滅するため、素直に受け取れる形は受け取る。
+  const cleaned = text.trim().replace(/[秒s]$/i, "").replace(/分/g, ":");
+  if (!cleaned) return null;
+  const parts = cleaned.split(":").map((p) => Number(p));
   if (parts.some((p) => !Number.isFinite(p) || p < 0)) return null;
+  if (parts.length === 1) return parts[0] * 1000;
   if (parts.length === 2) return (parts[0] * 60 + parts[1]) * 1000;
   if (parts.length === 3) return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
   return null;
