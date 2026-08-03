@@ -627,11 +627,13 @@ export async function transcribeRange(opts: {
   startSec: number;
   endSec: number;
   speakers: string;
+  /** この番組でよく出る言葉。聞き間違いを減らすために渡す。 */
+  glossary?: string;
   onStatus: (status: string) => void;
   onModelChanged?: (model: string) => void;
   signal?: AbortSignal;
 }): Promise<TranscriptSegment[]> {
-  const { apiKey, model, audio, startSec, endSec, speakers, onStatus, onModelChanged, signal } = opts;
+  const { apiKey, model, audio, startSec, endSec, speakers, glossary, onStatus, onModelChanged, signal } = opts;
   onStatus("字幕を作っています…");
 
   // 字幕にそのまま載せる前提なので、行の長さと時刻の細かさを指定する。
@@ -660,6 +662,7 @@ export async function transcribeRange(opts: {
 - 句読点を入れる。読点は息継ぎの位置に置く。
 - 聞き取れない箇所は推測で埋めず「(聞き取り不明)」とする。
 ${speakers.trim() ? `- 話者は次の呼び名を使う: ${speakers}` : "- 話者は A / B のように区別する。"}
+${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、似た音に聞こえてもこちらを優先する: ${glossary.trim()}` : ""}
 
 次の構造の JSON のみを出力する:
 {"segments": [{"time": string, "speaker": string, "text": string}]}`;

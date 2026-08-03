@@ -25,6 +25,12 @@ export interface PromptConfig {
   showContext: string;
   /** 話者の呼び名(カンマ区切り)。書き起こしで話者を具体名にするために使う。 */
   speakers: string;
+  /**
+   * この番組でよく出る言葉(カンマ区切り)。
+   * 番組名・相方の名前・造語・お店の名前など、AI が聞き間違えやすいものを
+   * 先に渡しておくと、書き起こしと字幕の表記が揃う。
+   */
+  glossary: string;
   tone: Tone;
   titleStyle: TitleStyle;
   descriptionLength: number; // 説明文の目安文字数
@@ -37,6 +43,7 @@ export const DEFAULT_PROMPT_CONFIG: PromptConfig = {
   showName: "",
   showContext: "",
   speakers: "",
+  glossary: "",
   tone: "friendly",
   titleStyle: "curiosity",
   descriptionLength: 350,
@@ -94,6 +101,7 @@ export function buildPrompt(config: PromptConfig, context: PromptContext = {}): 
   const background = [
     config.showName.trim() && `番組名: ${config.showName.trim()}`,
     config.speakers.trim() && `話者: ${config.speakers.trim()}`,
+    config.glossary.trim() && `この番組でよく出る言葉(この表記を使う): ${config.glossary.trim()}`,
     config.showContext.trim(),
   ]
     .filter(Boolean)
