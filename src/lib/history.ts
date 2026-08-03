@@ -6,11 +6,18 @@ import type { EpisodeMeta, TranscriptSegment, UploadedAudio } from "./gemini";
 import type { AudioReport } from "./audio/report";
 
 const DB_NAME = "podcast-br";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE = "episodes";
 /** 変換は済んだが文章が未完成の1件を置く場所。中断からの復帰に使う。 */
 const PENDING_STORE = "pending";
 const PENDING_KEY = "current";
+/**
+ * 読み込んだ写真を置く場所。
+ * 告知画像・MP3のカバー・縦型ショートの背景で共有する素材なので、
+ * タブを切り替えたり開き直したりしても残るようにする。
+ */
+const ASSET_STORE = "assets";
+const ARTWORK_KEY = "artwork";
 /** 端末のストレージを圧迫しないよう、音声を保持する件数を絞る。 */
 const MAX_AUDIO_RETAINED = 5;
 
@@ -42,6 +49,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(PENDING_STORE)) {
         db.createObjectStore(PENDING_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(ASSET_STORE)) {
+        db.createObjectStore(ASSET_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -166,6 +176,48 @@ export async function loadPending(): Promise<PendingConversion | null> {
 
 export async function clearPending(): Promise<void> {
   await tx("readwrite", (s) => s.delete(PENDING_KEY), PENDING_STORE);
+}
+
+/**
+ * 読み込んだ写真。文字が描かれているかどうかも一緒に覚えておく。
+ * これを覚えておかないと、開き直すたびに「そのまま使う」に戻ってしまう。
+ */
+export interface StoredArtwork {
+  blob: Blob;
+  /** 画像に文字まで描かれていて、こちらで重ねると二重になる状態か。 */
+  asIs: boolean;
+  savedAt: number;
+}
+
+export async function saveArtwork(blob: Blob, asIs: boolean): Promise<void> {
+  await tx(
+    "readwrite",
+    (s) => s.put({ id: ARTWORK_KEY, blob, asIs, savedAt: Date.now() }),
+    ASSET_STORE,
+  );
+}
+
+export async function patchArtwork(patch: Partial<Pick<StoredArtwork, "asIs">>): Promise<void> {
+  const existing = await loadArtwork();
+  if (!existing) return;
+  await tx(
+    "readwrite",
+    (s) => s.put({ ...existing, ...patch, id: ARTWORK_KEY }),
+    ASSET_STORE,
+  );
+}
+
+export async function loadArtwork(): Promise<StoredArtwork | null> {
+  const found = await tx<StoredArtwork | undefined>(
+    "readonly",
+    (s) => s.get(ARTWORK_KEY),
+    ASSET_STORE,
+  );
+  return found ?? null;
+}
+
+export async function clearArtwork(): Promise<void> {
+  await tx("readwrite", (s) => s.delete(ARTWORK_KEY), ASSET_STORE);
 }
 
 export function totalAudioBytes(records: EpisodeRecord[]): number {

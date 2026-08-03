@@ -12,6 +12,7 @@ import { loadSettings, saveSettings, type Settings } from "./lib/settings";
 import {
   clearPending,
   listEpisodes,
+  clearArtwork,
   loadPending,
   patchPending,
   saveEpisode,
@@ -196,6 +197,8 @@ export default function App() {
     // 次の回に進む/やめる時点で、中断復帰用の控えは意味を失う
     setPending(null);
     void clearPending().catch(() => {});
+    // 写真はその回の情景を写したものなので、次の回へは持ち越さない
+    void clearArtwork().catch(() => {});
   };
 
   const cancel = () => {

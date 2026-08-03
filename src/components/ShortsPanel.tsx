@@ -8,7 +8,7 @@ import {
 } from "../lib/gemini";
 import { parseTimestamp } from "../lib/id3";
 import type { Settings } from "../lib/settings";
-import type { ClipCapability } from "../lib/video/clip";
+import type { ClipCapability, CoverCandidate } from "../lib/video/clip";
 
 // エンコーダは重いので、このページを開いてから取りに行く
 const loadClipLib = () => import("../lib/video/clip");
@@ -26,6 +26,13 @@ interface Nudge {
 }
 
 interface Result {
+  blob: Blob;
+  url: string;
+}
+
+/** 表紙。フィードで最初に目に入る1枚なので、動画とは別に選んで書き出す。 */
+interface Cover {
+  atSec: number;
   blob: Blob;
   url: string;
 }
@@ -69,6 +76,8 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const [nudges, setNudges] = useState<Record<number, Nudge>>({});
   const [captions, setCaptions] = useState<Record<number, TranscriptSegment[]>>({});
   const [results, setResults] = useState<Record<number, Result>>({});
+  const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
+  const [covers, setCovers] = useState<Record<number, Cover>>({});
   const [withCaptions, setWithCaptions] = useState(true);
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
   const [shared, setShared] = useState(-1);
@@ -119,6 +128,25 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       return next;
     });
 
+  /** 範囲が変わると表紙の候補も別物になる。 */
+  const dropCover = (i: number) => {
+    setFrames((prev) => {
+      if (!prev[i]) return prev;
+      const next = { ...prev };
+      delete next[i];
+      return next;
+    });
+    setCovers((prev) => {
+      const c = prev[i];
+      if (!c) return prev;
+      URL.revokeObjectURL(c.url);
+      urlsRef.current.delete(c.url);
+      const next = { ...prev };
+      delete next[i];
+      return next;
+    });
+  };
+
   /** 範囲を動かす。切り出して聴かせる音声そのものが変わるので、字幕も作り直す。 */
   const nudge = (i: number, key: keyof Nudge, delta: number) => {
     setNudges((prev) => {
@@ -131,6 +159,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       return next;
     });
     dropResult(i);
+    dropCover(i);
   };
 
   /** 動画から AI に聴かせる用の音声だけを取り出す(無音カットはしない)。 */
@@ -177,9 +206,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     setSelected(0);
     setNudges({});
     setCaptions({});
-    for (const r of Object.values(results)) URL.revokeObjectURL(r.url);
+    for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
     setResults({});
+    setFrames({});
+    setCovers({});
     setError("");
     setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
     setPhase("extracting");
@@ -340,6 +371,65 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       setPhase("ready");
       setStatus("");
       abortRef.current = null;
+    }
+  };
+
+  /**
+   * 表紙の候補になるコマを取り出す。
+   * フィードで最初に目に入るのは1枚の絵なので、先頭のコマ任せにしない。
+   */
+  const pickFrames = async () => {
+    const file = fileRef.current;
+    if (!file) return;
+    setError("");
+    setPhase("rendering");
+    setStatus("表紙の候補を取り出しています…");
+    setProgress(0);
+    try {
+      const { sampleCoverFrames } = await loadClipLib();
+      const { startSec, endSec } = rangeOf(selected);
+      const found = await sampleCoverFrames(file, startSec, endSec);
+      if (found.length === 0) setError("この動画からはコマを取り出せませんでした");
+      setFrames((prev) => ({ ...prev, [selected]: found }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPhase("ready");
+      setStatus("");
+    }
+  };
+
+  const chooseCover = async (atSec: number) => {
+    const file = fileRef.current;
+    const clip = clips[selected];
+    if (!file || !clip) return;
+    setError("");
+    setPhase("rendering");
+    setStatus("表紙を書き出しています…");
+    try {
+      const { renderCover } = await loadClipLib();
+      const blob = await renderCover({
+        videoFile: file,
+        atSec,
+        hook: clip.hook,
+        showName: settings.prompt.showName,
+        accent: settings.accentColor,
+      });
+      const url = URL.createObjectURL(blob);
+      urlsRef.current.add(url);
+      setCovers((prev) => {
+        const old = prev[selected];
+        if (old) {
+          URL.revokeObjectURL(old.url);
+          urlsRef.current.delete(old.url);
+        }
+        return { ...prev, [selected]: { atSec, blob, url } };
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPhase("ready");
+      setStatus("");
     }
   };
 
@@ -537,6 +627,52 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         </div>
       )}
 
+      {/* 表紙。フィードで最初に目に入る1枚なので、先頭のコマ任せにしない */}
+      {clips.length > 0 && !busy && cap !== null && (
+        <div className="card">
+          <h2>🖼 表紙(カバー画像)</h2>
+          <p className="muted">
+            フィードで最初に目に入るのは動画ではなく<strong>1枚の絵</strong>です。先頭のコマが
+            たまたま目を閉じていたり見切れていたりすると、それだけで見られなくなります。
+            <br />
+            区間の中から選んで、見出し入りの 1080×1920 で書き出します。Instagram も YouTube も
+            表紙だけ別の画像を上げられます(動画そのものには手を入れないので、音とのずれは出ません)。
+          </p>
+
+          {!frames[selected] && (
+            <button onClick={pickFrames}>🎞 この区間から表紙の候補を出す</button>
+          )}
+
+          {frames[selected] && frames[selected].length > 0 && (
+            <div className="cover-strip">
+              {frames[selected].map((f) => (
+                <button
+                  key={f.atSec}
+                  className={`cover-thumb${covers[selected]?.atSec === f.atSec ? " chosen" : ""}`}
+                  onClick={() => void chooseCover(f.atSec)}
+                >
+                  <img src={f.thumb} alt="" />
+                  <span className="muted">{fmt(f.atSec)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {covers[selected] && (
+            <>
+              <img className="card-preview" src={covers[selected].url} alt="表紙" />
+              <a
+                className="dl"
+                href={covers[selected].url}
+                download={`cover${selected + 1}.jpg`}
+              >
+                ⬇️ 表紙をダウンロード({Math.round(covers[selected].blob.size / 1024)} KB)
+              </a>
+            </>
+          )}
+        </div>
+      )}
+
       {doneCount > 0 && !busy && (
         <div className="card">
           <h2>📱 書き出した動画({doneCount}本)</h2>
@@ -570,9 +706,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               fileRef.current = null;
               setNudges({});
               setCaptions({});
-              for (const r of Object.values(results)) URL.revokeObjectURL(r.url);
+              for (const u of urlsRef.current) URL.revokeObjectURL(u);
               urlsRef.current.clear();
               setResults({});
+              setFrames({});
+              setCovers({});
             }}
           >
             別の動画にする

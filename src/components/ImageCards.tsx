@@ -10,6 +10,7 @@ import {
   type Template,
 } from "../lib/image";
 import { generateIllustration } from "../lib/gemini";
+import { clearArtwork, loadArtwork, patchArtwork, saveArtwork } from "../lib/history";
 import { buildImagePrompt, type PromptMode } from "../lib/imagePrompt";
 import CopyButton from "./CopyButton";
 
@@ -25,8 +26,12 @@ interface Props {
   subject?: string;
   /** 設定の話者欄。写真に写す人数に使う。 */
   speakers?: string;
-  /** 取り込んだ写真を親へ渡す。切り抜き動画と MP3 のカバーでも使うため。 */
-  onBackground?: (bitmap: ImageBitmap | null) => void;
+  /**
+   * 取り込んだ写真を親へ渡す。切り抜き動画と MP3 のカバーでも使うため。
+   * restored は「端末内の控えから読み戻した」ことを示す。読み戻しのたびに
+   * MP3 のカバーを付け直すと、開くだけで処理が走ってしまうため区別する。
+   */
+  onBackground?: (bitmap: ImageBitmap | null, restored?: boolean) => void;
 }
 
 interface Rendered {
@@ -101,6 +106,32 @@ export default function ImageCards({
     // そのまま使う場合は content を経由しないので、切り替えも依存に入れる
   }, [content, imported, importedAsIs]);
 
+  // 読み込んだ写真は端末内に控えてある。タブを切り替えても開き直しても残す。
+  // ここで読み戻さないと、告知画像も MP3 のカバーも縦型ショートの背景も
+  // すべて素の状態に戻ってしまう(実際にそうなっていた)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await loadArtwork();
+        if (!saved || cancelled) return;
+        const bitmap = await createImageBitmap(saved.blob);
+        if (cancelled) return bitmap.close();
+        setImportedAsIs(saved.asIs);
+        setImported(bitmap);
+        onBackground?.(bitmap, true);
+        if (!saved.asIs) setTemplate("band");
+      } catch {
+        // 読み戻せなくても、写真無しで続けられる
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 初回だけ。以降は取り込み操作で更新する
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     return () => background?.close();
   }, [background]);
@@ -119,6 +150,8 @@ export default function ImageCards({
       setImported(bitmap);
       onBackground?.(bitmap);
       if (!templateChosen) setTemplate("band");
+      // 端末内に控える。開き直しても残るように
+      void saveArtwork(file, true);
     } catch {
       setError("この画像は読み込めませんでした(PNG / JPEG をお試しください)");
     }
@@ -222,6 +255,7 @@ export default function ImageCards({
                 setImported(null);
                 setImportedAsIs(true);
                 onBackground?.(null);
+                void clearArtwork();
               }}
             >
               外す
@@ -233,7 +267,10 @@ export default function ImageCards({
             <input
               type="checkbox"
               checked={!importedAsIs}
-              onChange={(e) => setImportedAsIs(!e.target.checked)}
+              onChange={(e) => {
+                setImportedAsIs(!e.target.checked);
+                void patchArtwork({ asIs: !e.target.checked });
+              }}
             />
             <span>
               この画像に文字を入れる
