@@ -14,12 +14,16 @@
 // ラウドネスは配信されるチャンネル構成で測る。モノラルに落とすと合算が減って
 // 約3dB下がるため、ステレオのまま測ると目標を外す。
 //
-// 受信: { file, dsp, mono, bitrate }
+// purpose:"ai" のときは上の手順を全部飛ばし、1回読んで AI 用の1本だけ作る。
+// 「ショート」ページは配信用 MP3 も揃った音量も使わないため(3〜4倍速い)。
+//
+// 受信: { file, dsp, mono, bitrate, purpose? }
 // 送信: { type:"progress", stage, fraction } / { type:"done", ... } / { type:"error", message }
 
 import {
   Analyzer,
   HighPassFilter,
+  LowPassFilter,
   NoiseReducer,
   PauseDetector,
   SilenceTrimmer,
@@ -30,7 +34,7 @@ import { LoudnessMeter, gainForTarget, targetLufs } from "./audio/loudness";
 import { Diagnostics } from "./audio/diagnostics";
 import { CEILING_DBFS, Limiter } from "./audio/limiter";
 import { openAudio, type BlockHandler, type BlockReader } from "./audio/source";
-import { Mp3Stream } from "./audio/mp3";
+import { Mp3Stream, decimationFactor } from "./audio/mp3";
 
 const BLOCK_SECONDS = 10;
 const AI_BITRATE_KBPS = 32;
@@ -40,6 +44,87 @@ interface Request {
   dsp: DspOptions;
   mono: boolean;
   bitrate: number;
+  /**
+   * "ai" にすると、AI に聴かせる音声だけを1パスで作る。
+   * 「ショート」ページのように配信用 MP3 が要らない場面のためのもの。
+   */
+  purpose?: "publish" | "ai";
+}
+
+/**
+ * AI に聴かせる音声だけを作る速い経路。
+ *
+ * 通常の変換は「ノイズフロアを測る → 整音後のラウドネスを測る →
+ * (必要なら試し処理)→ 本番」と最大4回読む。配信する音を狙った音量に
+ * 収めるために要る手順だが、**AI に聴かせるだけなら1回も要らない**。
+ * ラウドネスもリミッターも配信用 MP3 も捨てるだけなので、丸ごと省く。
+ */
+async function runAiOnly(file: File, dsp: DspOptions): Promise<void> {
+  const reader = await openAudio(file, BLOCK_SECONDS);
+  if (!(reader.durationSec > 0)) throw new Error("音声データが空です");
+  const sampleRate = reader.sampleRate;
+  const numChannels = reader.numChannels;
+
+  const factor = decimationFactor(sampleRate);
+  const outRate = sampleRate / factor;
+  // 間引く前に折り返し防止の低域通過を入れる。入れないと高い音が
+  // 低い音に化けて紛れ込み、聞き取りを邪魔する。
+  // バイカッド1段では新しいナイキスト(outRate/2)の少し上が素通りしてしまうので
+  // 3段重ねる。声の明瞭度に要るのは 8kHz あたりまでなので、切り所は低めでよい。
+  // バイカッド3本は全体の処理時間からすれば誤差の範囲。
+  const antiAlias =
+    factor > 1
+      ? Array.from({ length: 3 }, () => new LowPassFilter(sampleRate, numChannels, outRate * 0.40))
+      : [];
+  // 低域の暗騒音(空調・机の振動)は落としておく。安いわりに効く
+  const hp = dsp.highPass ? new HighPassFilter(sampleRate, numChannels) : null;
+
+  const stream = new Mp3Stream(1, outRate, AI_BITRATE_KBPS);
+  // ブロックの長さは読み手まかせ(デコーダ経由だと可変)なので、足りなければ広げる
+  let scratch = new Float32Array(Math.ceil((sampleRate * (BLOCK_SECONDS + 1)) / factor));
+  let frames = 0;
+  // 間引きの位相をブロックをまたいで保つ。ブロックごとに 0 に戻すと
+  // 継ぎ目でサンプルが増減して、わずかに時刻がずれる
+  let phase = 0;
+
+  await reader.read(async (channels, length, fraction) => {
+    if (hp) hp.process(channels, length);
+    for (const lp of antiAlias) lp.process(channels, length);
+
+    const need = Math.ceil(length / factor) + 1;
+    if (scratch.length < need) scratch = new Float32Array(need);
+
+    // モノラル化と間引きを1回のループでまとめる
+    let n = 0;
+    if (numChannels === 1) {
+      const ch = channels[0];
+      for (let i = phase; i < length; i += factor) scratch[n++] = ch[i];
+    } else {
+      const l = channels[0];
+      const r = channels[1];
+      for (let i = phase; i < length; i += factor) scratch[n++] = (l[i] + r[i]) * 0.5;
+    }
+    phase = (phase - length) % factor;
+    if (phase < 0) phase += factor;
+
+    frames += n;
+    await stream.write([scratch], n);
+    post("process", fraction);
+  });
+
+  const aiMp3 = await stream.finish();
+  self.postMessage(
+    {
+      type: "done",
+      aiMp3,
+      durationSec: frames / outRate,
+      sourceDurationSec: reader.durationSec,
+      inputFormat: reader.formatLabel,
+      sampleRate: outRate,
+      channels: 1,
+    },
+    [aiMp3],
+  );
 }
 
 function post(stage: "analyze" | "process", fraction: number) {
@@ -60,7 +145,10 @@ function downmix(channels: Float32Array[], length: number, out: Float32Array): F
 
 self.onmessage = async (e: MessageEvent<Request>) => {
   try {
-    const { file, dsp, mono, bitrate } = e.data;
+    const { file, dsp, mono, bitrate, purpose } = e.data;
+
+    // AI に聴かせるだけなら、測るための読み直しも配信用 MP3 も要らない
+    if (purpose === "ai") return await runAiOnly(file, dsp);
 
     const reader = await openAudio(file, BLOCK_SECONDS);
     if (!(reader.durationSec > 0)) throw new Error("音声データが空です");

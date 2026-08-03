@@ -69,6 +69,53 @@ export class HighPassFilter {
 }
 
 /**
+ * RBJ のバイカッド・ローパス。間引き前の折り返し防止に使う。
+ * ハイパスと同じ形なので係数だけ差し替えている。
+ */
+export class LowPassFilter {
+  private readonly b0: number;
+  private readonly b1: number;
+  private readonly b2: number;
+  private readonly a1: number;
+  private readonly a2: number;
+  private readonly state: { x1: number; x2: number; y1: number; y2: number }[];
+
+  constructor(sampleRate: number, numChannels: number, cutoffHz: number, q = 0.707) {
+    const w0 = (2 * Math.PI * Math.min(cutoffHz, sampleRate * 0.45)) / sampleRate;
+    const cosW0 = Math.cos(w0);
+    const alpha = Math.sin(w0) / (2 * q);
+    const a0 = 1 + alpha;
+    this.b0 = ((1 - cosW0) / 2) / a0;
+    this.b1 = (1 - cosW0) / a0;
+    this.b2 = ((1 - cosW0) / 2) / a0;
+    this.a1 = (-2 * cosW0) / a0;
+    this.a2 = (1 - alpha) / a0;
+    this.state = Array.from({ length: numChannels }, () => ({ x1: 0, x2: 0, y1: 0, y2: 0 }));
+  }
+
+  process(channels: Float32Array[], length: number): void {
+    for (let c = 0; c < channels.length; c++) {
+      const ch = channels[c];
+      const s = this.state[c];
+      let { x1, x2, y1, y2 } = s;
+      for (let i = 0; i < length; i++) {
+        const x0 = ch[i];
+        const y0 = this.b0 * x0 + this.b1 * x1 + this.b2 * x2 - this.a1 * y1 - this.a2 * y2;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = y0;
+        ch[i] = y0;
+      }
+      s.x1 = x1;
+      s.x2 = x2;
+      s.y1 = y1;
+      s.y2 = y2;
+    }
+  }
+}
+
+/**
  * 下向きエクスパンダによるノイズ低減。
  * ノイズフロア付近の小さい音を滑らかに押し下げるため、ハードゲートのような
  * 不自然な途切れ(ポンピング)が起きにくい。声の区間はほぼ無加工で通る。
