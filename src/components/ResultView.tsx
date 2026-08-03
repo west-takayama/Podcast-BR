@@ -413,9 +413,10 @@ export default function ResultView({
         apiKey={apiKey}
         imageModel={imageModel}
         subject={[meta.transcriptSummary, meta.keywords.join("、")].filter(Boolean).join(" / ")}
-        onBackground={(b) => {
+        onBackground={(b, restored) => {
           setBackground(b);
-          onBackgroundChange?.(b);
+          // 読み戻しただけなら MP3 は触らない。開いた瞬間に付け直しが走ってしまう
+          if (!restored) onBackgroundChange?.(b);
         }}
       />
 

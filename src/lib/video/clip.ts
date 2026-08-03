@@ -569,6 +569,127 @@ export async function extractRangeMp3(
   return encodeMp3([mono], buffer.sampleRate, 32);
 }
 
+/** 表紙(カバー画像)の候補。選ぶための小さな絵と、その時刻。 */
+export interface CoverCandidate {
+  atSec: number;
+  /** 選択用の縮小画像(data URL)。 */
+  thumb: string;
+}
+
+/**
+ * 区間の中から表紙の候補になるコマを何枚か取り出す。
+ *
+ * フィードで最初に目に入るのは表紙の1枚で、そこで見られるかどうかが決まる。
+ * 先頭のコマがたまたま目を閉じていたり被写体が見切れていたりすることは多いので、
+ * 選べるようにする。
+ */
+export async function sampleCoverFrames(
+  file: Blob,
+  startSec: number,
+  endSec: number,
+  count = 6,
+  thumbHeight = 240,
+): Promise<CoverCandidate[]> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  const track = await input.getPrimaryVideoTrack();
+  if (!track) return [];
+  const sink = new VideoSampleSink(track);
+  // 両端は切り替わりの途中に当たりやすいので、内側に寄せて等間隔に取る
+  const span = Math.max(0, endSec - startSec);
+  const stamps = Array.from(
+    { length: count },
+    (_, i) => startSec + (span * (i + 0.5)) / count,
+  );
+
+  const out: CoverCandidate[] = [];
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  let i = 0;
+  for await (const sample of sink.samplesAtTimestamps(stamps)) {
+    const atSec = stamps[i++];
+    if (!sample) continue;
+    const w = sample.displayWidth;
+    const h = sample.displayHeight;
+    canvas.height = thumbHeight;
+    canvas.width = Math.max(1, Math.round((w / h) * thumbHeight));
+    ctx.drawImage(sample.toCanvasImageSource(), 0, 0, canvas.width, canvas.height);
+    sample.close();
+    out.push({ atSec, thumb: canvas.toDataURL("image/jpeg", 0.7) });
+  }
+  return out;
+}
+
+/**
+ * 表紙を1枚の画像として書き出す。
+ *
+ * 動画そのものは触らない。映像に静止画を挟むと音とのずれが出るし、
+ * Instagram も YouTube も「表紙だけ別の画像を上げる」ができるため、
+ * 別ファイルにするほうが安全で使い勝手もよい。
+ * 見た目は動画の1コマと同じ作りにして、番組としての印象を揃える。
+ */
+export async function renderCover(opts: {
+  videoFile: Blob;
+  atSec: number;
+  hook: string;
+  showName: string;
+  accent: string;
+  signal?: AbortSignal;
+}): Promise<Blob> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(opts.videoFile) });
+  const track = await input.getPrimaryVideoTrack();
+  if (!track) throw new Error("動画の映像を読み取れませんでした");
+  const sink = new VideoSampleSink(track);
+
+  // 描き終わるまで sample を閉じられない(toCanvasImageSource が中身を指すため)。
+  // 閉じ忘れると WebCodecs のバッファが GC 任せになり警告が出るので、
+  // 描画まで済ませてから確実に閉じる。
+  const canvas = document.createElement("canvas");
+  canvas.width = CLIP_WIDTH;
+  canvas.height = CLIP_HEIGHT;
+  const ctx = canvas.getContext("2d")!;
+  let drawn = false;
+
+  for await (const sample of sink.samplesAtTimestamps([opts.atSec])) {
+    if (!sample) break;
+    try {
+      // 表紙に字幕と波形は要らない。見出しだけを大きく見せる
+      drawFrame(
+        ctx,
+        {
+          startSec: 0,
+          endSec: 1,
+          hook: opts.hook,
+          showName: opts.showName,
+          accent: opts.accent,
+        },
+        [],
+        new Float32Array(0),
+        0,
+        1,
+        {
+          width: sample.displayWidth,
+          height: sample.displayHeight,
+          image: sample.toCanvasImageSource(),
+        },
+        { bars: false, timeBar: false },
+      );
+      drawn = true;
+    } finally {
+      sample.close();
+    }
+    break;
+  }
+  if (!drawn) throw new Error("その位置のコマを取り出せませんでした");
+
+  return await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("表紙を書き出せませんでした"))),
+      "image/jpeg",
+      0.92,
+    ),
+  );
+}
+
 /** 元動画のコマ。VideoSample は width/height を持たないので別扱いにする。 */
 interface Frame {
   width: number;
@@ -585,6 +706,8 @@ function drawFrame(
   t: number,
   duration: number,
   frame?: Frame | null,
+  /** 表紙として1枚だけ描くときは、波形と残り時間のバーを省く。 */
+  parts: { bars?: boolean; timeBar?: boolean } = {},
 ): void {
   const W = CLIP_WIDTH;
   const H = CLIP_HEIGHT;
@@ -685,14 +808,16 @@ function drawFrame(
     ctx.textAlign = "left";
   }
 
-  drawBars(ctx, levels, t, accent);
+  if (parts.bars !== false) drawBars(ctx, levels, t, accent);
 
   // 残り時間のバー。最後まで見てもらうため
-  const barY = H - H * 0.045;
-  ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
-  ctx.fillRect(pad, barY, W - pad * 2, 8);
-  ctx.fillStyle = accent;
-  ctx.fillRect(pad, barY, (W - pad * 2) * Math.min(1, t / duration), 8);
+  if (parts.timeBar !== false) {
+    const barY = H - H * 0.045;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+    ctx.fillRect(pad, barY, W - pad * 2, 8);
+    ctx.fillStyle = accent;
+    ctx.fillRect(pad, barY, (W - pad * 2) * Math.min(1, t / duration), 8);
+  }
 }
 
 /**

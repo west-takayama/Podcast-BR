@@ -330,6 +330,34 @@ video.card-preview { background: #000; }
   line-height: 1;
 }
 
+/* 表紙の候補。横に並べて選ぶ */
+.cover-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 12px 0;
+}
+.cover-thumb {
+  margin: 0;
+  padding: 4px;
+  background: #262626;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.cover-thumb.chosen { border-color: var(--accent, #ffd400); }
+.cover-thumb img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 5px;
+  display: block;
+}
+.cover-thumb span { font-size: 0.72rem; }
+
 /* 書き出した動画。まとめて書き出すと複数並ぶ */
 .clip-result + .clip-result {
   margin-top: 18px;
