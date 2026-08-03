@@ -303,6 +303,40 @@ input[type="color"] {
 .clip-trim .row-buttons button { flex: 1 1 40%; font-size: 0.85rem; padding: 9px; }
 video.card-preview { background: #000; }
 
+/* 字幕の下書き。焼き込む前に直せるようにする */
+.caption-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.caption-row .caption-time {
+  flex: 0 0 4.4em;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.caption-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 0.9rem;
+}
+.caption-row .caption-del {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+/* 書き出した動画。まとめて書き出すと複数並ぶ */
+.clip-result + .clip-result {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #333;
+}
+
 /* 素材の読み込み。仕上がりを一番左右するので、告知画像の先頭に置く */
 .source {
   background: #262626;

@@ -18,7 +18,19 @@ interface Props {
   onModelChanged: (model: string) => void;
 }
 
-type Phase = "idle" | "extracting" | "finding" | "ready" | "rendering";
+type Phase = "idle" | "extracting" | "finding" | "ready" | "captioning" | "rendering";
+
+interface Nudge {
+  start: number;
+  end: number;
+}
+
+interface Result {
+  blob: Blob;
+  url: string;
+}
+
+const ZERO: Nudge = { start: 0, end: 0 };
 
 const fmt = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
@@ -52,17 +64,20 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const [fileInfo, setFileInfo] = useState("");
   const [clips, setClips] = useState<Clip[]>([]);
   const [selected, setSelected] = useState(0);
-  const [nudge, setNudge] = useState({ start: 0, end: 0 });
-  const [captions, setCaptions] = useState<TranscriptSegment[] | null>(null);
+  // 候補ごとに、範囲・字幕・書き出した動画をそれぞれ持つ。
+  // まとめて書き出すときに1本ずつの状態が要るため。
+  const [nudges, setNudges] = useState<Record<number, Nudge>>({});
+  const [captions, setCaptions] = useState<Record<number, TranscriptSegment[]>>({});
+  const [results, setResults] = useState<Record<number, Result>>({});
   const [withCaptions, setWithCaptions] = useState(true);
-  const [videoUrl, setVideoUrl] = useState("");
-  const [videoBlob, setVideoBlob] = useState<Blob | null>(null);
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
-  const [shared, setShared] = useState(false);
+  const [shared, setShared] = useState(-1);
 
   const fileRef = useRef<File | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 片付けのために、いま生きている URL を持っておく
+  const urlsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     loadClipLib()
@@ -72,25 +87,51 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   }, []);
 
   useEffect(() => {
+    const urls = urlsRef.current;
     return () => {
       workerRef.current?.terminate();
       abortRef.current?.abort();
+      for (const u of urls) URL.revokeObjectURL(u);
     };
   }, []);
 
-  useEffect(() => {
-    setNudge({ start: 0, end: 0 });
-  }, [selected]);
+  const nudgeOf = (i: number) => nudges[i] ?? ZERO;
 
-  // 範囲を動かしたら字幕は作り直す。切り出して聴かせる音声そのものが変わる
-  useEffect(() => {
-    setCaptions(null);
-    setVideoBlob(null);
-    setVideoUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return "";
+  const rangeOf = (i: number) => {
+    const c = clips[i];
+    if (!c) return { startSec: 0, endSec: 0 };
+    const n = nudgeOf(i);
+    const rawStart = (parseTimestamp(c.start) ?? 0) / 1000;
+    const rawEnd = (parseTimestamp(c.end) ?? rawStart + 45) / 1000;
+    const startSec = Math.max(0, rawStart + n.start);
+    return { startSec, endSec: Math.max(startSec + 5, rawEnd + n.end) };
+  };
+
+  /** その候補の書き出し済み動画を捨てる。範囲や字幕を変えたら作り直しになるため。 */
+  const dropResult = (i: number) =>
+    setResults((prev) => {
+      const r = prev[i];
+      if (!r) return prev;
+      URL.revokeObjectURL(r.url);
+      urlsRef.current.delete(r.url);
+      const next = { ...prev };
+      delete next[i];
+      return next;
     });
-  }, [selected, nudge.start, nudge.end]);
+
+  /** 範囲を動かす。切り出して聴かせる音声そのものが変わるので、字幕も作り直す。 */
+  const nudge = (i: number, key: keyof Nudge, delta: number) => {
+    setNudges((prev) => {
+      const n = prev[i] ?? ZERO;
+      return { ...prev, [i]: { ...n, [key]: n[key] + delta } };
+    });
+    setCaptions((prev) => {
+      const next = { ...prev };
+      delete next[i];
+      return next;
+    });
+    dropResult(i);
+  };
 
   /** 動画から AI に聴かせる用の音声だけを取り出す(無音カットはしない)。 */
   const extractAudio = (file: File): Promise<{ mp3: ArrayBuffer; durationSec: number }> =>
@@ -134,6 +175,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     fileRef.current = file;
     setClips([]);
     setSelected(0);
+    setNudges({});
+    setCaptions({});
+    for (const r of Object.values(results)) URL.revokeObjectURL(r.url);
+    urlsRef.current.clear();
+    setResults({});
     setError("");
     setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
     setPhase("extracting");
@@ -168,71 +214,124 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     }
   };
 
-  const clip = clips[selected];
-  const rawStart = clip ? (parseTimestamp(clip.start) ?? 0) / 1000 : 0;
-  const rawEnd = clip ? (parseTimestamp(clip.end) ?? rawStart + 45) / 1000 : 0;
-  const startSec = Math.max(0, rawStart + nudge.start);
-  const endSec = Math.max(startSec + 5, rawEnd + nudge.end);
+  /**
+   * その候補の字幕を作る。
+   *
+   * 「この区間の音声」だけを切り出して渡す。全編を聴かせて「12:34 から」と
+   * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
+   */
+  const buildCaptions = async (i: number, signal: AbortSignal): Promise<TranscriptSegment[]> => {
+    const existing = captions[i];
+    if (existing) return existing;
+    const file = fileRef.current!;
+    const { startSec, endSec } = rangeOf(i);
+    const { extractRangeMp3 } = await loadClipLib();
+    setStatus("この区間の音声を取り出しています…");
+    const rangeMp3 = await extractRangeMp3(file, startSec, endSec);
+    const audio = await uploadEpisodeAudio(settings.apiKey, rangeMp3, setStatus, setProgress, signal);
+    const raw = await transcribeRange({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      audio,
+      startSec: 0,
+      endSec: endSec - startSec,
+      speakers: settings.prompt.speakers,
+      glossary: settings.prompt.glossary,
+      onStatus: setStatus,
+      onModelChanged,
+      signal,
+    });
+    const shifted = shiftSegments(raw, startSec);
+    setCaptions((prev) => ({ ...prev, [i]: shifted }));
+    return shifted;
+  };
 
-  const make = async () => {
-    const file = fileRef.current;
-    if (!file || !clip) return;
+  /** 書き出す前に字幕を確認・修正できるようにする。焼き込んでからでは直せないため。 */
+  const prepareCaptions = async () => {
+    if (!fileRef.current || !clips[selected]) return;
+    setError("");
+    setPhase("captioning");
+    setProgress(0);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      await buildCaptions(selected, controller.signal);
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setPhase("ready");
+      setStatus("");
+      abortRef.current = null;
+    }
+  };
+
+  const editCaption = (i: number, line: number, text: string) => {
+    setCaptions((prev) => {
+      const list = prev[i];
+      if (!list) return prev;
+      const next = list.slice();
+      next[line] = { ...next[line], text };
+      return { ...prev, [i]: next };
+    });
+    dropResult(i);
+  };
+
+  const removeCaption = (i: number, line: number) => {
+    setCaptions((prev) => {
+      const list = prev[i];
+      if (!list) return prev;
+      return { ...prev, [i]: list.filter((_, k) => k !== line) };
+    });
+    dropResult(i);
+  };
+
+  /** 1本書き出す。字幕は用意済みのものを使う(無ければその場で作る)。 */
+  const renderOne = async (i: number, signal: AbortSignal) => {
+    const file = fileRef.current!;
+    const clip = clips[i];
+    const { startSec, endSec } = rangeOf(i);
+    const segments = withCaptions ? await buildCaptions(i, signal) : null;
+    const { renderClip } = await loadClipLib();
+    setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
+    const blob = await renderClip({
+      videoFile: file,
+      startSec,
+      endSec,
+      hook: clip.hook,
+      showName: settings.prompt.showName,
+      accent: settings.accentColor,
+      transcript: segments,
+      onProgress: setProgress,
+      signal,
+      capability: cap ?? undefined,
+    });
+    const url = URL.createObjectURL(blob);
+    urlsRef.current.add(url);
+    setResults((prev) => {
+      const old = prev[i];
+      if (old) {
+        URL.revokeObjectURL(old.url);
+        urlsRef.current.delete(old.url);
+      }
+      return { ...prev, [i]: { blob, url } };
+    });
+  };
+
+  /** 選んだ1本、または候補すべてを書き出す。 */
+  const make = async (indexes: number[]) => {
+    if (!fileRef.current || indexes.length === 0) return;
     setError("");
     setPhase("rendering");
     setProgress(0);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const { extractRangeMp3, renderClip } = await loadClipLib();
-
-      // 字幕はこの区間だけ書き起こす。全編より速く、無料枠も食わない。
-      // しかも「この区間の音声」だけを切り出して渡す。全編を聴かせて
-      // 「12:34 から」と頼むと AI はファイルの頭から数えることになり、
-      // 後ろの回ほど時刻がずれる(実際に数秒ずれていた)。
-      let segments = captions;
-      if (withCaptions && !segments) {
-        setStatus("この区間の音声を取り出しています…");
-        const rangeMp3 = await extractRangeMp3(file, startSec, endSec);
-        const audio = await uploadEpisodeAudio(
-          settings.apiKey,
-          rangeMp3,
-          setStatus,
-          setProgress,
-          controller.signal,
-        );
-        const raw = await transcribeRange({
-          apiKey: settings.apiKey,
-          model: settings.model,
-          audio,
-          startSec: 0,
-          endSec: endSec - startSec,
-          speakers: settings.prompt.speakers,
-          onStatus: setStatus,
-          onModelChanged,
-          signal: controller.signal,
-        });
-        segments = shiftSegments(raw, startSec);
-        setCaptions(segments);
+      for (let k = 0; k < indexes.length; k++) {
+        if (indexes.length > 1) setStatus(`${k + 1}本目 / 全${indexes.length}本`);
+        await renderOne(indexes[k], controller.signal);
       }
-
-      setStatus("動画を書き出しています…");
-      const blob = await renderClip({
-        videoFile: file,
-        startSec,
-        endSec,
-        hook: clip.hook,
-        showName: settings.prompt.showName,
-        accent: settings.accentColor,
-        transcript: withCaptions ? segments : null,
-        onProgress: setProgress,
-        signal: controller.signal,
-        capability: cap ?? undefined,
-      });
-      setVideoBlob(blob);
-      setVideoUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return URL.createObjectURL(blob);
-      });
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
         setError(e instanceof Error ? e.message : String(e));
@@ -246,28 +345,38 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
 
   const ext = cap?.mp4 === false ? "webm" : "mp4";
   const mime = ext === "mp4" ? "video/mp4" : "video/webm";
-  const clipName = `short${selected + 1}.${ext}`;
-  const canShare =
-    typeof navigator !== "undefined" &&
-    !!navigator.canShare &&
-    !!videoBlob &&
-    navigator.canShare({ files: [new File([videoBlob], clipName, { type: mime })] });
+  const nameOf = (i: number) => `short${i + 1}.${ext}`;
 
-  const share = async () => {
-    if (!videoBlob) return;
+  const canShare = (i: number) => {
+    const r = results[i];
+    return (
+      typeof navigator !== "undefined" &&
+      !!navigator.canShare &&
+      !!r &&
+      navigator.canShare({ files: [new File([r.blob], nameOf(i), { type: mime })] })
+    );
+  };
+
+  const share = async (i: number) => {
+    const r = results[i];
+    if (!r) return;
     try {
       await navigator.share({
-        files: [new File([videoBlob], clipName, { type: mime })],
-        title: clip?.hook,
+        files: [new File([r.blob], nameOf(i), { type: mime })],
+        title: clips[i]?.hook,
       });
-      setShared(true);
-      setTimeout(() => setShared(false), 2000);
+      setShared(i);
+      setTimeout(() => setShared(-1), 2000);
     } catch {
       // 共有シートを閉じただけの場合もここに来る
     }
   };
 
-  const busy = phase === "extracting" || phase === "finding" || phase === "rendering";
+  const busy =
+    phase === "extracting" || phase === "finding" || phase === "rendering" || phase === "captioning";
+  const { startSec, endSec } = rangeOf(selected);
+  const lines = captions[selected];
+  const doneCount = Object.keys(results).length;
 
   return (
     <>
@@ -320,8 +429,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
           <p className="muted">{fileInfo}</p>
 
           {clips.map((c, i) => {
-            const s = (parseTimestamp(c.start) ?? 0) / 1000;
-            const e = (parseTimestamp(c.end) ?? s) / 1000;
+            const r = rangeOf(i);
             return (
               <div
                 key={i}
@@ -331,10 +439,12 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               >
                 <div style={{ fontWeight: 600 }}>
                   {i === selected ? "★ " : ""}
+                  {results[i] ? "✅ " : ""}
                   {c.hook || "(見出しなし)"}
                 </div>
                 <div className="muted" style={{ marginTop: 4 }}>
-                  {fmt(s)}〜{fmt(e)}({Math.round(e - s)}秒){c.why ? ` ・ ${c.why}` : ""}
+                  {fmt(r.startSec)}〜{fmt(r.endSec)}({Math.round(r.endSec - r.startSec)}秒)
+                  {c.why ? ` ・ ${c.why}` : ""}
                 </div>
               </div>
             );
@@ -345,10 +455,10 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               書き出す範囲: {fmt(startSec)} 〜 {fmt(endSec)}({Math.round(endSec - startSec)}秒)
             </div>
             <div className="row-buttons">
-              <button onClick={() => setNudge((n) => ({ ...n, start: n.start - 3 }))}>開始 -3秒</button>
-              <button onClick={() => setNudge((n) => ({ ...n, start: n.start + 3 }))}>開始 +3秒</button>
-              <button onClick={() => setNudge((n) => ({ ...n, end: n.end - 3 }))}>終了 -3秒</button>
-              <button onClick={() => setNudge((n) => ({ ...n, end: n.end + 3 }))}>終了 +3秒</button>
+              <button onClick={() => nudge(selected, "start", -3)}>開始 -3秒</button>
+              <button onClick={() => nudge(selected, "start", 3)}>開始 +3秒</button>
+              <button onClick={() => nudge(selected, "end", -3)}>終了 -3秒</button>
+              <button onClick={() => nudge(selected, "end", 3)}>終了 +3秒</button>
             </div>
           </div>
 
@@ -367,11 +477,6 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
             </span>
           </label>
 
-          {cap !== null && (
-            <button className="primary" onClick={make}>
-              🎬 この範囲を縦型ショートにする
-            </button>
-          )}
           {cap === null && (
             <p className="muted">
               この端末では動画を書き出せません(WebCodecs 非対応)。ブラウザを更新するか、パソコンでお試しください。
@@ -384,31 +489,90 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
             </p>
           )}
 
-          {videoUrl && (
+          {cap !== null && (
             <>
-              <video className="card-preview" src={videoUrl} controls playsInline />
-              {canShare && (
-                <button className="primary" onClick={share}>
-                  {shared ? "✓ 共有しました" : "📤 共有 / 写真に保存"}
+              {withCaptions && !lines && (
+                <button onClick={prepareCaptions}>📝 先に字幕を作って確認する</button>
+              )}
+              <button className="primary" onClick={() => void make([selected])}>
+                🎬 この範囲を縦型ショートにする
+              </button>
+              {clips.length > 1 && (
+                <button onClick={() => void make(clips.map((_, i) => i))}>
+                  📦 候補をまとめて書き出す({clips.length}本)
                 </button>
               )}
-              <a className="dl" href={videoUrl} download={clipName}>
-                ⬇️ {ext.toUpperCase()} をダウンロード(
-                {videoBlob ? Math.round(videoBlob.size / 1024 / 1024) : 0} MB)
-              </a>
             </>
           )}
+        </div>
+      )}
 
+      {/* 焼き込む前に直せるようにする。動画にしてからでは直せない */}
+      {lines && !busy && withCaptions && (
+        <div className="card">
+          <h2>📝 字幕の下書き</h2>
+          <p className="muted">
+            聞き間違いがあればここで直せます。直した内容がそのまま動画に焼き込まれます。
+            <br />
+            番組名や相方の名前をよく間違えるなら、設定の「この番組でよく出る言葉」に入れておくと次から間違えにくくなります。
+          </p>
+          {lines.length === 0 && <p className="muted">この区間では話し声が拾えませんでした。</p>}
+          {lines.map((s, k) => (
+            <div key={k} className="caption-row">
+              <span className="muted caption-time">{s.time}</span>
+              <input
+                type="text"
+                value={s.text}
+                onChange={(e) => editCaption(selected, k, e.target.value)}
+              />
+              <button
+                className="caption-del"
+                onClick={() => removeCaption(selected, k)}
+                title="この行を消す"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {doneCount > 0 && !busy && (
+        <div className="card">
+          <h2>📱 書き出した動画({doneCount}本)</h2>
+          {clips.map((c, i) => {
+            const r = results[i];
+            if (!r) return null;
+            return (
+              <div key={i} className="clip-result">
+                <p style={{ fontWeight: 600, margin: "0 0 6px" }}>{c.hook || `候補${i + 1}`}</p>
+                <video className="card-preview" src={r.url} controls playsInline />
+                {canShare(i) && (
+                  <button className="primary" onClick={() => void share(i)}>
+                    {shared === i ? "✓ 共有しました" : "📤 共有 / 写真に保存"}
+                  </button>
+                )}
+                <a className="dl" href={r.url} download={nameOf(i)}>
+                  ⬇️ {ext.toUpperCase()} をダウンロード({Math.round(r.blob.size / 1024 / 1024)} MB)
+                </a>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {clips.length > 0 && !busy && (
+        <div className="card">
           <button
             onClick={() => {
               setClips([]);
               setPhase("idle");
               fileRef.current = null;
-              setVideoBlob(null);
-              setVideoUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev);
-                return "";
-              });
+              setNudges({});
+              setCaptions({});
+              for (const r of Object.values(results)) URL.revokeObjectURL(r.url);
+              urlsRef.current.clear();
+              setResults({});
             }}
           >
             別の動画にする

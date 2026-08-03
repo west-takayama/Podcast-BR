@@ -143,6 +143,21 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       </p>
 
       <label>
+        この番組でよく出る言葉(カンマ区切り・任意)
+        <input
+          type="text"
+          value={settings.prompt.glossary}
+          placeholder="例: ねぎ塩, ジャガイモ回, 西さん, 高山商店"
+          onChange={(e) => setPrompt("glossary", e.target.value)}
+        />
+      </label>
+      <p className="muted">
+        AI が聞き間違えやすい言葉を先に登録しておくと、書き起こしと字幕の表記が揃います。
+        番組名・相方の名前・造語・お店の名前など、
+        <strong>音は近いけれど普通の日本語には無い言葉</strong>ほど効きます。
+      </p>
+
+      <label>
         番組の背景情報(生成品質が大きく上がります)
         <textarea
           value={settings.prompt.showContext}
