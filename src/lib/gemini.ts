@@ -925,3 +925,146 @@ export function transcriptToText(segments: TranscriptSegment[]): string {
     })
     .join("\n\n");
 }
+
+/** 次に話すお題の案。 */
+export interface TopicIdea {
+  /** お題そのもの。そのまま収録の頭で読める短さにする。 */
+  title: string;
+  /** なぜ今これなのか。過去回との関係を含める。 */
+  why: string;
+  /** 話を転がすための切り口。 */
+  angles: string[];
+  /** 冒頭2秒で引きが立つ一言。ショートの見出しにも使える。 */
+  hook: string;
+  /** 関係する過去回のタイトル。続きものにできるかの判断に使う。 */
+  related: string[];
+}
+
+export interface TopicSuggestions {
+  /** 番組の傾向として読み取れたこと。 */
+  patterns: string[];
+  /** 手が回っていない領域。 */
+  gaps: string[];
+  ideas: TopicIdea[];
+}
+
+const asStrings = (v: unknown, limit = 8): string[] =>
+  Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, limit)
+    : [];
+
+/**
+ * 履歴からお題を考えさせる。
+ *
+ * 音声は送らない。送るのはタイトル・日付・要約・チャプター見出しと、
+ * 端末側で数えた傾向だけ。過去回の中身を全部読ませなくても、
+ * 「何を話してきたか」が分かればお題は出せる。
+ *
+ * 再生数のような反応のデータは持っていないので、「伸びた回」を根拠に
+ * させない。持っていない情報で理由を作られると判断を誤る。
+ */
+export async function suggestTopics(opts: {
+  apiKey: string;
+  model: string;
+  /** 履歴の抜粋(insights.digestForPrompt)。 */
+  digest: string;
+  /** 端末側で数えた傾向(insights.insightsForPrompt)。 */
+  stats: string;
+  config: PromptConfig;
+  /** 今日の日付。時期ものを出させるために渡す。 */
+  today?: Date;
+  count?: number;
+  onStatus: (status: string) => void;
+  onModelChanged?: (model: string) => void;
+  signal?: AbortSignal;
+}): Promise<TopicSuggestions> {
+  const { apiKey, model, digest, stats, config, onStatus, onModelChanged, signal } = opts;
+  const count = opts.count ?? 6;
+  const today = opts.today ?? new Date();
+  onStatus("これまでの回を読んでいます…");
+
+  const background = [
+    config.showName.trim() && `番組名: ${config.showName.trim()}`,
+    config.speakers.trim() && `話者: ${config.speakers.trim()}`,
+    config.glossary.trim() && `この番組でよく出る言葉: ${config.glossary.trim()}`,
+    config.showContext.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const prompt = `あなたは日本語ポッドキャストの構成作家です。これまでの回を読んで、**次に話すお題**を${count}個考えてください。
+
+${background ? `## 番組について\n${background}\n` : ""}
+## 今日の日付
+${today.getFullYear()}年${today.getMonth() + 1}月${today.getDate()}日
+
+## これまでの回(新しい順)
+${digest}
+
+## 端末側で数えた傾向
+${stats}
+
+## 考え方
+- **過去回の続き**を優先する。少し触れて終わっている話、結論が出ないまま流れた話は、それだけで1回になる。
+- **しばらく触れていない話題**は、間が空いたぶん話し直す価値がある。前と違う角度をつける。
+- 番組の色から外れた「一般論のお題」は出さない。この2人がこの番組で話すから面白い、という形にする。
+- 時期(季節・年度・行事)が効くお題があれば入れる。ただし今日の日付から見て自然なものだけ。
+- 同じお題を言い換えただけの案を並べない。${count}個それぞれ別の入り口にする。
+- **再生数や反応のデータは渡していない。** 「この回が伸びたから」のような、手元にない情報を根拠にしない。
+
+## 各案に付けるもの
+- title: お題。収録の頭でそのまま読める短さ(30文字以内)
+- why: なぜ今これなのか。過去回との関係を具体的に書く(60文字程度)
+- angles: 話を転がす切り口を3つ。それぞれ疑問形か対立軸にする
+- hook: 冒頭2秒で引きが立つ一言(20文字以内)
+- related: 関係する過去回のタイトル。無ければ空配列
+
+次の構造の JSON のみを出力する:
+{
+  "patterns": string[],   // 番組の傾向として読み取れたこと。3〜5個
+  "gaps": string[],       // 手が回っていない領域。2〜4個
+  "ideas": [{ "title": string, "why": string, "angles": string[], "hook": string, "related": string[] }]
+}`;
+
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [{ parts: [{ text: prompt }] }],
+      // 案出しなので少し散らす。固くすると似た案が並ぶ
+      generationConfig: { response_mime_type: "application/json", temperature: 0.9 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
+  if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案");
+
+  const data = await res.json();
+  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("お題が返りませんでした。もう一度お試しください。");
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error("お題の形式が読めませんでした。もう一度お試しください。");
+  }
+
+  const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
+    .map((raw) => {
+      const o = (raw ?? {}) as Record<string, unknown>;
+      return {
+        title: typeof o.title === "string" ? o.title.trim() : "",
+        why: typeof o.why === "string" ? o.why.trim() : "",
+        angles: asStrings(o.angles, 5),
+        hook: typeof o.hook === "string" ? o.hook.trim() : "",
+        related: asStrings(o.related, 4),
+      };
+    })
+    .filter((i) => i.title);
+
+  if (ideas.length === 0) throw new Error("お題が返りませんでした。もう一度お試しください。");
+
+  return { patterns: asStrings(parsed.patterns, 6), gaps: asStrings(parsed.gaps, 5), ideas };
+}
