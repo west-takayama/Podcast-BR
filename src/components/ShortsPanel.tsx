@@ -77,7 +77,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   }, [selected]);
 
   /** 動画から AI に聴かせる用の音声だけを取り出す(無音カットはしない)。 */
-  const extractAudio = (file: File): Promise<ArrayBuffer> =>
+  const extractAudio = (file: File): Promise<{ mp3: ArrayBuffer; durationSec: number }> =>
     new Promise((resolve, reject) => {
       const worker = new Worker(new URL("../lib/encoder.worker.ts", import.meta.url), {
         type: "module",
@@ -89,7 +89,8 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         else if (msg.type === "done") {
           worker.terminate();
           workerRef.current = null;
-          resolve(msg.aiMp3);
+          // 長さを渡さないと、短い動画で「30〜60秒の区間を3つ」が無理になる
+          resolve({ mp3: msg.aiMp3, durationSec: msg.durationSec ?? 0 });
         } else if (msg.type === "error") {
           worker.terminate();
           workerRef.current = null;
@@ -124,13 +125,14 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const mp3 = await extractAudio(file);
+      const { mp3, durationSec } = await extractAudio(file);
       setPhase("finding");
       setProgress(0);
       const found = await findClips({
         apiKey: settings.apiKey,
         model: settings.model,
         mp3,
+        durationSec,
         onStatus: setStatus,
         onUploadProgress: setProgress,
         onModelChanged,

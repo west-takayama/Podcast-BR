@@ -343,29 +343,57 @@ async function waitUntilActive(
  * 切り抜き候補を整える。時刻が読めないものと、縦動画に向かない長さのものは捨てる。
  * 壊れた区間で書き出そうとしても意味がない。
  */
-function normalizeClips(raw: unknown): Clip[] {
+/** 縦型ショートとして成立する最短の長さ。これ未満は動画にならない。 */
+const MIN_CLIP_SEC = 5;
+/** 長すぎる候補は切り詰める。捨てるより短くしたほうが使える。 */
+const MAX_CLIP_SEC = 90;
+
+/** 秒に直す。AI は数値でも文字列でも返してくる。 */
+function toSeconds(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0) return v;
+  if (typeof v !== "string") return null;
+  const ms = parseTimestamp(v);
+  return ms === null ? null : ms / 1000;
+}
+
+/**
+ * 切り抜き候補を整える。
+ *
+ * 以前は「読めない・長さが範囲外」を全部捨てていたため、短い動画で
+ * 候補が全滅して「見つかりませんでした」になっていた(利用者の端末で発生)。
+ * いまは直せるものは直す: 動画の長さに収め、長すぎる候補は切り詰める。
+ * durationSec を渡すと、その範囲外の候補を捨てずに収められる。
+ */
+function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
   if (!Array.isArray(raw)) return [];
-  return (raw as Record<string, unknown>[])
-    .filter(
-      (c) =>
-        c &&
-        typeof c.start === "string" &&
-        typeof c.end === "string" &&
-        parseTimestamp(c.start) !== null &&
-        parseTimestamp(c.end) !== null,
-    )
-    .map((c) => ({
-      start: c.start as string,
-      end: c.end as string,
+  const limit = durationSec && durationSec > 0 ? durationSec : Infinity;
+
+  const out: Clip[] = [];
+  for (const c of raw as Record<string, unknown>[]) {
+    if (!c) continue;
+    let start = toSeconds(c.start);
+    let end = toSeconds(c.end);
+    if (start === null) continue;
+    // 終了が無い・逆転している場合は、長さから決め直す
+    if (end === null || end <= start) end = start + 45;
+
+    start = Math.max(0, Math.min(start, Math.max(0, limit - MIN_CLIP_SEC)));
+    end = Math.min(end, limit);
+    if (end - start > MAX_CLIP_SEC) end = start + MAX_CLIP_SEC;
+    if (end - start < MIN_CLIP_SEC) continue;
+
+    out.push({
+      start: formatTimecode(start),
+      end: formatTimecode(end),
       hook: typeof c.hook === "string" ? c.hook : "",
       why: typeof c.why === "string" ? c.why : "",
-    }))
-    .filter((c) => {
-      const a = parseTimestamp(c.start)!;
-      const b = parseTimestamp(c.end)!;
-      return b - a >= 10000 && b - a <= 120000;
     });
+  }
+  return out;
 }
+
+/** 検証用。AI の返し方の揺れを吸収できているかをテストから確かめる。 */
+export const __testNormalizeClips = normalizeClips;
 
 /** 生成物の欠けを埋める。項目が1つ欠けただけで全体を失敗させない。 */
 function normalizeMeta(raw: unknown): EpisodeMeta {
@@ -482,13 +510,18 @@ export async function findClips(opts: {
   model: string;
   mp3?: ArrayBuffer;
   audio?: UploadedAudio;
+  /** 動画の長さ(秒)。候補の長さを動画に合わせるために渡す。 */
+  durationSec?: number;
   onStatus: (status: string) => void;
   onUploadProgress?: (fraction: number) => void;
   onModelChanged?: (model: string) => void;
   onUploaded?: (audio: UploadedAudio) => void;
   signal?: AbortSignal;
 }): Promise<Clip[]> {
-  const { apiKey, model, mp3, audio, onStatus, onUploadProgress, onModelChanged, onUploaded, signal } = opts;
+  const {
+    apiKey, model, mp3, audio, durationSec,
+    onStatus, onUploadProgress, onModelChanged, onUploaded, signal,
+  } = opts;
 
   let source = audio;
   if (!isAudioUsable(source)) {
@@ -498,8 +531,23 @@ export async function findClips(opts: {
   }
 
   onStatus("面白い区間を探しています…");
+
+  // 動画が短いと「30〜60秒を3つ」は物理的に無理で、候補が返ってこない。
+  // 長さに応じて頼み方を変える(実際に短い動画で0件になった)。
+  const total = durationSec && durationSec > 0 ? durationSec : 0;
+  const lengthRule = !total
+    ? "- 長さは30〜60秒。"
+    : total <= 70
+      ? `- この音声は全体で ${Math.round(total)}秒しかありません。**動画全体を1つの候補にして構いません。**
+  無理に短く切らず、面白い部分が入るように取ってください。候補は1〜2個で構いません。`
+      : total <= 150
+        ? `- この音声は全体で ${Math.round(total)}秒です。長さは20〜60秒の範囲で、
+  音声の長さを超えない区間にしてください。候補は2〜3個。`
+        : `- 長さは30〜60秒。
+- この音声は全体で ${formatTimecode(total)} です。**この長さを超える時刻を返さないでください。**`;
+
   const prompt = `添付の音声を聴いて、縦型ショート動画(TikTok / Reels / YouTube Shorts)に
-切り出す区間を3つ選んでください。
+切り出す区間を選んでください。
 
 選ぶ基準(この順に強い):
 1. 笑いが起きている、声が跳ねている
@@ -509,8 +557,9 @@ export async function findClips(opts: {
 
 条件:
 - **それ単体で完結して面白い**こと。前後の文脈が無いと意味が通らない箇所は選ばない。
-- 長さは30〜60秒。
+${lengthRule}
 - **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。
+- 候補が1つも思いつかない場合でも、いちばんましな区間を必ず1つは返す。
 - hook は動画の1行目に大きく出す見出し。20文字以内。続きを見たくなる言葉にし、
   答えは動画の中に残す。
 - why は「なぜ伸びると思うか」を20文字程度で。
@@ -547,9 +596,24 @@ export async function findClips(opts: {
   } catch {
     throw new Error("候補を読み取れませんでした。もう一度お試しください。");
   }
-  const clips = normalizeClips(parsed.clips);
-  if (clips.length === 0) throw new Error("切り出せそうな区間が見つかりませんでした。");
-  return clips;
+  const clips = normalizeClips(parsed.clips, total || undefined);
+  if (clips.length > 0) return clips;
+
+  // ここまで来たら AI の答えは使えない。それでも行き止まりにはしない。
+  // 音声があるのだから、全体(長ければ先頭60秒)を候補として出す。
+  if (total >= MIN_CLIP_SEC) {
+    return [
+      {
+        start: "00:00",
+        end: formatTimecode(Math.min(total, 60)),
+        hook: "冒頭から",
+        why: "AIが選べなかったため、先頭から仮に取っています",
+      },
+    ];
+  }
+  throw new Error(
+    `切り出せる区間がありませんでした(動画が短すぎます。${MIN_CLIP_SEC}秒以上の動画をお使いください)。`,
+  );
 }
 
 /**

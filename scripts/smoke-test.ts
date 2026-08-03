@@ -17,6 +17,8 @@ import { wrapJapanese, PRESETS } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
 import { buildImagePrompt } from "../src/lib/imagePrompt";
 import { captionsForRange, splitCaption } from "../src/lib/video/clip";
+import { parseTimestamp } from "../src/lib/id3";
+import { __testNormalizeClips } from "../src/lib/gemini";
 
 const SR = 44100;
 let failures = 0;
@@ -612,6 +614,50 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       [{ time: "00:11.0", speaker: "A", text: "遠い発言。" }], 0, 20, levels, step);
     check("遠すぎる時刻は動かさない", Math.abs(far[0].atSec - 11) < 0.01,
       `${far[0].atSec.toFixed(2)}秒`);
+  }
+
+  console.log("\n[21] 切り抜き候補の受け取り(AIの返し方の揺れ)");
+  {
+    const n = (raw: unknown, dur?: number) => __testNormalizeClips(raw, dur);
+
+    check("MM:SS を受け取る",
+      n([{ start: "00:10", end: "00:40", hook: "h", why: "w" }]).length === 1);
+    check("秒の数値でも受け取る",
+      n([{ start: 10, end: 40, hook: "h", why: "w" }]).length === 1, "start:10 end:40");
+    check("秒の文字列でも受け取る",
+      n([{ start: "10", end: "40", hook: "h", why: "w" }]).length === 1);
+    check("小数の時刻でも受け取る",
+      n([{ start: "00:10.5", end: "00:40.2", hook: "h", why: "w" }]).length === 1);
+
+    const noEnd = n([{ start: "00:10", hook: "h", why: "w" }]);
+    check("終了が無ければ補う", noEnd.length === 1 && noEnd[0].end === "00:55", noEnd[0]?.end);
+    const reversed = n([{ start: "00:30", end: "00:10", hook: "h", why: "w" }]);
+    check("逆転していても直す", reversed.length === 1 && reversed[0].end === "01:15", reversed[0]?.end);
+
+    // 動画の長さに収める
+    const over = n([{ start: "00:10", end: "10:00", hook: "h", why: "w" }], 40);
+    check("動画の長さを超えたら切り詰める", over.length === 1 && over[0].end === "00:40",
+      `${over[0]?.start}〜${over[0]?.end}`);
+    const long = n([{ start: "00:00", end: "20:00", hook: "h", why: "w" }]);
+    check("長すぎる候補は切り詰める(捨てない)", long.length === 1 && long[0].end === "01:30",
+      long[0]?.end);
+
+    check("短すぎる候補は捨てる",
+      n([{ start: "00:10", end: "00:12", hook: "h", why: "w" }]).length === 0);
+    check("読めない時刻は捨てる",
+      n([{ start: "??", end: "00:40", hook: "h", why: "w" }]).length === 0);
+    check("配列でなければ空", n({ nope: 1 }).length === 0);
+
+    // 以前はここで全滅していた: 20秒の動画に 30〜60秒の候補
+    const shortVideo = n(
+      [
+        { start: "00:00", end: "00:30", hook: "h", why: "w" },
+        { start: "00:05", end: "00:45", hook: "h2", why: "w2" },
+      ],
+      20,
+    );
+    check("短い動画でも候補が残る", shortVideo.length === 2,
+      shortVideo.map((c) => `${c.start}〜${c.end}`).join(" / "));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
