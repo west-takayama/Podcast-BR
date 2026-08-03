@@ -528,9 +528,11 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
   console.log("\n[20] 切り抜きの字幕");
   {
     const parts = splitCaption("結論から言うと、ジャガイモは全てを壊します。理由は単純で、味が全部それになるからです。");
-    check("句点で分ける", parts.length === 2, parts.join(" / "));
-    check("全文が保たれる", parts.join("") .length === "結論から言うと、ジャガイモは全てを壊します。理由は単純で、味が全部それになるからです。".length);
+    check("長い発言を分ける", parts.length >= 2, parts.join(" / "));
+    check("全文が保たれる", parts.join("").length === "結論から言うと、ジャガイモは全てを壊します。理由は単純で、味が全部それになるからです。".length);
+    check("短い行はそのまま", splitCaption("短い一言。").length === 1);
     check("句点が無くても落ちない", splitCaption("句点のない発言").length === 1);
+    check("句読点が無い長文も分ける", splitCaption("あ".repeat(60)).length >= 2);
 
     const transcript = [
       { time: "00:04", speaker: "A", text: "結論から言うと、ジャガイモは全てを壊します。" },
@@ -541,21 +543,75 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("区間に重なる発言だけ拾う", caps.length === 3, `${caps.length}行`);
     check("区間外は捨てる", !caps.some((c) => c.text.includes("区間の外")));
     check("時刻の順に並ぶ", caps.every((c, i) => i === 0 || caps[i - 1].atSec <= c.atSec));
-    check("長い発言は分割される", caps.filter((c) => c.atSec >= 9 && c.atSec < 20).length === 2,
-      caps.map((c) => `${c.atSec.toFixed(1)}s`).join(" "));
+    check("消える時刻が入る", caps.every((c) => c.endSec > c.atSec));
+    check("出しっぱなしにしない", caps.every((c) => c.endSec - c.atSec <= 6.01),
+      caps.map((c) => (c.endSec - c.atSec).toFixed(1)).join(" "));
+    check("書き起こしが無ければ空", captionsForRange(null, 0, 60).length === 0);
+    check("時刻が読めない行は捨てる",
+      captionsForRange([{ time: "??", speaker: "", text: "x" }], 0, 60).length === 0);
+
     // 次の発言が遠くても、字幕が何十秒も先へずれないこと
     const drift = captionsForRange(
       [
-        { time: "00:00", speaker: "A", text: "短い一言。もう一つの短い一言。" },
+        {
+          time: "00:00",
+          speaker: "A",
+          text: "ここは長いので複数行に分かれます。二文目もそれなりの長さがあります。",
+        },
         { time: "05:00", speaker: "B", text: "ずっと後の発言。" },
       ],
       0,
       30,
     );
     check("次の発言が遠くても字幕がずれない", drift[1].atSec < 5, `2行目 ${drift[1].atSec.toFixed(1)}秒`);
-    check("書き起こしが無ければ空", captionsForRange(null, 0, 60).length === 0);
-    check("時刻が読めない行は捨てる",
-      captionsForRange([{ time: "??", speaker: "", text: "x" }], 0, 60).length === 0);
+
+    // --- 実際の発話位置への吸着 ---
+    // 50ms ごとの音量。2.0〜4.0秒と 6.0〜8.0秒だけ声が出ている想定
+    const step = 0.05;
+    const levels = new Float32Array(Math.round(20 / step));
+    const loud = (from: number, to: number) => {
+      for (let i = Math.round(from / step); i < Math.round(to / step); i++) levels[i] = 0.25;
+    };
+    for (let i = 0; i < levels.length; i++) levels[i] = 0.002; // 暗騒音
+    loud(2, 4);
+    loud(6, 8);
+
+    // AI が 0.7秒ずれた時刻を返してきた場合
+    const snapped = captionsForRange(
+      [
+        { time: "00:02.7", speaker: "A", text: "最初の発言。" },
+        { time: "00:05.4", speaker: "B", text: "次の発言。" },
+      ],
+      0,
+      20,
+      levels,
+      step,
+    );
+    check("ずれた時刻を発話の頭へ寄せる", Math.abs(snapped[0].atSec - 2) < 0.2,
+      `${snapped[0].atSec.toFixed(2)}秒(AIは2.70秒と返した)`);
+    check("2行目も寄せる", Math.abs(snapped[1].atSec - 6) < 0.2,
+      `${snapped[1].atSec.toFixed(2)}秒(AIは5.40秒と返した)`);
+    check("声が止まったら消える", snapped[0].endSec < 4.6,
+      `${snapped[0].endSec.toFixed(2)}秒(声は4.0秒で止まる)`);
+
+    // 単語の切れ目で一瞬音量が落ちても、文の途中で字幕を消さないこと
+    const dips = new Float32Array(Math.round(20 / step));
+    for (let i = 0; i < dips.length; i++) dips[i] = 0.002;
+    for (let i = Math.round(2 / step); i < Math.round(8 / step); i++) {
+      // 6秒間しゃべり続けるが、0.15秒の谷が何度も入る
+      const t = i * step;
+      dips[i] = t % 1 < 0.15 ? 0.002 : 0.25;
+    }
+    const kept = captionsForRange(
+      [{ time: "00:02.0", speaker: "A", text: "文の途中で消えないこと。" }], 0, 20, dips, step);
+    check("一瞬の谷では字幕を消さない", kept[0].endSec > 5,
+      `${kept[0].endSec.toFixed(2)}秒まで表示(声は8.0秒まで続く)`);
+
+    // 許容範囲の外(3秒ずれ)は、AIの時刻を尊重して動かさない
+    const far = captionsForRange(
+      [{ time: "00:11.0", speaker: "A", text: "遠い発言。" }], 0, 20, levels, step);
+    check("遠すぎる時刻は動かさない", Math.abs(far[0].atSec - 11) < 0.01,
+      `${far[0].atSec.toFixed(2)}秒`);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);

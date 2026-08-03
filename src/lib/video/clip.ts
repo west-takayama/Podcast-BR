@@ -101,14 +101,30 @@ export async function detectCapability(): Promise<ClipCapability | null> {
 
 /** 日本語の話速の目安。字幕の表示時間を見積もるために使う。 */
 const SPEECH_CHARS_PER_SEC = 7;
+/** 1枚の字幕に載せる文字数の上限。これを超えたら分割する。 */
+const CAPTION_MAX_CHARS = 24;
+/** 字幕を実際の発話開始へ寄せる許容範囲。AI の時刻はこの程度ずれる。 */
+const SNAP_TOLERANCE_SEC = 1.2;
+/** 声が止まってからこれだけ経ったら字幕を消す。出しっぱなしにしない。 */
+const CAPTION_TAIL_SEC = 0.4;
+/**
+ * 「声が止まった」とみなすのに必要な無音の長さ。
+ * 単語の切れ目や促音でも音量は一瞬落ちるため、短い谷で消すと
+ * 文の途中で字幕が消える(実際に書き出して確認した)。
+ */
+const MIN_SILENCE_SEC = 0.45;
+/** 1枚の字幕を出し続ける上限。 */
+const CAPTION_MAX_SEC = 6;
 
 /** 字幕を「開始秒つきの行」に均す。時刻が読めないものは捨てる。 */
 interface Caption {
   atSec: number;
+  /** 消す時刻。声が止まったところで消えるようにする。 */
+  endSec: number;
   text: string;
 }
 
-function toCaptions(transcript: TranscriptSegment[] | null | undefined): Caption[] {
+function toCaptions(transcript: TranscriptSegment[] | null | undefined): { atSec: number; text: string }[] {
   if (!transcript) return [];
   return transcript
     .map((s) => ({ atSec: (parseTimestamp(s.time) ?? -1) / 1000, text: s.text }))
@@ -117,16 +133,18 @@ function toCaptions(transcript: TranscriptSegment[] | null | undefined): Caption
 }
 
 /**
- * 長い一文はそのままだと画面に入りきらないので、句読点で切って
- * 「読み上げの速さ」で時間を割り振る。字幕用の音声認識は無いため、
- * 文字数に比例させるのが実用上いちばん破綻しない。
+ * 長い一文はそのままだと画面に入りきらないので、句読点で切る。
+ * 書き起こし側にも短く区切るよう頼んでいるが、守られないことがあるため
+ * ここでも保険をかけておく。
  */
 export function splitCaption(text: string): string[] {
+  if (text.length <= CAPTION_MAX_CHARS) return [text];
   const parts: string[] = [];
   let buf = "";
   for (const ch of text) {
     buf += ch;
-    if ("。！？!?".includes(ch) || (buf.length >= 22 && ch === "、")) {
+    const atBreak = "。！？!?".includes(ch) || (buf.length >= CAPTION_MAX_CHARS * 0.7 && "、,".includes(ch));
+    if (atBreak || buf.length >= CAPTION_MAX_CHARS) {
       parts.push(buf.trim());
       buf = "";
     }
@@ -135,14 +153,67 @@ export function splitCaption(text: string): string[] {
   return parts.length > 0 ? parts : [text];
 }
 
-/** 区間に重なる字幕を、開始秒つきの行の列に展開する。 */
+/**
+ * 声が出ている区間を音量から求める。
+ *
+ * 字幕の時刻は AI が耳で推定したもので、1秒前後ずれる。ずれた字幕は
+ * 無いより気になるので、実際に声が始まった位置へ寄せる。
+ * チャプターを沈黙の位置へ吸着させているのと同じ考え方。
+ */
+function speechFlags(levels: Float32Array): boolean[] {
+  if (levels.length === 0) return [];
+  const sorted = Float32Array.from(levels).sort();
+  const floor = sorted[Math.floor(sorted.length * 0.2)];
+  const peak = sorted[sorted.length - 1];
+  const threshold = Math.max(floor * 3, peak * 0.06, 1e-4);
+  return Array.from(levels, (v) => v > threshold);
+}
+
+/** 声が始まる位置(無音 → 有音の変わり目)を秒で返す。 */
+function speechOnsets(flags: boolean[], stepSec: number): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < flags.length; i++) {
+    if (flags[i] && !flags[i - 1]) out.push(i * stepSec);
+  }
+  if (flags[0]) out.unshift(0);
+  return out;
+}
+
+/**
+ * at 以降で声が途切れる位置。字幕を消す時刻に使う。
+ * 一瞬の谷では切らず、MIN_SILENCE_SEC 続けて無音になったところを終わりとする。
+ */
+function speechEndAfter(flags: boolean[], stepSec: number, at: number): number {
+  const need = Math.max(1, Math.round(MIN_SILENCE_SEC / stepSec));
+  let i = Math.max(0, Math.round(at / stepSec));
+  // まだ声が始まっていなければ、まず始まるところまで進む
+  while (i < flags.length && !flags[i]) i++;
+
+  let silentFrom = -1;
+  for (; i < flags.length; i++) {
+    if (flags[i]) {
+      silentFrom = -1;
+      continue;
+    }
+    if (silentFrom < 0) silentFrom = i;
+    if (i - silentFrom + 1 >= need) return silentFrom * stepSec;
+  }
+  return flags.length * stepSec;
+}
+
+/**
+ * 区間に重なる字幕を、実際の発話に合わせて並べ直す。
+ * levels は 50ms ごとの音量(波形の描画で作ったものを使い回す)。
+ */
 export function captionsForRange(
   transcript: TranscriptSegment[] | null | undefined,
   startSec: number,
   endSec: number,
+  levels?: Float32Array,
+  stepSec = 0.05,
 ): Caption[] {
   const all = toCaptions(transcript);
-  const out: Caption[] = [];
+  const rough: { atSec: number; text: string }[] = [];
   for (let i = 0; i < all.length; i++) {
     const seg = all[i];
     const nextAt = all[i + 1]?.atSec ?? seg.atSec + 12;
@@ -150,15 +221,55 @@ export function captionsForRange(
     const pieces = splitCaption(seg.text);
     const total = pieces.reduce((n, p) => n + p.length, 0) || 1;
     // 次の発言が遠いと、分割した字幕が何十秒もかけて出ることになる。
-    // 日本語の話速(おおむね毎秒7文字)で見積もった長さで頭打ちにする。
+    // 日本語の話速で見積もった長さで頭打ちにする。
     const span = Math.max(0.8, Math.min(nextAt - seg.atSec, total / SPEECH_CHARS_PER_SEC));
     let cursor = seg.atSec;
     for (const piece of pieces) {
-      out.push({ atSec: cursor, text: piece });
+      rough.push({ atSec: cursor, text: piece });
       cursor += (span * piece.length) / total;
     }
   }
-  return out.sort((a, b) => a.atSec - b.atSec);
+  rough.sort((a, b) => a.atSec - b.atSec);
+
+  const flags = levels ? speechFlags(levels) : [];
+  const onsets = flags.length > 0 ? speechOnsets(flags, stepSec) : [];
+
+  const out: Caption[] = [];
+  for (let i = 0; i < rough.length; i++) {
+    const c = rough[i];
+    let at = c.atSec;
+
+    // 実際に声が始まった位置が近くにあれば、そこへ寄せる
+    if (onsets.length > 0) {
+      const rel = at - startSec;
+      let best = -1;
+      let bestDiff = SNAP_TOLERANCE_SEC;
+      for (const onset of onsets) {
+        const diff = Math.abs(onset - rel);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = onset;
+        }
+      }
+      if (best >= 0) at = startSec + best;
+    }
+
+    // 前の字幕より前には出さない
+    if (out.length > 0 && at <= out[out.length - 1].atSec) {
+      at = out[out.length - 1].atSec + 0.25;
+    }
+
+    const nextAt = rough[i + 1]?.atSec ?? Infinity;
+    // 声が途切れたら消す。次の字幕が来るまで出しっぱなしにしない
+    const silence =
+      flags.length > 0
+        ? startSec + speechEndAfter(flags, stepSec, at - startSec) + CAPTION_TAIL_SEC
+        : Infinity;
+    const end = Math.min(nextAt - 0.05, silence, at + CAPTION_MAX_SEC);
+
+    out.push({ atSec: at, endSec: Math.max(at + 0.4, end), text: c.text });
+  }
+  return out;
 }
 
 /** 波形の帯。音が鳴っていることを目で分からせる(無音再生への対策)。 */
@@ -333,10 +444,10 @@ function drawFrame(
     }
   }
 
-  // 字幕。いま話している行だけを大きく出す
-  const current = captions.filter((c) => c.atSec <= t).pop();
+  // 字幕。いま話している行だけを出す(声が止まったら消える)
+  const current = captions.find((c) => c.atSec <= t && t < c.endSec);
   if (current) {
-    let size = W * 0.062;
+    let size = W * 0.068;
     let lines: string[] = [];
     for (let i = 0; i < 20; i++) {
       ctx.font = `bold ${size}px ${FONT_STACK}`;
@@ -350,7 +461,7 @@ function drawFrame(
     for (let i = 0; i < lines.length; i++) {
       const ly = blockTop + i * lineHeight;
       // 背景がどんな写真でも読めるよう、縁取りしてから塗る
-      ctx.lineWidth = size * 0.18;
+      ctx.lineWidth = size * 0.2;
       ctx.strokeStyle = "rgba(8, 8, 8, 0.85)";
       ctx.lineJoin = "round";
       ctx.strokeText(lines[i], W / 2, ly);
@@ -390,9 +501,10 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
   onProgress?.(0.25);
 
-  const captions = captionsForRange(opts.transcript, startSec, endSec).map((c) => ({
+  const captions = captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
     ...c,
     atSec: c.atSec - startSec,
+    endSec: c.endSec - startSec,
   }));
 
   const canvas = document.createElement("canvas");
