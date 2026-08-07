@@ -475,3 +475,21 @@ video.card-preview { background: #000; }
   line-height: 1.6;
   color: var(--text);
 }
+
+/* 過去回の横断検索 */
+.hit {
+  background: #262626;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.hit:active { border-color: var(--accent); }
+.hit-text {
+  font-size: 0.93rem;
+  line-height: 1.5;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.hit .muted { font-size: 0.78rem; }

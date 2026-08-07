@@ -19,6 +19,7 @@ import { buildImagePrompt } from "../src/lib/imagePrompt";
 import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/clip";
 import { decimationFactor } from "../src/lib/audio/mp3";
 import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
+import { hitToClip, normalize, searchEpisodes } from "../src/lib/search";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips } from "../src/lib/gemini";
@@ -822,6 +823,104 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("抜粋に日付が入る", /2026\/\d\d\/\d\d/.test(digest));
     check("抜粋に要約と流れが入る",
       digest.includes("要約:") && digest.includes("流れ:"));
+  }
+
+  console.log("\n[24] 過去回の横断検索");
+  {
+    const ep = (i: number, opts: {
+      title?: string; transcript?: { time: string; speaker: string; text: string }[];
+      chapters?: string[]; summary?: string; audio?: boolean;
+    } = {}) => ({
+      id: `s${i}`,
+      createdAt: Date.UTC(2026, 6, i),
+      fileName: `ep${i}.wav`,
+      durationSec: 1800,
+      removedSec: 0,
+      chosenTitle: opts.title ?? `第${i}回`,
+      audio: opts.audio ? ({ size: 100 } as Blob) : undefined,
+      transcript: opts.transcript,
+      meta: {
+        titles: [opts.title ?? `第${i}回`],
+        description: "",
+        showNotes: "",
+        chapters: (opts.chapters ?? []).map((label, k) => ({ time: `0${k}:00`, label })),
+        hashtags: [],
+        transcriptSummary: opts.summary ?? "",
+        keywords: [],
+        imageQuote: "",
+      },
+    });
+
+    const eps = [
+      ep(1, {
+        title: "ねぎ塩の回",
+        audio: true,
+        transcript: [
+          { time: "01:20", speaker: "たかやま", text: "ねぎ塩は万能だと思うんですよ。" },
+          { time: "05:40", speaker: "にし", text: "ジャガイモを入れると全部壊れます。" },
+          { time: "09:00", speaker: "たかやま", text: "関係ない雑談です。" },
+        ],
+      }),
+      ep(5, {
+        title: "旅行の回",
+        transcript: [{ time: "02:00", speaker: "にし", text: "ネギシオの話はもういいです。" }],
+      }),
+      // 書き起こしが無い回。タイトルとチャプターと要約だけ
+      ep(9, { title: "カメラの回", chapters: ["ジャガイモ談義"], summary: "写真の話をした回。" }),
+    ] as unknown as Parameters<typeof searchEpisodes>[0];
+
+    const r = searchEpisodes(eps, "ねぎ塩");
+    check("書き起こしから場面を引く", r.hits.length === 1, `${r.hits.length}件`);
+    check("時刻が付く", r.hits[0].atSec === 80, `${r.hits[0].atSec}秒`);
+    check("音声の有無が分かる", r.hits[0].hasAudio === true);
+    check("検索できる回数を返す", r.searchableEpisodes === 2 && r.totalEpisodes === 3,
+      `${r.searchableEpisodes}/${r.totalEpisodes}`);
+
+    // カタカナ⇔ひらがなは畳める。ただし漢字とかなは別物のまま
+    // (「ネギシオ」と「ねぎ塩」を繋ぐには読みの辞書が要る)
+    const kana = searchEpisodes(eps, "ねぎしお");
+    check("カタカナをひらがなとして引ける",
+      kana.hits.length === 1 && kana.hits[0].text.includes("ネギシオ"),
+      kana.hits.map((h) => h.text).join(" / "));
+    check("漢字とかなは別物のまま(既知の限界)",
+      !r.hits.some((h) => h.text.includes("ネギシオ")));
+
+    // 複数の回にまたがる語で並び順を見る
+    const c = searchEpisodes(eps, "ジャガイモ");
+    check("複数の回から拾う", c.hits.length === 2, `${c.hits.length}件`);
+    check("新しい回から並ぶ", c.hits[0].episodeTitle === "カメラの回",
+      c.hits.map((h) => h.episodeTitle).join(" / "));
+    const where = c.hits.map((h) => `${h.episodeTitle}:${h.where}`);
+    check("書き起こしが無い回はチャプターから拾う",
+      where.includes("カメラの回:chapter"), where.join(" / "));
+    check("書き起こしがある回は書き起こしを優先",
+      where.includes("ねぎ塩の回:transcript"), where.join(" / "));
+    check("音声が消えている回も出す(位置は分かる)",
+      c.hits.some((h) => !h.hasAudio));
+
+    check("タイトルからも引ける",
+      searchEpisodes(eps, "カメラ").hits.some((h) => h.where === "title"));
+    check("要約からも引ける",
+      searchEpisodes(eps, "写真").hits.some((h) => h.where === "notes"));
+
+    // 複数語は AND
+    check("複数語はすべて含む文だけ",
+      searchEpisodes(eps, "ジャガイモ 全部").hits.filter((h) => h.where === "transcript").length === 1);
+    check("片方しか無い文は出さない",
+      searchEpisodes(eps, "ねぎ塩 カメラ").hits.length === 0);
+    check("空の検索は何も返さない", searchEpisodes(eps, "   ").hits.length === 0);
+    check("見つからなければ空", searchEpisodes(eps, "存在しない語").hits.length === 0);
+
+    check("全角と大文字を畳む", normalize("ＡＢＣ ａｂｃ") === "abcabc", normalize("ＡＢＣ ａｂｃ"));
+
+    // 見つけた場面を切り抜き候補にする
+    const clip = hitToClip(r.hits[0]);
+    check("少し前から始める", clip.start === "01:17", clip.start);
+    check("既定は40秒", clip.end === "01:57", `${clip.start}〜${clip.end}`);
+    check("先頭が0秒でも負にならない",
+      hitToClip({ ...r.hits[0], atSec: 1 }).start === "00:00");
+    const long = hitToClip({ ...r.hits[0], text: "あ".repeat(60) });
+    check("見出しは切り詰める", long.hook.length <= 25, `${long.hook.length}文字`);
   }
 
   console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");
