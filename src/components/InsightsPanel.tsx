@@ -15,12 +15,16 @@ interface Props {
   onModelChanged: (model: string) => void;
 }
 
-const num = (v: number, digits = 0) => v.toFixed(digits);
-
 /**
- * これまでの回から傾向を出し、次のお題を考えるページ。
+ * これまでの回をもとに、次のお題を考えるページ。
  *
- * 数え上げは端末内で完結する(通信なし)。AI に渡すのはその結果と、
+ * 以前は投稿間隔や長さの推移から助言も出していたが、やめた。
+ * 1日十数回という規模では日ごとの差はほぼ全部ただの揺れで、
+ * 検定してみると「水木が強い」も配信日の影響を除くと消えた。
+ * **偶然と区別がつかないものを言い切ると判断を誤らせる**ので、
+ * 数えるだけで確かなこと(何を話してきたか)に絞ってある。
+ *
+ * 集計は端末内で完結する(通信なし)。AI に渡すのはその結果と、
  * タイトル・日付・要約・チャプター見出しの抜粋だけで、音声は送らない。
  */
 export default function InsightsPanel({ settings, onModelChanged }: Props) {
@@ -70,10 +74,10 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
   if (records.length === 0) {
     return (
       <div className="card">
-        <h2>📊 傾向と次のお題</h2>
+        <h2>💡 次に話すお題</h2>
         <p className="muted">
-          まだ履歴がありません。「作成」で回を作ると、そのデータからこの番組の傾向を出して、
-          次に話すお題を考えます。
+          まだ履歴がありません。「作成」で回を作ると、これまで話したことをもとに
+          次のお題を考えます。
         </p>
       </div>
     );
@@ -84,75 +88,16 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
       {error && <div className="error">⚠️ {error}</div>}
 
       <div className="card">
-        <h2>📊 これまでの傾向</h2>
+        <h2>🗂 これまでに話したこと</h2>
         <p className="muted">
-          {records.length}回ぶんの履歴から、端末内で数えています(通信なし)。
+          {records.length}回ぶんの履歴から、扱った話題を並べています(端末内で数えるだけ・通信なし)。
+          <br />
+          <strong>お題を考えるための棚卸しです。</strong>
+          どの回が聴かれたかは分かりません(Spotify に再生数を取れる API が無いため)。
         </p>
 
         {ins && (
           <>
-            <div className="stat-grid">
-              <div className="stat">
-                <span className="stat-value">{ins.count}</span>
-                <span className="muted">回</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">
-                  {ins.medianGapDays === null ? "—" : num(ins.medianGapDays, 1)}
-                </span>
-                <span className="muted">日おき(中央値)</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{num(ins.medianMinutes)}</span>
-                <span className="muted">分/回(中央値)</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{num(ins.daysSinceLast)}</span>
-                <span className="muted">日前が最後</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{num(ins.medianChapters)}</span>
-                <span className="muted">話題/回</span>
-              </div>
-              <div className="stat">
-                <span className="stat-value">{ins.titleChars || "—"}</span>
-                <span className="muted">字/タイトル</span>
-              </div>
-            </div>
-
-            <ul className="findings">
-              {ins.medianGapDays !== null && ins.daysSinceLast > ins.medianGapDays * 1.5 && (
-                <li>
-                  いつもより<strong>{num(ins.daysSinceLast - ins.medianGapDays)}日</strong>
-                  空いています(普段は {num(ins.medianGapDays, 1)}日おき)。
-                </li>
-              )}
-              {ins.minutesTrend !== null && Math.abs(ins.minutesTrend) >= 3 && (
-                <li>
-                  直近5回は、それ以前より1回あたり
-                  <strong>
-                    {ins.minutesTrend > 0 ? `${num(ins.minutesTrend)}分長い` : `${num(-ins.minutesTrend)}分短い`}
-                  </strong>
-                  です。
-                </li>
-              )}
-              {ins.firstPickRate !== null && (
-                <li>
-                  タイトルは AI の第1案を<strong>{Math.round(ins.firstPickRate * 100)}%</strong>
-                  の回で採用しています
-                  {ins.firstPickRate < 0.34
-                    ? "。1案目が好みと合っていないので、設定でタイトルの方向性を変えると手数が減ります。"
-                    : "。"}
-                </li>
-              )}
-              {ins.questionRate >= 0.5 && (
-                <li>
-                  タイトルの<strong>{Math.round(ins.questionRate * 100)}%</strong>
-                  が問いかけの形です。続けると効き目が薄れるので、たまに言い切り型を混ぜると目立ちます。
-                </li>
-              )}
-            </ul>
-
             {ins.topTopics.length > 0 && (
               <>
                 <h3>よく扱う話題</h3>
@@ -170,9 +115,7 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
             {ins.risingTopics.length > 0 && (
               <>
                 <h3>最近出てきた話題</h3>
-                <p className="muted" style={{ marginTop: 0 }}>
-                  直近5回で初めて出たもの。いま乗っている流れです。
-                </p>
+                <p className="muted" style={{ marginTop: 0 }}>直近5回で初めて出たものです。</p>
                 <div className="chips">
                   {ins.risingTopics.map((t) => (
                     <span key={t.word} className="chip rising">
@@ -187,7 +130,7 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
               <>
                 <h3>しばらく触れていない話題</h3>
                 <p className="muted" style={{ marginTop: 0 }}>
-                  2回以上扱ったのに、直近5回では出ていないもの。間が空いたぶん、話し直す価値があります。
+                  2回以上扱ったのに、直近5回では出ていないものです。
                 </p>
                 <div className="chips">
                   {ins.dormantTopics.map((t) => (
@@ -201,11 +144,6 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
             )}
           </>
         )}
-
-        <p className="muted" style={{ marginTop: 16 }}>
-          ※ ここで出しているのは<strong>出している側の傾向</strong>で、聴かれ方ではありません。
-          Spotify for Creators に再生数を取れる API が無いため、どの回が伸びたかはこのツールからは分かりません。
-        </p>
       </div>
 
       <div className="card">

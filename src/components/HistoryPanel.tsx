@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { hitToClip, searchEpisodes, type Hit } from "../lib/search";
 import {
   listEpisodes,
   deleteEpisode,
@@ -25,6 +26,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
 }
 
+const WHERE_LABEL: Record<string, string> = {
+  title: "タイトル",
+  chapter: "チャプター",
+  notes: "説明・要約",
+  transcript: "書き起こし",
+};
+
+const fmtTime = (sec: number) =>
+  `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+
 export default function HistoryPanel({
   onChooseTitle,
   onEditMeta,
@@ -37,6 +48,9 @@ export default function HistoryPanel({
   const [openId, setOpenId] = useState<string | null>(null);
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
   const [confirming, setConfirming] = useState<"all" | "audio" | null>(null);
+  const [query, setQuery] = useState("");
+  /** 検索から開いた場面。その回の切り抜き候補の先頭に差し込む。 */
+  const [picked, setPicked] = useState<Hit | null>(null);
 
   const refresh = () => listEpisodes().then(setRecords);
 
@@ -58,6 +72,12 @@ export default function HistoryPanel({
       Object.values(audioUrls).forEach(URL.revokeObjectURL);
     };
   }, [audioUrls]);
+
+  // フックは早期 return より前に置く(React のフックの規則)
+  const found = useMemo(
+    () => (records ? searchEpisodes(records, query) : null),
+    [records, query],
+  );
 
   const remove = async (id: string) => {
     await deleteEpisode(id);
@@ -81,6 +101,15 @@ export default function HistoryPanel({
       </div>
     );
   }
+
+  const openHit = (hit: Hit) => {
+    setPicked(hit);
+    setOpenId(hit.episodeId);
+    // 開いた回まで送る。一覧の下のほうにあると気づけない
+    setTimeout(() => {
+      document.getElementById(`ep-${hit.episodeId}`)?.scrollIntoView({ behavior: "smooth" });
+    }, 50);
+  };
 
   const audioBytes = totalAudioBytes(records);
   const withAudio = records.filter((r) => r.audio).length;
@@ -131,10 +160,68 @@ export default function HistoryPanel({
         )}
       </div>
 
+      <div className="card">
+        <h2>🔎 過去の回から探す</h2>
+        <p className="muted">
+          言葉で探すと、その場面の位置まで出ます。そのまま切り抜きの候補にできます。
+          {found && found.totalEpisodes > 0 && (
+            <>
+              <br />
+              全{found.totalEpisodes}回のうち<strong>{found.searchableEpisodes}回</strong>
+              に書き起こしがあり、場面の位置まで引けます
+              {found.searchableEpisodes < found.totalEpisodes &&
+                "(残りはタイトル・チャプター・要約から探します)"}
+              。
+            </>
+          )}
+        </p>
+        <input
+          type="text"
+          value={query}
+          placeholder="例: ねぎ塩 / ジャガイモ / 失敗談"
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <p className="muted" style={{ marginTop: 6 }}>
+          カタカナとひらがな、全角と半角は同じものとして探します。ただし
+          <strong>漢字とかなは別</strong>です(「ねぎ塩」と「ねぎしお」は別の語として扱います)。
+          見つからないときは書き方を変えてみてください。空白で区切ると、その全部を含む文だけ出します。
+        </p>
+
+        {query.trim() && found && (
+          found.hits.length === 0 ? (
+            <p className="muted">見つかりませんでした。</p>
+          ) : (
+            <>
+              <p className="muted">{found.hits.length}件</p>
+              {found.hits.map((h, i) => (
+                <div
+                  key={`${h.episodeId}-${i}`}
+                  className="hit"
+                  onClick={() => openHit(h)}
+                >
+                  <div className="hit-text">{h.speaker ? `${h.speaker}: ` : ""}{h.text}</div>
+                  <div className="muted">
+                    {h.episodeTitle} ・ {formatDate(h.createdAt)}
+                    {h.atSec !== null && ` ・ ${fmtTime(h.atSec)}`}
+                    {h.where !== "transcript" && ` ・ ${WHERE_LABEL[h.where]}`}
+                    {h.atSec !== null && !h.hasAudio && " ・ 音声は削除済み"}
+                  </div>
+                </div>
+              ))}
+            </>
+          )
+        )}
+      </div>
+
       {records.map((r) => {
         const isOpen = openId === r.id;
+        // 検索から開いた場面は、その回の切り抜き候補の先頭に置く
+        const hit = picked && picked.episodeId === r.id && picked.atSec !== null ? picked : null;
+        const meta = hit
+          ? { ...r.meta, clips: [hitToClip(hit), ...(r.meta.clips ?? [])] }
+          : r.meta;
         return (
-          <div className="card" key={r.id}>
+          <div className="card" key={r.id} id={`ep-${r.id}`}>
             <div className="history-head">
               <div className="history-main" onClick={() => setOpenId(isOpen ? null : r.id)}>
                 <div className="history-title">{r.chosenTitle || r.meta.titles[0]}</div>
@@ -159,7 +246,7 @@ export default function HistoryPanel({
 
             {isOpen && (
               <ResultView
-                meta={r.meta}
+                meta={meta}
                 chosenTitle={r.chosenTitle}
                 onChooseTitle={(title) => {
                   onChooseTitle(r.id, title);
