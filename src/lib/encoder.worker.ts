@@ -34,6 +34,7 @@ import { LoudnessMeter, gainForTarget, targetLufs } from "./audio/loudness";
 import { Diagnostics } from "./audio/diagnostics";
 import { CEILING_DBFS, Limiter } from "./audio/limiter";
 import { openAudio, type BlockHandler, type BlockReader } from "./audio/source";
+import { MixedReader, dbToGain, matchGainsDb, type MixSource } from "./audio/mix";
 import { Mp3Stream, decimationFactor } from "./audio/mp3";
 
 const BLOCK_SECONDS = 10;
@@ -41,6 +42,14 @@ const AI_BITRATE_KBPS = 32;
 
 interface Request {
   file: File;
+  /**
+   * 人ごとに分かれた音声。オンライン収録の道具は参加者ごとに別ファイルで
+   * 書き出せるものが多く、分かれていれば別々に音量を測って合わせられる。
+   * 1件だけなら file と同じ扱い。
+   */
+  files?: File[];
+  /** 各ファイルに掛ける手動の増減(dB)。自動で合わせた上に足す。 */
+  manualDb?: number[];
   dsp: DspOptions;
   mono: boolean;
   bitrate: number;
@@ -48,7 +57,73 @@ interface Request {
    * "ai" にすると、AI に聴かせる音声だけを1パスで作る。
    * 「ショート」ページのように配信用 MP3 が要らない場面のためのもの。
    */
-  purpose?: "publish" | "ai";
+  purpose?: "publish" | "ai" | "measure";
+}
+
+/**
+ * 人ごとのファイルを1本にまとめる読み手を作る。
+ *
+ * 音量の測定は各ファイルを1回ずつ読むだけで済む(エンコードしない)ので軽い。
+ * 測った結果から倍率を決め、以降の変換はまとめた1本として流す。
+ */
+async function openMixed(
+  files: File[],
+  manualDb: number[],
+  blockSeconds: number,
+): Promise<{ reader: BlockReader; tracks: TrackInfo[] }> {
+  const readers = await Promise.all(files.map((f) => openAudio(f, blockSeconds)));
+
+  // サンプリングレートが違うと足したときに速度がずれる。
+  // 同じ収録の書き出しなら揃っているはずなので、違う場合は直してもらう
+  const rates = [...new Set(readers.map((r) => r.sampleRate))];
+  if (rates.length > 1) {
+    throw new Error(
+      `音声のサンプリングレートが揃っていません(${rates.join(" / ")}Hz)。` +
+        `同じ設定で書き出し直してください。`,
+    );
+  }
+
+  const lufs = await Promise.all(
+    readers.map(async (r) => {
+      const meter = new LoudnessMeter(r.sampleRate, r.numChannels);
+      await r.read((channels, length) => meter.push(channels, length));
+      return meter.integratedLufs();
+    }),
+  );
+  const gainsDb = matchGainsDb(lufs, manualDb);
+  const tracks: TrackInfo[] = files.map((f, i) => ({
+    name: f.name,
+    lufs: lufs[i],
+    gainDb: gainsDb[i],
+    durationSec: readers[i].durationSec,
+  }));
+
+  const sampleRate = readers[0].sampleRate;
+  const info = {
+    sampleRate,
+    // 1本でもステレオが混ざっていればステレオで扱う
+    numChannels: Math.max(...readers.map((r) => r.numChannels)),
+    durationSec: Math.max(...readers.map((r) => r.durationSec)),
+    formatLabel: `${files.length}トラックを合成`,
+  };
+  const open = async (): Promise<MixSource[]> => {
+    // 読み直しのたびに開き直す。読み手は先頭からしか進めないため
+    const fresh = await Promise.all(files.map((f) => openAudio(f, blockSeconds)));
+    return fresh.map((reader, i) => ({ reader, gain: dbToGain(gainsDb[i]) }));
+  };
+  return {
+    reader: new MixedReader(open, info, sampleRate * blockSeconds),
+    tracks,
+  };
+}
+
+export interface TrackInfo {
+  name: string;
+  /** 測ったラウドネス。 */
+  lufs: number;
+  /** 揃えるために掛ける増減(dB)。 */
+  gainDb: number;
+  durationSec: number;
 }
 
 /**
@@ -146,11 +221,23 @@ function downmix(channels: Float32Array[], length: number, out: Float32Array): F
 self.onmessage = async (e: MessageEvent<Request>) => {
   try {
     const { file, dsp, mono, bitrate, purpose } = e.data;
+    const files = e.data.files?.length ? e.data.files : [file];
+    const manualDb = e.data.manualDb ?? [];
 
     // AI に聴かせるだけなら、測るための読み直しも配信用 MP3 も要らない
     if (purpose === "ai") return await runAiOnly(file, dsp);
 
-    const reader = await openAudio(file, BLOCK_SECONDS);
+    // 音量を測るだけ。変換の前に「どれだけ合わせるか」を見せるために使う
+    if (purpose === "measure") {
+      const { tracks } = await openMixed(files, manualDb, BLOCK_SECONDS);
+      self.postMessage({ type: "done", tracks });
+      return;
+    }
+
+    // 人ごとに分かれていれば、音量を揃えてから1本にまとめる。
+    // まとめた結果は BlockReader として振る舞うので、以降の流れは変わらない
+    const mixed = files.length > 1 ? await openMixed(files, manualDb, BLOCK_SECONDS) : null;
+    const reader = mixed ? mixed.reader : await openAudio(file, BLOCK_SECONDS);
     if (!(reader.durationSec > 0)) throw new Error("音声データが空です");
     // 以降の処理はブロック単位で読み進める。WAV は専用経路、
     // それ以外はデコーダを通すが、呼び出し側からは同じ形で扱える
@@ -362,6 +449,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         durationSec: outputFrames / info.sampleRate,
         sourceDurationSec: info.durationSec,
         inputFormat: reader.formatLabel,
+        // 人ごとにどれだけ合わせたか。結果画面で見せる
+        tracks: mixed?.tracks,
         removedSec,
         channels: outChannels,
         sampleRate: info.sampleRate,

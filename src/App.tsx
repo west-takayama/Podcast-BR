@@ -25,6 +25,7 @@ import {
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
+import type { TrackInfo } from "./lib/encoder.worker";
 import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
 import { ScreenWakeLock } from "./lib/wakeLock";
@@ -35,6 +36,7 @@ import HistoryPanel from "./components/HistoryPanel";
 import InsightsPanel from "./components/InsightsPanel";
 import ProgressPanel from "./components/ProgressPanel";
 import ShortsPanel from "./components/ShortsPanel";
+import TrackPicker from "./components/TrackPicker";
 
 type Tab = "create" | "shorts" | "next" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
@@ -57,6 +59,8 @@ export default function App() {
   const [fileInfo, setFileInfo] = useState("");
   const [outputName, setOutputName] = useState("episode.mp3");
   const [audioReport, setAudioReport] = useState<AudioReport | null>(null);
+  /** 複数トラックを選んだ直後。音量を合わせる画面を出している間ここに入る。 */
+  const [pickingTracks, setPickingTracks] = useState<File[] | null>(null);
   const [uploaded, setUploaded] = useState<UploadedAudio | null>(null);
   const [pauses, setPauses] = useState<number[]>([]);
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
@@ -366,7 +370,9 @@ export default function App() {
     });
   };
 
-  const handleFile = async (file: File) => {
+  const handleFile = async (input: File | File[], manualDb: number[] = []) => {
+    const files = Array.isArray(input) ? input : [input];
+    const file = files[0];
     if (!settings.apiKey) {
       setTab("settings");
       setError("先に設定画面で Gemini API キーを入力してください(無料で発行できます)");
@@ -376,7 +382,12 @@ export default function App() {
     setPhase("running");
     setStage("analyze");
     startedAtRef.current = Date.now();
-    setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
+    const totalMb = files.reduce((n, f) => n + f.size, 0) / 1024 / 1024;
+    setFileInfo(
+      files.length > 1
+        ? `${files.length}トラック(${totalMb.toFixed(0)} MB)`
+        : `${file.name}(${totalMb.toFixed(0)} MB)`,
+    );
     setOutputName(file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3");
     void wakeLockRef.current.start();
 
@@ -397,6 +408,7 @@ export default function App() {
         pauses: number[];
         inputFormat: string;
         findings: Finding[];
+        tracks?: TrackInfo[];
       }>((resolve, reject) => {
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
@@ -415,6 +427,8 @@ export default function App() {
         worker.onerror = () => reject(new Error("変換処理でエラーが発生しました"));
         worker.postMessage({
           file,
+          files,
+          manualDb,
           dsp: settings.dsp,
           mono: settings.mono,
           bitrate: settings.bitrate,
@@ -433,6 +447,7 @@ export default function App() {
       };
 
       const report: AudioReport = {
+        tracks: result.tracks,
         sourceLufs: result.sourceLufs,
         outputLufs: result.outputLufs,
         targetLufs: result.targetLufs,
@@ -787,15 +802,31 @@ export default function App() {
             </div>
           )}
 
-          {phase === "idle" && (
+          {phase === "idle" && pickingTracks && (
+            <TrackPicker
+              files={pickingTracks}
+              settings={settings}
+              onStart={(files, manualDb) => {
+                setPickingTracks(null);
+                void handleFile(files, manualDb);
+              }}
+              onCancel={() => setPickingTracks(null)}
+            />
+          )}
+
+          {phase === "idle" && !pickingTracks && (
             <label className="drop card">
               <input
                 type="file"
+                multiple
                 accept="audio/*,.wav,.mp3,.m4a,.aac,.mp4,.ogg,.opus,.flac,.caf"
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleFile(f);
+                  const picked = Array.from(e.target.files ?? []);
                   e.target.value = "";
+                  if (picked.length === 0) return;
+                  // 人ごとに分かれているなら、先に音量を合わせる画面を出す
+                  if (picked.length > 1) setPickingTracks(picked);
+                  else void handleFile(picked[0]);
                 }}
               />
               <p style={{ fontSize: "2rem", margin: "0 0 8px" }}>📤</p>
@@ -804,6 +835,9 @@ export default function App() {
                 WAV / MP3 / M4A / AAC など。通話録音もそのまま使えます。
                 <br />
                 整音 → 変換 → タイトル・説明文の生成まで自動で進みます
+                <br />
+                <strong>人ごとに分かれている場合はまとめて選べます。</strong>
+                それぞれの音量を測って揃えてから1本にします
               </p>
             </label>
           )}
