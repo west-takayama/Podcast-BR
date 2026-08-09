@@ -22,4 +22,6 @@ export interface AudioReport {
   inputFormat: string;
   /** 収録そのものの問題。 */
   findings: Finding[];
+  /** 人ごとに分かれた音声を揃えた場合、その内訳。1本のときは無い。 */
+  tracks?: { name: string; lufs: number; gainDb: number; durationSec: number }[];
 }

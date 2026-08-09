@@ -20,6 +20,8 @@ import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/cli
 import { decimationFactor } from "../src/lib/audio/mp3";
 import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
 import { hitToClip, normalize, searchEpisodes } from "../src/lib/search";
+import { MixedReader, dbToGain, matchGainsDb, MAX_BOOST_DB } from "../src/lib/audio/mix";
+import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips } from "../src/lib/gemini";
@@ -921,6 +923,127 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       hitToClip({ ...r.hits[0], atSec: 1 }).start === "00:00");
     const long = hitToClip({ ...r.hits[0], text: "あ".repeat(60) });
     check("見出しは切り詰める", long.hook.length <= 25, `${long.hook.length}文字`);
+  }
+
+  console.log("\n[25] 人ごとの音声を揃えて1本にする");
+  {
+    // 決まった値を決まったブロック長で流す、試験用の読み手
+    const fake = (values: number[], blockFrames: number, channels = 1): BlockReader => ({
+      sampleRate: 100,
+      numChannels: channels,
+      durationSec: values.length / 100,
+      formatLabel: "test",
+      async read(onBlock: BlockHandler) {
+        // 読み手は毎回同じバッファを使い回す。ここでも同じ条件にする
+        const buf = Array.from({ length: channels }, () => new Float32Array(blockFrames));
+        for (let at = 0; at < values.length; at += blockFrames) {
+          const n = Math.min(blockFrames, values.length - at);
+          for (let c = 0; c < channels; c++) {
+            for (let i = 0; i < n; i++) buf[c][i] = values[at + i];
+          }
+          await onBlock(buf, n, (at + n) / values.length);
+        }
+      },
+    });
+
+    const collect = async (reader: BlockReader): Promise<number[]> => {
+      const out: number[] = [];
+      await reader.read((chs, len) => {
+        for (let i = 0; i < len; i++) out.push(chs[0][i]);
+      });
+      return out;
+    };
+
+    const mk = (sources: { values: number[]; block: number; gain: number; ch?: number }[],
+                blockFrames: number, durationSec: number, numChannels = 1) =>
+      new MixedReader(
+        async () => sources.map((s) => ({ reader: fake(s.values, s.block, s.ch ?? 1), gain: s.gain })),
+        { sampleRate: 100, numChannels, durationSec, formatLabel: "mix" },
+        blockFrames,
+      );
+
+    // 基本: 2本を足す
+    const a = [1, 2, 3, 4, 5, 6];
+    const b = [10, 20, 30, 40, 50, 60];
+    const sum = await collect(mk([{ values: a, block: 4, gain: 1 }, { values: b, block: 4, gain: 1 }], 4, 0.06));
+    check("2本を足す", JSON.stringify(sum) === JSON.stringify([11, 22, 33, 44, 55, 66]), sum.join(","));
+
+    // ブロックの区切りが揃っていなくても正しく足せる(WAVとデコーダで長さが違う)
+    const uneven = await collect(
+      mk([{ values: a, block: 5, gain: 1 }, { values: b, block: 2, gain: 1 }], 3, 0.06));
+    check("ブロック長がばらばらでも足せる",
+      JSON.stringify(uneven) === JSON.stringify([11, 22, 33, 44, 55, 66]), uneven.join(","));
+
+    // 倍率が掛かる
+    const gained = await collect(
+      mk([{ values: a, block: 4, gain: 2 }, { values: b, block: 4, gain: 0.5 }], 4, 0.06));
+    check("トラックごとの倍率が掛かる",
+      JSON.stringify(gained) === JSON.stringify([7, 14, 21, 28, 35, 42]), gained.join(","));
+
+    // 片方が短い(途中で退出した)場合、足りない分は無音
+    const short = await collect(
+      mk([{ values: a, block: 4, gain: 1 }, { values: [10, 20], block: 4, gain: 1 }], 4, 0.06));
+    check("短いトラックは無音として扱う",
+      JSON.stringify(short) === JSON.stringify([11, 22, 3, 4, 5, 6]), short.join(","));
+
+    // 読み直せること(解析2回+本番で3回読む)
+    const reusable = mk([{ values: a, block: 4, gain: 1 }, { values: b, block: 4, gain: 1 }], 4, 0.06);
+    const first = await collect(reusable);
+    const second = await collect(reusable);
+    check("何度でも読み直せる", JSON.stringify(first) === JSON.stringify(second), second.join(","));
+
+    // モノラルのトラックはステレオ出力の両チャンネルへ同じだけ入る(真ん中に置く)
+    const stereo = mk([{ values: a, block: 4, gain: 1 }], 4, 0.06, 2);
+    const both: number[][] = [[], []];
+    await stereo.read((chs, len) => {
+      for (let i = 0; i < len; i++) { both[0].push(chs[0][i]); both[1].push(chs[1][i]); }
+    });
+    check("モノラルは左右に同じだけ入る",
+      JSON.stringify(both[0]) === JSON.stringify(both[1]) &&
+      JSON.stringify(both[0]) === JSON.stringify(a), both[0].join(","));
+
+    // --- 揃え方 ---
+    // 中央に合わせる。いちばん大きい人に合わせると全員を持ち上げることになる
+    // -30 / -20 / -25 の平均は -25。そこへ寄せる
+    const g = matchGainsDb([-30, -20, -25]);
+    check("平均の音量に合わせる", Math.abs(g[2]) < 0.01, g.map((v) => v.toFixed(1)).join(" / "));
+    check("小さい人を持ち上げる", Math.abs(g[0] - 5) < 0.01, `${g[0].toFixed(2)}dB`);
+    check("大きい人を下げる", Math.abs(g[1] + 5) < 0.01, `${g[1].toFixed(2)}dB`);
+    check("差が完全に埋まる",
+      Math.abs((-30 + g[0]) - (-20 + g[1])) < 0.01,
+      `${(-30 + g[0]).toFixed(1)} / ${(-20 + g[1]).toFixed(1)}`);
+
+    // 2人のときも真ん中で分け合う。片方だけを大きく動かさない
+    const pair = matchGainsDb([-15, -29]);
+    check("2人なら移動量を分け合う",
+      Math.abs(pair[0] + 7) < 0.01 && Math.abs(pair[1] - 7) < 0.01,
+      pair.map((v) => v.toFixed(1)).join(" / "));
+
+    // 上限。片側基準だと届かない差も、分け合えば埋まる
+    const wide = matchGainsDb([-10, -30]);
+    check("20dB 差でも上限内で埋まる",
+      Math.abs((-10 + wide[0]) - (-30 + wide[1])) < 0.01 &&
+      Math.max(...wide.map(Math.abs)) <= MAX_BOOST_DB,
+      wide.map((v) => v.toFixed(1)).join(" / "));
+
+    // それでも届かないほど極端なら、上限で止める
+    const extreme = matchGainsDb([-70, -10]);
+    check("極端な差は上限で止める",
+      extreme[0] === MAX_BOOST_DB && extreme[1] === -12,
+      extreme.map((v) => v.toFixed(1)).join(" / "));
+
+    // 手動の増減は自動の上に足す
+    // 2本目は自動で -5dB。そこへ手動 +3dB を足して -2dB になる
+    const manual = matchGainsDb([-30, -20, -25], [0, 3, 0]);
+    check("手動の調整を上乗せする", Math.abs(manual[1] + 2) < 0.01, `${manual[1].toFixed(2)}dB`);
+    check("手動を入れても他は変わらない", Math.abs(manual[0] - g[0]) < 0.01);
+
+    // 測れなかったトラック(無音など)は触らない
+    const silent = matchGainsDb([-Infinity, -20]);
+    check("測れないトラックは触らない", silent[0] === 0, `${silent[0]}`);
+
+    check("dB から倍率", Math.abs(dbToGain(6) - 1.9953) < 0.001, dbToGain(6).toFixed(4));
+    check("0dB は等倍", dbToGain(0) === 1);
   }
 
   console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");

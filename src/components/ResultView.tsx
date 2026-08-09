@@ -241,6 +241,24 @@ function AudioSpec({ report }: { report: AudioReport }) {
             {(report.sampleRate / 1000).toFixed(1)} kHz
           </dd>
         </div>
+        {report.tracks && report.tracks.length > 1 && (
+          <div>
+            <dt>人ごとの音量合わせ</dt>
+            <dd>
+              {report.tracks.map((t, i) => (
+                <div key={i}>
+                  {t.name}
+                  <span className="muted">
+                    {" "}
+                    {Number.isFinite(t.lufs) ? `${t.lufs.toFixed(1)} LUFS` : "測れず"} →{" "}
+                    {t.gainDb >= 0 ? "+" : ""}
+                    {t.gainDb.toFixed(1)}dB
+                  </span>
+                </div>
+              ))}
+            </dd>
+          </div>
+        )}
         {report.removedSec > 0 && (
           <div>
             <dt>無音カット</dt>
