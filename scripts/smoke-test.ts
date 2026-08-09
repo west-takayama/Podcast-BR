@@ -21,6 +21,7 @@ import { decimationFactor } from "../src/lib/audio/mp3";
 import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
 import { hitToClip, normalize, searchEpisodes } from "../src/lib/search";
 import { MixedReader, dbToGain, matchGainsDb, MAX_BOOST_DB } from "../src/lib/audio/mix";
+import { LoudnessMeter } from "../src/lib/audio/loudness";
 import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
@@ -1041,6 +1042,35 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     // 測れなかったトラック(無音など)は触らない
     const silent = matchGainsDb([-Infinity, -20]);
     check("測れないトラックは触らない", silent[0] === 0, `${silent[0]}`);
+
+    // 人ごとのファイルは大半が沈黙なので、「どれだけ喋ったか」で
+    // 測定値が動くと、あまり喋らない人ほど持ち上げられてしまう。
+    // BS.1770 の2段ゲートが効いていることを確かめる
+    const talkLufs = (talkSec: number, gapSec: number) => {
+      const SR = 48000;
+      const m = new LoudnessMeter(SR, 1);
+      const period = talkSec + gapSec;
+      const N = SR * 240;
+      const block = 4800;
+      const buf = new Float32Array(block);
+      for (let at = 0; at < N; at += block) {
+        for (let i = 0; i < block; i++) {
+          const t = (at + i) / SR;
+          const env = 0.5 + 0.5 * Math.abs(Math.sin(t * 4));
+          buf[i] =
+            t % period < talkSec
+              ? 0.3 * env * Math.sin(2 * Math.PI * 150 * t)
+              : 0.0002 * (Math.random() - 0.5);
+        }
+        m.push([buf], block);
+      }
+      return m.integratedLufs();
+    };
+    // 同じ声の大きさで、喋る割合だけを 91% → 10% に変える
+    const ratios = [talkLufs(3, 0.3), talkLufs(3, 3), talkLufs(3, 9), talkLufs(3, 27)];
+    const bias = Math.max(...ratios) - Math.min(...ratios);
+    check("喋る量が違っても同じ音量に測れる", bias < 0.3,
+      `${ratios.map((v) => v.toFixed(2)).join(" / ")} → 差 ${bias.toFixed(2)}dB`);
 
     check("dB から倍率", Math.abs(dbToGain(6) - 1.9953) < 0.001, dbToGain(6).toFixed(4));
     check("0dB は等倍", dbToGain(0) === 1);

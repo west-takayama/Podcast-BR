@@ -370,7 +370,11 @@ export default function App() {
     });
   };
 
-  const handleFile = async (input: File | File[], manualDb: number[] = []) => {
+  const handleFile = async (
+    input: File | File[],
+    manualDb: number[] = [],
+    measured?: TrackInfo[],
+  ) => {
     const files = Array.isArray(input) ? input : [input];
     const file = files[0];
     if (!settings.apiKey) {
@@ -429,6 +433,7 @@ export default function App() {
           file,
           files,
           manualDb,
+          measured,
           dsp: settings.dsp,
           mono: settings.mono,
           bitrate: settings.bitrate,
@@ -806,9 +811,9 @@ export default function App() {
             <TrackPicker
               files={pickingTracks}
               settings={settings}
-              onStart={(files, manualDb) => {
+              onStart={(files, manualDb, measured) => {
                 setPickingTracks(null);
-                void handleFile(files, manualDb);
+                void handleFile(files, manualDb, measured);
               }}
               onCancel={() => setPickingTracks(null)}
             />

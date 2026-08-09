@@ -50,6 +50,11 @@ interface Request {
   files?: File[];
   /** 各ファイルに掛ける手動の増減(dB)。自動で合わせた上に足す。 */
   manualDb?: number[];
+  /**
+   * 測定済みの結果。選択画面で一度測っているので、変換のときは測り直さない。
+   * 測り直すと 10分の素材で3秒ほど無駄になる。
+   */
+  measured?: TrackInfo[];
   dsp: DspOptions;
   mono: boolean;
   bitrate: number;
@@ -70,6 +75,7 @@ async function openMixed(
   files: File[],
   manualDb: number[],
   blockSeconds: number,
+  measured?: TrackInfo[],
 ): Promise<{ reader: BlockReader; tracks: TrackInfo[] }> {
   const readers = await Promise.all(files.map((f) => openAudio(f, blockSeconds)));
 
@@ -83,13 +89,17 @@ async function openMixed(
     );
   }
 
-  const lufs = await Promise.all(
-    readers.map(async (r) => {
-      const meter = new LoudnessMeter(r.sampleRate, r.numChannels);
-      await r.read((channels, length) => meter.push(channels, length));
-      return meter.integratedLufs();
-    }),
-  );
+  // 測定済みなら測り直さない。選択画面で既に1回読んでいる
+  const reuse = measured?.length === files.length ? measured : null;
+  const lufs = reuse
+    ? reuse.map((t) => t.lufs)
+    : await Promise.all(
+        readers.map(async (r) => {
+          const meter = new LoudnessMeter(r.sampleRate, r.numChannels);
+          await r.read((channels, length) => meter.push(channels, length));
+          return meter.integratedLufs();
+        }),
+      );
   const gainsDb = matchGainsDb(lufs, manualDb);
   const tracks: TrackInfo[] = files.map((f, i) => ({
     name: f.name,
@@ -236,7 +246,10 @@ self.onmessage = async (e: MessageEvent<Request>) => {
 
     // 人ごとに分かれていれば、音量を揃えてから1本にまとめる。
     // まとめた結果は BlockReader として振る舞うので、以降の流れは変わらない
-    const mixed = files.length > 1 ? await openMixed(files, manualDb, BLOCK_SECONDS) : null;
+    const mixed =
+      files.length > 1
+        ? await openMixed(files, manualDb, BLOCK_SECONDS, e.data.measured)
+        : null;
     const reader = mixed ? mixed.reader : await openAudio(file, BLOCK_SECONDS);
     if (!(reader.durationSec > 0)) throw new Error("音声データが空です");
     // 以降の処理はブロック単位で読み進める。WAV は専用経路、
