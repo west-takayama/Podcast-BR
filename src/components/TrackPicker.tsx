@@ -7,7 +7,7 @@ interface Props {
   files: File[];
   settings: Settings;
   /** この設定で変換を始める。 */
-  onStart: (files: File[], manualDb: number[]) => void;
+  onStart: (files: File[], manualDb: number[], measured: TrackInfo[]) => void;
   onCancel: () => void;
 }
 
@@ -141,7 +141,7 @@ export default function TrackPicker({ files, settings, onStart, onCancel }: Prop
         最大 {MAX_BOOST_DB}dB)。仕上がり全体の音量は、このあと −19 LUFS へ揃えます。
       </p>
 
-      <button className="primary" onClick={() => onStart(files, manual)}>
+      <button className="primary" onClick={() => onStart(files, manual, tracks)}>
         🎬 この設定で変換する
       </button>
       <button onClick={onCancel}>選び直す</button>
