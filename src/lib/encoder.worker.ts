@@ -35,6 +35,8 @@ import { Diagnostics } from "./audio/diagnostics";
 import { CEILING_DBFS, Limiter } from "./audio/limiter";
 import { openAudio, type BlockHandler, type BlockReader } from "./audio/source";
 import { MixedReader, dbToGain, matchGainsDb, type MixSource } from "./audio/mix";
+import { SpectrumMeter, matchToneDb, toneFilters, toneLevelShiftDb, BANDS } from "./audio/tone";
+import type { ToneCurve } from "./audio/tone";
 import { Mp3Stream, decimationFactor } from "./audio/mp3";
 
 const BLOCK_SECONDS = 10;
@@ -50,6 +52,8 @@ interface Request {
   files?: File[];
   /** 各ファイルに掛ける手動の増減(dB)。自動で合わせた上に足す。 */
   manualDb?: number[];
+  /** 話者どうしの音色を揃えるか。既定は揃える。 */
+  matchTone?: boolean;
   /**
    * 測定済みの結果。選択画面で一度測っているので、変換のときは測り直さない。
    * 測り直すと 10分の素材で3秒ほど無駄になる。
@@ -76,6 +80,7 @@ async function openMixed(
   manualDb: number[],
   blockSeconds: number,
   measured?: TrackInfo[],
+  matchTone = true,
 ): Promise<{ reader: BlockReader; tracks: TrackInfo[] }> {
   const readers = await Promise.all(files.map((f) => openAudio(f, blockSeconds)));
 
@@ -91,24 +96,44 @@ async function openMixed(
 
   // 測定済みなら測り直さない。選択画面で既に1回読んでいる
   const reuse = measured?.length === files.length ? measured : null;
-  const lufs = reuse
-    ? reuse.map((t) => t.lufs)
+  // 音量と音色は同じ1回の読み込みで測る
+  const measurements = reuse
+    ? reuse.map((t) => ({ lufs: t.lufs, curve: t.tone ?? null }))
     : await Promise.all(
         readers.map(async (r) => {
           const meter = new LoudnessMeter(r.sampleRate, r.numChannels);
-          await r.read((channels, length) => meter.push(channels, length));
-          return meter.integratedLufs();
+          const spectrum = new SpectrumMeter(r.sampleRate, r.durationSec);
+          await r.read((channels, length) => {
+            meter.push(channels, length);
+            // 音色は元の波形で測る。ゲインを掛けても形は変わらない
+            spectrum.push(channels, length);
+          });
+          return { lufs: meter.integratedLufs(), curve: spectrum.curve() };
         }),
       );
-  const gainsDb = matchGainsDb(lufs, manualDb);
+  const lufs = measurements.map((m) => m.lufs);
+  const sampleRate = readers[0].sampleRate;
+  // 音色を揃えるかは呼び出し側が決める(既定は揃える)
+  const toneFix = matchTone
+    ? matchToneDb(measurements.map((m) => m.curve))
+    : measurements.map(() => BANDS.map(() => 0));
+  // 音量を揃えるための増減。画面に出すのはこちら
+  const matchDb = matchGainsDb(lufs, manualDb);
+  // 音色を直すと音量も動く。そのぶんを差し引いて、上の狙い通りに着地させる。
+  // 差し引かないと、音色を揃えたせいで音量が最大 5.7dB ずれる(実測)
+  const toneShift = measurements.map((m, i) =>
+    m.curve ? toneLevelShiftDb(sampleRate, m.curve, toneFix[i]) : 0,
+  );
+  const gainsDb = matchDb.map((g, i) => g - toneShift[i]);
   const tracks: TrackInfo[] = files.map((f, i) => ({
     name: f.name,
     lufs: lufs[i],
-    gainDb: gainsDb[i],
+    gainDb: matchDb[i],
     durationSec: readers[i].durationSec,
+    tone: measurements[i].curve ?? undefined,
+    toneFixDb: toneFix[i],
   }));
 
-  const sampleRate = readers[0].sampleRate;
   const info = {
     sampleRate,
     // 1本でもステレオが混ざっていればステレオで扱う
@@ -119,7 +144,11 @@ async function openMixed(
   const open = async (): Promise<MixSource[]> => {
     // 読み直しのたびに開き直す。読み手は先頭からしか進めないため
     const fresh = await Promise.all(files.map((f) => openAudio(f, blockSeconds)));
-    return fresh.map((reader, i) => ({ reader, gain: dbToGain(gainsDb[i]) }));
+    return fresh.map((reader, i) => ({
+      reader,
+      gain: dbToGain(gainsDb[i]),
+      filters: toneFilters(reader.sampleRate, reader.numChannels, toneFix[i]),
+    }));
   };
   return {
     reader: new MixedReader(open, info, sampleRate * blockSeconds),
@@ -131,10 +160,21 @@ export interface TrackInfo {
   name: string;
   /** 測ったラウドネス。 */
   lufs: number;
-  /** 揃えるために掛ける増減(dB)。 */
+  /**
+   * 音量を揃えるための増減(dB)。
+   * 音色の補正でも音量は動くが、それは内部で打ち消しているので、
+   * 最終的にこの値どおりの音量差に着地する。
+   */
   gainDb: number;
   durationSec: number;
+  /** 測った帯域バランス(BANDS と同じ並び)。測り直しを省くために持ち回る。 */
+  tone?: ToneCurve;
+  /** 音色を揃えるための補正量(BANDS と同じ並び)。 */
+  toneFixDb?: number[];
 }
+
+/** 音色を測る帯域。UI で見せるために公開する。 */
+export { BANDS as TONE_BANDS };
 
 /**
  * AI に聴かせる音声だけを作る速い経路。
@@ -239,7 +279,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
 
     // 音量を測るだけ。変換の前に「どれだけ合わせるか」を見せるために使う
     if (purpose === "measure") {
-      const { tracks } = await openMixed(files, manualDb, BLOCK_SECONDS);
+      const { tracks } = await openMixed(files, manualDb, BLOCK_SECONDS, undefined, e.data.matchTone !== false);
       self.postMessage({ type: "done", tracks });
       return;
     }
@@ -248,7 +288,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     // まとめた結果は BlockReader として振る舞うので、以降の流れは変わらない
     const mixed =
       files.length > 1
-        ? await openMixed(files, manualDb, BLOCK_SECONDS, e.data.measured)
+        ? await openMixed(files, manualDb, BLOCK_SECONDS, e.data.measured, e.data.matchTone !== false)
         : null;
     const reader = mixed ? mixed.reader : await openAudio(file, BLOCK_SECONDS);
     if (!(reader.durationSec > 0)) throw new Error("音声データが空です");

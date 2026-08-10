@@ -374,6 +374,7 @@ export default function App() {
     input: File | File[],
     manualDb: number[] = [],
     measured?: TrackInfo[],
+    matchTone = true,
   ) => {
     const files = Array.isArray(input) ? input : [input];
     const file = files[0];
@@ -434,6 +435,7 @@ export default function App() {
           files,
           manualDb,
           measured,
+          matchTone,
           dsp: settings.dsp,
           mono: settings.mono,
           bitrate: settings.bitrate,
@@ -811,9 +813,9 @@ export default function App() {
             <TrackPicker
               files={pickingTracks}
               settings={settings}
-              onStart={(files, manualDb, measured) => {
+              onStart={(files, manualDb, measured, matchTone) => {
                 setPickingTracks(null);
-                void handleFile(files, manualDb, measured);
+                void handleFile(files, manualDb, measured, matchTone);
               }}
               onCancel={() => setPickingTracks(null)}
             />
