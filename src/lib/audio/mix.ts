@@ -79,7 +79,11 @@ class Cursor {
   /** 読み終わったか。以降は無音を返す。 */
   private ended = false;
 
-  constructor(reader: BlockReader, readonly gain: number) {
+  constructor(
+    reader: BlockReader,
+    readonly gain: number,
+    private readonly filters: { process(channels: Float32Array[], length: number): void }[] = [],
+  ) {
     const onBlock: BlockHandler = async (channels, length) => {
       await this.handoff.put({ channels, length });
     };
@@ -108,6 +112,9 @@ class Cursor {
           this.ended = true;
           return;
         }
+        // 音色の補正はブロックを受け取った時点で通す。
+        // 途中で切り分けたあとに掛けると、フィルタの状態が飛び飛びになる
+        for (const f of this.filters) f.process(next.channels, next.length);
         this.block = next;
         this.offset = 0;
       }
@@ -147,6 +154,8 @@ export interface MixSource {
   reader: BlockReader;
   /** このトラックに掛ける倍率(音量を揃えるためのもの)。 */
   gain: number;
+  /** 音色を揃えるためのフィルタ。無ければ素通し。 */
+  filters?: { process(channels: Float32Array[], length: number): void }[];
 }
 
 /**
@@ -174,7 +183,7 @@ export class MixedReader implements BlockReader {
 
   async read(onBlock: BlockHandler): Promise<void> {
     const sources = await this.open();
-    const cursors = sources.map((s) => new Cursor(s.reader, s.gain));
+    const cursors = sources.map((s) => new Cursor(s.reader, s.gain, s.filters));
     const total = Math.ceil(this.durationSec * this.sampleRate);
     const out = Array.from({ length: this.numChannels }, () => new Float32Array(this.blockFrames));
 

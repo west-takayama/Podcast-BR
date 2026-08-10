@@ -21,6 +21,17 @@ import { decimationFactor } from "../src/lib/audio/mp3";
 import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
 import { hitToClip, normalize, searchEpisodes } from "../src/lib/search";
 import { MixedReader, dbToGain, matchGainsDb, MAX_BOOST_DB } from "../src/lib/audio/mix";
+import {
+  BANDS,
+  MAX_TONE_DB,
+  SpectrumMeter,
+  matchToneDb,
+  solveFilterGains,
+  toneFilters,
+  toneLevelShiftDb,
+  toneResponseDb,
+} from "../src/lib/audio/tone";
+import type { ToneCurve } from "../src/lib/audio/tone";
 import { LoudnessMeter } from "../src/lib/audio/loudness";
 import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
 import { LowPassFilter } from "../src/lib/audio/dsp";
@@ -1074,6 +1085,235 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
 
     check("dB から倍率", Math.abs(dbToGain(6) - 1.9953) < 0.001, dbToGain(6).toFixed(4));
     check("0dB は等倍", dbToGain(0) === 1);
+  }
+
+  console.log("\n[26] 人ごとの音色を揃える");
+  {
+    // --- 補正量の決め方 ---
+    // 2人なら、真ん中で落ち合う(片方だけが動かない)
+    // 声が十分入っている前提のカーブを組み立てる補助
+    const curve = (db: number[], snr = 20) => ({ db, snrDb: db.map(() => snr) });
+    const two = matchToneDb([
+      curve([0, -2, -4, -6, -8, -10, -12]),
+      curve([-12, -10, -8, -6, -4, -2, 0]),
+    ]);
+    const symmetric = two[0].every((v, i) => Math.abs(v + two[1][i]) < 0.001);
+    check("2人なら補正を分け合う", symmetric,
+      two[0].map((v) => v.toFixed(1)).join(" / "));
+    check("真ん中の帯域は動かさない", Math.abs(two[0][3]) < 0.001, two[0][3].toFixed(2));
+
+    // 上限。これ以上動かすと元の声から離れる
+    const wideTone = matchToneDb([
+      curve([0, 0, 0, 0, 0, 0, 0]),
+      curve([-30, 0, 0, 0, 0, 0, 0]),
+    ]);
+    check("大きすぎる差は上限で止める",
+      Math.abs(wideTone[0][0] + MAX_TONE_DB) < 0.001 &&
+        Math.abs(wideTone[1][0] - MAX_TONE_DB) < 0.001,
+      `${wideTone[0][0].toFixed(1)} / ${wideTone[1][0].toFixed(1)}`);
+
+    // 声が入っていない帯域(静かな間と変わらない)は持ち上げない。
+    // 環境音だけを大きくすることになる
+    const noisy = {
+      db: [0, 0, 0, 0, 0, 0, -20],
+      snrDb: [20, 20, 20, 20, 20, 20, 0.5],
+    };
+    const floor = matchToneDb([noisy, curve([0, 0, 0, 0, 0, 0, 0])]);
+    check("声の入っていない帯域は持ち上げない", floor[0][6] === 0, floor[0][6].toFixed(2));
+    check("同じ帯域を下げるのは構わない", floor[1][6] < -5, floor[1][6].toFixed(2));
+
+    // 1人なら合わせる相手がいない
+    const alone = matchToneDb([curve([0, -3, -6, -9, -12, -15, -18])]);
+    check("1人なら何もしない", alone[0].every((v) => v === 0));
+    check("測れなかった人は触らない",
+      matchToneDb([null, curve([0, 0, 0, 0, 0, 0, 0]), curve([0, 0, 0, 0, 0, 0, 0])])[0]
+        .every((v) => v === 0));
+
+    // ほぼ 0 の帯域はフィルタを作らない(無駄に通さない)
+    // 1帯域だけ動かしたいときは、その周りだけを使う(全帯域は通さない)
+    check("要らない帯域は通さない",
+      toneFilters(48000, 1, [0, 0, 0, 3, 0, 0, 0]).length <= 4,
+      `${toneFilters(48000, 1, [0, 0, 0, 3, 0, 0, 0]).length}段`);
+    check("全部小さければフィルタを作らない",
+      toneFilters(48000, 1, [0.2, 0.1, 0, 0, 0, 0, -0.1]).length === 0);
+
+    // 隣のフィルタの裾が足し込まれるぶんを見込んで解けているか
+    const want = [0, 0, 4, -4, 0, 3, 0];
+    const solved = solveFilterGains(48000, want);
+    const got = BANDS.map((hz) => toneResponseDb(48000, solved, hz));
+    const solveErr = Math.max(...got.map((v, i) => Math.abs(v - want[i])));
+    check("狙った通りの形になる", solveErr < 0.3,
+      `ずれ ${solveErr.toFixed(2)}dB / 指定値 ${solved.map((v) => v.toFixed(1)).join(",")}`);
+    // 素直に指定していたら、どれだけずれていたか
+    const naive = BANDS.map((hz) => toneResponseDb(48000, want, hz));
+    const naiveErr = Math.max(...naive.map((v, i) => Math.abs(v - want[i])));
+    check("解かないとずれる(解く意味がある)", naiveErr > 0.8, `ずれ ${naiveErr.toFixed(2)}dB`);
+
+    // --- 測る → 直す → 測り直す ---
+    // 倍音の重みだけを変えた2人。声の高さは同じで音色だけ違う
+    const TSR = 48000;
+    const F0 = 150; // 48000 の約数なので、1周期を作って繰り返せる
+    // 倍音の減り方(tilt)だけを変えた声。大きいほどこもる。
+    // 12kHz まで倍音を入れて、8kHz の帯域にも中身があるようにする
+    const voice = (tilt: number, seconds = 6): Float32Array => {
+      const period = TSR / F0;
+      const wave = new Float32Array(period);
+      for (let n = 1; n * F0 < TSR * 0.25; n++) {
+        const amp = Math.pow(n, -tilt);
+        for (let i = 0; i < period; i++) {
+          wave[i] += amp * Math.sin((2 * Math.PI * n * i) / period);
+        }
+      }
+      let peak = 0;
+      for (const v of wave) peak = Math.max(peak, Math.abs(v));
+      for (let i = 0; i < period; i++) wave[i] /= peak;
+
+      const out = new Float32Array(TSR * seconds);
+      for (let i = 0; i < out.length; i++) {
+        const t = i / TSR;
+        // 3秒ごとに1秒黙る。声が出ている間だけ測れているかも同時に見る
+        if (t % 3 >= 2) { out[i] = 0.00005 * (Math.random() - 0.5); continue; }
+        out[i] = wave[i % period] * 0.25 * (0.6 + 0.4 * Math.abs(Math.sin(t * 5)));
+      }
+      return out;
+    };
+    // こもった声 / 明るい声
+    const dull = voice(1.4);
+    const bright = voice(0.8);
+
+    const measure = (buf: Float32Array): number[] | null => {
+      const m = new SpectrumMeter(TSR);
+      const block = 4800;
+      for (let at = 0; at < buf.length; at += block) {
+        const n = Math.min(block, buf.length - at);
+        m.push([buf.subarray(at, at + n)], n);
+      }
+      return m.curve();
+    };
+
+    const before = [measure(dull), measure(bright)] as ToneCurve[];
+    check("音色を測れる", before[0] !== null && before[1] !== null);
+    // こもった声のほうが高域が少ない、という当たり前のことが出るか
+    check("こもった声は高域が少ないと出る",
+      before[0].db[6] < before[1].db[6] - 6,
+      `8kHz: ${before[0].db[6].toFixed(1)} / ${before[1].db[6].toFixed(1)}dB`);
+    // 沈黙を挟んでいるので、声の入っている帯域は静かな間よりはっきり上
+    check("声の入っている帯域が分かる", before[0].snrDb[1] > 10,
+      `250Hz の声/静けさ ${before[0].snrDb[1].toFixed(1)}dB`);
+
+    const fixes = matchToneDb(before);
+    const corrected = [dull, bright].map((buf, i) => {
+      const copy = Float32Array.from(buf);
+      const filters = toneFilters(TSR, 1, fixes[i]);
+      const block = 4800;
+      for (let at = 0; at < copy.length; at += block) {
+        const n = Math.min(block, copy.length - at);
+        const view = copy.subarray(at, at + n);
+        for (const f of filters) f.process([view], n);
+      }
+      return copy;
+    });
+    const after = [measure(corrected[0]), measure(corrected[1])] as ToneCurve[];
+
+    const gap = (a: ToneCurve, b: ToneCurve) =>
+      Math.max(...a.db.map((v, i) => Math.abs(v - b.db[i])));
+    const gapBefore = gap(before[0], before[1]);
+    const gapAfter = gap(after[0], after[1]);
+    check("直したあとは音色が近づく", gapAfter < gapBefore * 0.75,
+      `いちばん大きい差 ${gapBefore.toFixed(1)}dB → ${gapAfter.toFixed(1)}dB`);
+
+    // 音量合わせは音色を直す**前**に決めている。音色を直したせいで音量が
+    // 動くなら、そのぶんを差し引かないと2人の音量がずれる。
+    // 差し引く量は測り直さずに見積もっているので、その見積もりが当たるか
+    const lufsOf = (buf: Float32Array) => {
+      const m = new LoudnessMeter(TSR, 1);
+      const block = 4800;
+      for (let at = 0; at < buf.length; at += block) {
+        const n = Math.min(block, buf.length - at);
+        m.push([buf.subarray(at, at + n)], n);
+      }
+      return m.integratedLufs();
+    };
+    const rawMove = [
+      lufsOf(corrected[0]) - lufsOf(dull),
+      lufsOf(corrected[1]) - lufsOf(bright),
+    ];
+    check("音色を直すと音量も動く(見過ごせない量)",
+      Math.max(...rawMove.map(Math.abs)) > 1,
+      rawMove.map((v) => v.toFixed(2)).join(" / "));
+    const predicted = [0, 1].map((i) => toneLevelShiftDb(TSR, before[i], fixes[i]));
+    const predErr = Math.max(...predicted.map((v, i) => Math.abs(v - rawMove[i])));
+    check("動く量を測り直さずに当てられる", predErr < 0.6,
+      `見積もり ${predicted.map((v) => v.toFixed(2)).join(" / ")} / ` +
+      `実際 ${rawMove.map((v) => v.toFixed(2)).join(" / ")} → ずれ ${predErr.toFixed(2)}dB`);
+    // 差し引いたあと、2人の音量差がどれだけ残るか
+    const leftover = Math.abs(
+      (rawMove[0] - predicted[0]) - (rawMove[1] - predicted[1]),
+    );
+    check("差し引けば2人の音量差は残らない", leftover < 0.6, `${leftover.toFixed(2)}dB`);
+
+    // 同じ人を2つ渡したら、直すところが無い
+    const same = matchToneDb([measure(dull), measure(dull)]);
+    check("同じ音色なら何もしない", same[0].every((v) => Math.abs(v) < 0.001));
+
+    // --- 長い回は間引いて測る ---
+    // 全部を通すと 60分で 40秒かかる。等間隔に拾って同じ答えになるか。
+    // 頭だけを見ると、相手が喋っている間ずっと黙っている収録で外すので、
+    // わざと前半と後半で声色が変わる素材で確かめる
+    const SSR = 32000;
+    const twoHalves = (() => {
+      const seconds = 200;
+      const out = new Float32Array(SSR * seconds);
+      const period = SSR / 160;
+      const wave = (tilt: number) => {
+        const w = new Float32Array(period);
+        for (let n = 1; n * 160 < SSR * 0.45; n++) {
+          const amp = Math.pow(n, -tilt);
+          for (let i = 0; i < period; i++) w[i] += amp * Math.sin((2 * Math.PI * n * i) / period);
+        }
+        let pk = 0;
+        for (const v of w) pk = Math.max(pk, Math.abs(v));
+        return w.map((v) => v / pk);
+      };
+      const first = wave(1.5);
+      const second = wave(0.7);
+      for (let i = 0; i < out.length; i++) {
+        const t = i / SSR;
+        if (t % 3 >= 2) { out[i] = 0.00005 * (Math.random() - 0.5); continue; }
+        const w = t < seconds / 2 ? first : second;
+        out[i] = w[i % period] * 0.25;
+      }
+      return out;
+    })();
+    const measureAt = (buf: Float32Array, pretendSec: number) => {
+      const m = new SpectrumMeter(SSR, pretendSec);
+      const block = 4800;
+      for (let at = 0; at < buf.length; at += block) {
+        const n = Math.min(block, buf.length - at);
+        m.push([buf.subarray(at, at + n)], n);
+      }
+      return m.curve() as ToneCurve;
+    };
+    const whole = measureAt(twoHalves, 0); // 全部通す
+    const thinned = measureAt(twoHalves, 900); // 6ブロックに1回だけ
+    const sampleErr = Math.max(...whole.db.map((v, i) => Math.abs(v - thinned.db[i])));
+    check("間引いて測っても答えが変わらない", sampleErr < 0.5,
+      `ずれ ${sampleErr.toFixed(2)}dB`);
+
+    // 低いレートの素材では、上の帯域はそもそも存在しない。
+    // それを -300dB として混ぜると平均が壊れる
+    const lowRate = new SpectrumMeter(16000, 0);
+    const lowBuf = new Float32Array(16000 * 4);
+    for (let i = 0; i < lowBuf.length; i++) {
+      lowBuf[i] = 0.2 * Math.sin((2 * Math.PI * 300 * i) / 16000) * (i % 16000 < 12000 ? 1 : 0.001);
+    }
+    lowRate.push([lowBuf], lowBuf.length);
+    const low = lowRate.curve();
+    check("測れない帯域があっても壊れない",
+      low !== null && low.db.every((v) => Number.isFinite(v) && Math.abs(v) < 60),
+      low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
+    check("測れない帯域は持ち上げない",
+      low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
   }
 
   console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");

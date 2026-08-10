@@ -93,6 +93,25 @@ class Biquad {
 }
 
 /**
+ * K特性フィルタの、ある周波数での利得(dB)。
+ *
+ * 音を触ったときにラウドネスがどれだけ動くかを、実際に測り直さずに
+ * 見積もるために使う。人の耳は低音を小さく感じるので、同じ dB でも
+ * 低い帯域を触ったほうがラウドネスへの影響は小さい。
+ */
+export function kWeightDb(sampleRate: number, hz: number): number {
+  const w = (2 * Math.PI * hz) / sampleRate;
+  const mag = (c: BiquadCoeffs): number => {
+    const bRe = c.b0 + c.b1 * Math.cos(w) + c.b2 * Math.cos(2 * w);
+    const bIm = -(c.b1 * Math.sin(w) + c.b2 * Math.sin(2 * w));
+    const aRe = 1 + c.a1 * Math.cos(w) + c.a2 * Math.cos(2 * w);
+    const aIm = -(c.a1 * Math.sin(w) + c.a2 * Math.sin(2 * w));
+    return Math.sqrt((bRe * bRe + bIm * bIm) / (aRe * aRe + aIm * aIm));
+  };
+  return 20 * Math.log10(mag(highShelf(sampleRate)) * mag(highPass(sampleRate)) + 1e-30);
+}
+
+/**
  * ゲート付き積分ラウドネス計。
  * ブロック(400ms)は 75% 重ねるため、100ms の小ブロックの二乗平均を溜めて
  * 連続する4つを足し合わせる形で組み立てる。

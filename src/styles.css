@@ -521,3 +521,24 @@ video.card-preview { background: #000; }
 }
 .track-gain.on { color: var(--accent); }
 .track .muted { font-size: 0.78rem; margin-top: 2px; }
+
+/* 音色合わせの内訳 */
+.tone-table {
+  background: #222;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 4px 0 12px;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.tone-row {
+  display: grid;
+  grid-template-columns: 3em repeat(auto-fit, minmax(0, 1fr));
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--muted);
+}
+.tone-row.tone-head { color: var(--text); border-bottom: 1px solid #383838; padding-bottom: 4px; margin-bottom: 4px; }
+.tone-row span { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tone-row span:first-child { text-align: left; }
+.tone-row span.on { color: var(--accent); font-weight: 700; }
