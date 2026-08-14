@@ -167,12 +167,30 @@ label.check input[type="checkbox"] {
 .update button.primary { margin-top: 10px; }
 
 .error {
+  position: relative;
   background: #3a1518;
   border: 1px solid var(--danger);
   border-radius: 10px;
   padding: 12px;
+  padding-right: 44px;
   margin-bottom: 14px;
   font-size: 0.9rem;
+}
+
+/* 指で押せる大きさを確保する(見た目より当たり判定を広く) */
+.error-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: #f5c2c7;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .result-block {

@@ -15,6 +15,12 @@ createRoot(document.getElementById("root")!).render(
 // 新しい版は自動で適用しない。処理の途中で入れ替わると、動いているページが
 // 使う資材が消えて壊れるため、画面に知らせて押してもらってから切り替える。
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  // このページが読み込まれた時点で、既に前の版に面倒を見てもらっていたか。
+  // 初回は「いいえ」で、あとから世話役が着任する(下記)
+  const hadController = !!navigator.serviceWorker.controller;
+  // 画面の「更新する」を押したか
+  let requestedUpdate = false;
+
   window.addEventListener("load", () => {
     void navigator.serviceWorker
       .register("./sw.js")
@@ -23,7 +29,10 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
           if (!worker || !navigator.serviceWorker.controller) return;
           window.dispatchEvent(
             new CustomEvent("sw-update", {
-              detail: () => worker.postMessage({ type: "skip-waiting" }),
+              detail: () => {
+                requestedUpdate = true;
+                worker.postMessage({ type: "skip-waiting" });
+              },
             }),
           );
         };
@@ -39,10 +48,19 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
       .catch(() => {});
   });
 
-  // 交代が済んだら読み直す。押した直後にしか起きない
+  // 交代が済んだら読み直す。ただし**「更新する」を押したときだけ**。
+  //
+  // 「押した直後にしか起きない」と思っていたが、間違いだった。
+  // **初めて開いたとき**にも交代は起きる。新しく入った SW が activate で
+  // clients.claim() を呼び、開いているページを引き取るためで、そのたびに
+  // ここが読み直しを掛けていた。キーを打っている最中や、音声を選んだ直後に
+  // 画面が作り直されて、入力も進行中の変換も消える。壊れたようにしか見えない。
+  //
+  // 判定は2つ。読み込んだ時点で世話役が居たか(初回は居ない)と、
+  // 利用者が更新を押したか。どちらも満たしたときだけ読み直す。
   let reloading = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (reloading) return;
+    if (reloading || !hadController || !requestedUpdate) return;
     reloading = true;
     window.location.reload();
   });

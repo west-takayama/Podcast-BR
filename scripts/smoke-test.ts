@@ -10,7 +10,14 @@ import {
 import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
-import { listModels, pickDefaultModel, pickImageModel, snapChapters, transcriptToText } from "../src/lib/gemini";
+import {
+  isPreviewModel,
+  listModels,
+  pickDefaultModel,
+  pickImageModel,
+  snapChapters,
+  transcriptToText,
+} from "../src/lib/gemini";
 import { PauseDetector } from "../src/lib/audio/dsp";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese, PRESETS } from "../src/lib/image";
@@ -274,6 +281,43 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("テキスト用に画像モデルを選ばない", !pickDefaultModel(models)!.includes("image"));
     check("イラストは無料枠のある flash 系", pickImageModel(models) === "gemini-3.1-flash-image", String(pickImageModel(models)));
     check("画像モデルが無ければ null", pickImageModel(models.filter((m) => !m.image)) === null);
+
+    // 実際に起きた不具合: 新しい世代が試験版しか出ていない時期に、
+    // 世代の新しさ(+100)が試験版の減点(-60)を上回り、
+    // わざわざ詰まりやすいほうを既定にしていた
+    const nextGen = {
+      models: [
+        { name: "models/gemini-4-flash-preview-11-20", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-4-flash-exp", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3-flash", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3-flash-001", supportedGenerationMethods: ["generateContent"] },
+        { name: "models/gemini-3-pro", supportedGenerationMethods: ["generateContent"] },
+      ],
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(nextGen), { status: 200 })) as typeof fetch;
+    const nextModels = await listModels("dummy");
+    globalThis.fetch = original;
+    const nextIds = nextModels.map((m) => m.id);
+
+    check("世代が新しくても試験版は選ばない",
+      pickDefaultModel(nextModels) === "gemini-3-flash", `選ばれた ${nextIds[0]}`);
+    check("試験版はすべて安定版より後",
+      Math.min(...nextIds.map((i, k) => (isPreviewModel(i) ? k : 99))) >
+        Math.max(...nextIds.map((i, k) => (isPreviewModel(i) ? -1 : k))),
+      nextIds.join(" > "));
+    check("番号付きの正式版を試験版扱いしない",
+      !isPreviewModel("gemini-3-flash-001") &&
+        nextIds.indexOf("gemini-3-flash-001") < nextIds.indexOf("gemini-4-flash-exp"),
+      `-001 は ${nextIds.indexOf("gemini-3-flash-001")} 番目`);
+
+    check("試験版の見分け",
+      isPreviewModel("gemini-4-flash-preview-11-20") &&
+        isPreviewModel("gemini-4-flash-exp") &&
+        isPreviewModel("gemini-2-flash-thinking-exp-1219") &&
+        !isPreviewModel("gemini-3-flash") &&
+        !isPreviewModel("gemini-3-flash-001") &&
+        !isPreviewModel("gemini-3-pro"));
   }
 
   console.log("\n[12] 告知画像の折り返しと禁則処理");

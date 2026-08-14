@@ -70,6 +70,19 @@ export async function listModels(apiKey: string, signal?: AbortSignal): Promise<
   return models.sort((a, b) => score(b.id) - score(a.id));
 }
 
+/**
+ * 試験版(preview / experimental)か。
+ *
+ * 無料枠では試験版の割り当てが特に細く、混んでいなくても 503 や 500 を
+ * 返してくる。**「生成できませんでした」の主な原因はこれ。**
+ *
+ * 一方 `-001` のような番号付きは、中身を固定した**正式版**なので避けない。
+ * 以前はこれも避けていたが、正式版をいちばん下に落としてしまっていた。
+ */
+export function isPreviewModel(id: string): boolean {
+  return /preview|(^|-)exp(erimental)?(-|$)|-\d{2}-\d{2}($|-)/.test(id);
+}
+
 /** 新しい安定版の flash 系を上位に並べるためのスコア。 */
 function score(id: string): number {
   const version = Number(/gemini-(\d+(?:\.\d+)?)/.exec(id)?.[1] ?? 0);
@@ -77,7 +90,10 @@ function score(id: string): number {
   if (id.includes("flash")) s += 40; // 速く、無料枠の制限も緩い
   if (id.includes("lite")) s -= 25; // 音声の聞き取り精度が落ちる
   if (id.includes("pro")) s += 10;
-  if (/preview|exp|-\d{3,}/.test(id)) s -= 60; // プレビュー版と日付入りは避ける
+  // 試験版は**どれだけ新しくても**正式版の下に置く。
+  // 以前は -60 だったが、世代が1つ上がると +100 なので追い越されていた。
+  // 新しい世代が試験版しか出ていない時期に、わざわざ詰まるほうを選んでいた
+  if (isPreviewModel(id)) s -= 100000;
   return s;
 }
 
@@ -310,7 +326,8 @@ async function uploadFile(
     }
     if (TRANSIENT_STATUS.includes(status)) {
       throw new Error(
-        "Gemini が混雑していて音声を受け付けられませんでした(自動で3回試しました)。数分待ってから「生成だけやり直す」を押してください。",
+        `Gemini が音声を受け付けられませんでした(${status}・自動で${RETRY_WAIT_MS.length}回試しました)。` +
+          "数分待ってから「生成だけやり直す」を押してください。",
       );
     }
     throw new Error(`音声のアップロードに失敗しました (${status}): ${text.slice(0, 200)}`);
@@ -739,6 +756,22 @@ async function callWithModelFallback(
     res = await call(model);
   }
 
+  // 待っても駄目で、使っているのが試験版なら、正式版に替えて一度試す。
+  // 試験版は無料枠の割り当てが細く、混雑と区別が付かない形で弾かれる。
+  // 待つだけでは何度やり直しても通らないので、ここで乗り換える
+  if (TRANSIENT_STATUS.includes(res.status) && isPreviewModel(model)) {
+    onStatus("試験版のモデルが応答しないため、正式版に切り替えて試します…");
+    const stable = pickDefaultModel(await listModels(apiKey, signal));
+    if (stable && stable !== model && !isPreviewModel(stable)) {
+      const retried = await call(stable);
+      if (retried.ok) {
+        onModelChanged?.(stable);
+        return retried;
+      }
+      // 正式版でも駄目なら、元の応答で判断させる(原因は別にある)
+    }
+  }
+
   if (res.status === 404) {
     onStatus("モデルが更新されたため切り替え中…");
     const models = await listModels(apiKey, signal);
@@ -764,11 +797,18 @@ function throwForStatus(status: number, body: string, what: string): never {
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
     throw new Error("音声の保持期限(48時間)が切れている可能性があります。もう一度アップロードしてください。");
   }
-  // ここに来るのは自動再試行を使い切った場合。原因は Google 側の混雑で、
-  // 生の JSON を見せても打つ手は変わらないため、待つべきことだけ伝える
+  // ここに来るのは自動再試行を使い切った場合。
+  // どれも「待てば直るかもしれない」応答だが、中身は同じではない。
+  // 503/504 は本当に混んでいる。500 は待っても直らないことが多く、
+  // その場合は設定でモデルを替えるほうが早い。番号も出して切り分けられるようにする
   if (TRANSIENT_STATUS.includes(status)) {
+    const crowded = status === 503 || status === 504;
     throw new Error(
-      "Gemini が混雑しているため受け付けられませんでした(自動で3回試しました)。数分待ってから「生成だけやり直す」を押してください。変換済みMP3はそのまま使えます。",
+      (crowded
+        ? `Gemini が混雑しているため受け付けられませんでした(${status}・自動で${RETRY_WAIT_MS.length}回試しました)。数分待ってから「生成だけやり直す」を押してください。`
+        : `Gemini 側で処理できませんでした(${status}・自動で${RETRY_WAIT_MS.length}回試しました)。` +
+          `待っても直らない場合は、設定画面でモデルを別のものに替えてみてください。`) +
+        "変換済みMP3はそのまま使えます。",
     );
   }
   throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
