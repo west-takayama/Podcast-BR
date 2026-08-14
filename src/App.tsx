@@ -719,6 +719,14 @@ export default function App() {
 
       {error && (
         <div className="error">
+          {/* 消せないと、次に開いたときも失敗したままに見える */}
+          <button
+            className="error-close"
+            aria-label="このお知らせを閉じる"
+            onClick={() => setError("")}
+          >
+            ✕
+          </button>
           ⚠️ {error}
           {/* 変換は済んでいるので、生成だけやり直せば数十秒で終わる */}
           {convertedRef.current && phase === "idle" && (

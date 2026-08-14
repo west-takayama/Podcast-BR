@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
 import type { AudioReport } from "../App";
 import type { Finding } from "../lib/audio/diagnostics";
+import { CEILING_DBFS } from "../lib/audio/limiter";
 
 interface Props {
   meta: EpisodeMeta;
@@ -230,7 +231,7 @@ function AudioSpec({ report }: { report: AudioReport }) {
           <dt>ピーク</dt>
           <dd>
             {db(report.peakDbfs)} dBFS
-            <span className="muted"> 上限 -1.2</span>
+            <span className="muted"> 上限 {CEILING_DBFS}</span>
           </dd>
         </div>
         <div>
