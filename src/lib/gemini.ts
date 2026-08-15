@@ -946,6 +946,10 @@ export interface TopicSuggestions {
   /** 手が回っていない領域。 */
   gaps: string[];
   ideas: TopicIdea[];
+  /** 裏取りに使った出典。検索を使えたときだけ入る。 */
+  sources?: TopicSource[];
+  /** 検索で裏を取れたか。取れなかったら過去回だけで考えている。 */
+  searched?: boolean;
 }
 
 const asStrings = (v: unknown, limit = 8): string[] =>
@@ -963,6 +967,78 @@ const asStrings = (v: unknown, limit = 8): string[] =>
  * 再生数のような反応のデータは持っていないので、「伸びた回」を根拠に
  * させない。持っていない情報で理由を作られると判断を誤る。
  */
+/** お題の裏取りに使った出典。どこから来た話かを見せるために持つ。 */
+export interface TopicSource {
+  title: string;
+  uri: string;
+}
+
+/**
+ * お題を考えるときに Google 検索で裏取りするかどうか。
+ *
+ * 過去回だけを見て考えると、**内輪の話に閉じていく**。世の中でいま何が
+ * 話されているかを混ぜると、同年代の人が引っかかる入り口が増える。
+ *
+ * ただし検索が使えるかはキーとモデル次第なので、駄目なら黙って
+ * 従来どおり(過去回だけ)に落とす。出せないより出したほうがよい。
+ */
+async function callTopics(
+  apiKey: string,
+  model: string,
+  prompt: string,
+  useSearch: boolean,
+  onStatus: (s: string) => void,
+  onModelChanged?: (m: string) => void,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const body: Record<string, unknown> = {
+    contents: [{ parts: [{ text: prompt }] }],
+    // 案出しなので少し散らす。固くすると似た案が並ぶ
+    generationConfig: useSearch
+      ? { temperature: 0.9 }
+      : { response_mime_type: "application/json", temperature: 0.9 },
+  };
+  // 検索を使うときは JSON 強制と併用できないモデルがあるため、
+  // 形の指定を外して、本文から JSON を取り出す
+  if (useSearch) body.tools = [{ google_search: {} }];
+  return callWithModelFallback(apiKey, model, body, onStatus, onModelChanged, signal);
+}
+
+/** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */
+function extractJson(text: string): Record<string, unknown> {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  const candidates = [fenced?.[1], text];
+  for (const c of candidates) {
+    if (!c) continue;
+    const start = c.indexOf("{");
+    const end = c.lastIndexOf("}");
+    if (start < 0 || end <= start) continue;
+    try {
+      return JSON.parse(c.slice(start, end + 1)) as Record<string, unknown>;
+    } catch {
+      // 次の候補を試す
+    }
+  }
+  throw new Error("お題の形式が読めませんでした。もう一度お試しください。");
+}
+
+/** 応答に付いてくる出典を取り出す。 */
+function groundingSources(data: Record<string, unknown>): TopicSource[] {
+  const candidate = (data.candidates as Record<string, unknown>[] | undefined)?.[0];
+  const meta = candidate?.groundingMetadata as Record<string, unknown> | undefined;
+  const chunks = (meta?.groundingChunks as Record<string, unknown>[] | undefined) ?? [];
+  const seen = new Set<string>();
+  const out: TopicSource[] = [];
+  for (const chunk of chunks) {
+    const web = chunk?.web as { uri?: string; title?: string } | undefined;
+    if (!web?.uri || seen.has(web.uri)) continue;
+    seen.add(web.uri);
+    out.push({ title: web.title?.trim() || web.uri, uri: web.uri });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 export async function suggestTopics(opts: {
   apiKey: string;
   model: string;
@@ -974,6 +1050,8 @@ export async function suggestTopics(opts: {
   /** 今日の日付。時期ものを出させるために渡す。 */
   today?: Date;
   count?: number;
+  /** Google 検索で裏を取るか。既定は取る。 */
+  useSearch?: boolean;
   onStatus: (status: string) => void;
   onModelChanged?: (model: string) => void;
   signal?: AbortSignal;
@@ -981,18 +1059,20 @@ export async function suggestTopics(opts: {
   const { apiKey, model, digest, stats, config, onStatus, onModelChanged, signal } = opts;
   const count = opts.count ?? 6;
   const today = opts.today ?? new Date();
+  const wantSearch = opts.useSearch !== false;
   onStatus("これまでの回を読んでいます…");
 
   const background = [
     config.showName.trim() && `番組名: ${config.showName.trim()}`,
     config.speakers.trim() && `話者: ${config.speakers.trim()}`,
+    config.audience.trim() && `話し手と、想定している聴き手: ${config.audience.trim()}`,
     config.glossary.trim() && `この番組でよく出る言葉: ${config.glossary.trim()}`,
     config.showContext.trim(),
   ]
     .filter(Boolean)
     .join("\n");
 
-  const prompt = `あなたは日本語ポッドキャストの構成作家です。これまでの回を読んで、**次に話すお題**を${count}個考えてください。
+  const promptFor = (useSearch: boolean) => `あなたは日本語ポッドキャストの構成作家です。これまでの回を読んで、**次に話すお題**を${count}個考えてください。
 
 ${background ? `## 番組について\n${background}\n` : ""}
 ## 今日の日付
@@ -1011,7 +1091,18 @@ ${stats}
 - 時期(季節・年度・行事)が効くお題があれば入れる。ただし今日の日付から見て自然なものだけ。
 - 同じお題を言い換えただけの案を並べない。${count}個それぞれ別の入り口にする。
 - **再生数や反応のデータは渡していない。** 「この回が伸びたから」のような、手元にない情報を根拠にしない。
-
+  「バズる」「伸びる」と言い切らない。分からないものを分かったように書かない。
+${
+  useSearch
+    ? `- **検索を使って、いま実際に話題になっていることを確かめてから書くこと。**
+  ${config.audience.trim() ? `想定している聴き手(${config.audience.trim()})` : "この番組の聴き手"}が
+  いま気にしていそうなこと、最近の出来事、季節の話題を探す。
+- ただし**この番組の色に落とし込む**こと。世間の話題をそのまま並べるのではなく、
+  「この2人がその話をするなら、どこから入るか」に変換する。
+- 検索で確かめた案には、何を見て言っているのかが伝わるように why を書く。
+- 見つからなければ無理に入れない。過去回の続きのほうが強い。`
+    : ""
+}
 ## 各案に付けるもの
 - title: お題。収録の頭でそのまま読める短さ(30文字以内)
 - why: なぜ今これなのか。過去回との関係を具体的に書く(60文字程度)
@@ -1026,30 +1117,37 @@ ${stats}
   "ideas": [{ "title": string, "why": string, "angles": string[], "hook": string, "related": string[] }]
 }`;
 
-  const res = await callWithModelFallback(
-    apiKey,
-    model,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      // 案出しなので少し散らす。固くすると似た案が並ぶ
-      generationConfig: { response_mime_type: "application/json", temperature: 0.9 },
-    },
-    onStatus,
-    onModelChanged,
-    signal,
+  const build = (withSearch: boolean) => promptFor(withSearch);
+
+  let searched = wantSearch;
+  if (wantSearch) onStatus("いま何が話されているか調べています…");
+  let res = await callTopics(
+    apiKey, model, build(searched), searched, onStatus, onModelChanged, signal,
   );
+
+  // 検索が使えないキー/モデルがある。そのときは黙って過去回だけに落とす。
+  // 出せないより出したほうがよい
+  if (!res.ok && searched) {
+    const body = await res.text();
+    if (res.status === 400) {
+      searched = false;
+      onStatus("検索は使えなかったので、これまでの回から考えます…");
+      res = await callTopics(
+        apiKey, model, build(false), false, onStatus, onModelChanged, signal,
+      );
+    } else {
+      throwForStatus(res.status, body, "お題の提案");
+    }
+  }
   if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案");
 
   const data = await res.json();
   const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("お題が返りませんでした。もう一度お試しください。");
 
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    throw new Error("お題の形式が読めませんでした。もう一度お試しください。");
-  }
+  // 検索を使った応答は JSON の形を強制できないため、本文から取り出す
+  const parsed = searched ? extractJson(text) : extractJson(text);
+  const sources = searched ? groundingSources(data) : [];
 
   const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
     .map((raw) => {
@@ -1066,5 +1164,12 @@ ${stats}
 
   if (ideas.length === 0) throw new Error("お題が返りませんでした。もう一度お試しください。");
 
-  return { patterns: asStrings(parsed.patterns, 6), gaps: asStrings(parsed.gaps, 5), ideas };
+  return {
+    patterns: asStrings(parsed.patterns, 6),
+    gaps: asStrings(parsed.gaps, 5),
+    ideas,
+    sources: sources.length > 0 ? sources : undefined,
+    // 出典が1つも返らなければ、実際には調べていない。そう見せない
+    searched: searched && sources.length > 0,
+  };
 }

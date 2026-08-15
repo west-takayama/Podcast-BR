@@ -23,6 +23,15 @@ export interface PromptConfig {
   /** 番組名。プロンプトと MP3 のカバー画像の両方で使う。 */
   showName: string;
   showContext: string;
+  /**
+   * 話し手と、想定している聴き手。次のお題を考えるときに効く。
+   * 「30代前半・社会人・共働き」のように書いてもらう。
+   *
+   * 番組の背景(showContext)と分けているのは、**聴き手が誰かは
+   * 内容の説明とは別の情報**だから。混ぜると AI がどちらとも取れる
+   * 書き方になり、お題が一般論に寄る。
+   */
+  audience: string;
   /** 話者の呼び名(カンマ区切り)。書き起こしで話者を具体名にするために使う。 */
   speakers: string;
   /**
@@ -42,6 +51,7 @@ export interface PromptConfig {
 export const DEFAULT_PROMPT_CONFIG: PromptConfig = {
   showName: "",
   showContext: "",
+  audience: "",
   speakers: "",
   glossary: "",
   tone: "friendly",
