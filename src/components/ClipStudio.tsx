@@ -14,7 +14,7 @@ interface Props {
   transcript?: TranscriptSegment[] | null;
   showName: string;
   accent: string;
-  /** 背景に敷く写真(告知画像で取り込んだもの)。 */
+  /** 背景に敷く写真(結果画面で取り込んだもの)。 */
   background?: ImageBitmap | null;
   fileName: string;
 }

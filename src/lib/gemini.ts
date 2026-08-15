@@ -35,8 +35,6 @@ const sleep = (ms: number, signal?: AbortSignal) =>
 export interface ModelInfo {
   id: string; // "gemini-3.5-flash"
   displayName: string;
-  /** 画像を生成できるモデルか。テキスト用と選択肢を分けるために持つ。 */
-  image: boolean;
 }
 
 /**
@@ -59,12 +57,12 @@ export async function listModels(apiKey: string, signal?: AbortSignal): Promise<
   const models: ModelInfo[] = (data.models ?? [])
     .filter((m: { supportedGenerationMethods?: string[]; name?: string }) => {
       if (!m.name || !m.supportedGenerationMethods?.includes("generateContent")) return false;
-      // 用途が合わないモデルを除く。imagen は generateContent ではなく predict を使う
-      return !/embedding|aqa|imagen|veo|-tts/.test(m.name);
+      // 用途が合わないモデルを除く。画像生成系は音声を聴けない
+      return !/embedding|aqa|imagen|veo|-tts|image/.test(m.name);
     })
     .map((m: { name: string; displayName?: string }) => {
       const id = m.name.replace(/^models\//, "");
-      return { id, displayName: m.displayName ?? id, image: /image/.test(id) };
+      return { id, displayName: m.displayName ?? id };
     });
 
   return models.sort((a, b) => score(b.id) - score(a.id));
@@ -97,79 +95,9 @@ function score(id: string): number {
   return s;
 }
 
-/** 一覧から既定のテキスト生成モデルを選ぶ。 */
+/** 一覧から既定のモデルを選ぶ。 */
 export function pickDefaultModel(models: ModelInfo[]): string | null {
-  return models.find((m) => !m.image)?.id ?? null;
-}
-
-/**
- * イラスト生成に使うモデルを選ぶ。
- * flash 系の画像モデルには無料枠があるため、pro 系より優先する。
- */
-export function pickImageModel(models: ModelInfo[]): string | null {
-  const images = models.filter((m) => m.image);
-  return images.find((m) => m.id.includes("flash"))?.id ?? images[0]?.id ?? null;
-}
-
-export interface IllustrationOptions {
-  apiKey: string;
-  model: string;
-  /** 画像生成に渡す指示文。告知画像と同じ文を使い、指示を一箇所にまとめている。 */
-  prompt: string;
-  signal?: AbortSignal;
-}
-
-/**
- * 告知画像の素材を Gemini に作らせる。
- *
- * 指示文はアプリ側(lib/imagePrompt.ts)で組み立てたものをそのまま渡す。
- * ChatGPT に貼る文と同じにしておかないと、どちらで作ったかで絵の方向性が
- * 変わってしまい、番組としての見た目が揃わない。
- */
-export async function generateIllustration(opts: IllustrationOptions): Promise<Blob> {
-  const { apiKey, model, prompt, signal } = opts;
-
-  const res = await fetch(`${API_BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    if (res.status === 429) {
-      throw new Error("画像生成の無料枠(1日あたりの上限)に達しました。明日また試せます。");
-    }
-    if (res.status === 404) {
-      throw new Error(
-        `画像モデル ${model} が利用できませんでした。設定画面でモデルを選び直してください。`,
-      );
-    }
-    if (res.status === 400 && /billing|quota|not supported/i.test(body)) {
-      throw new Error("このAPIキーでは画像生成が利用できません(無料枠の対象外の可能性があります)。");
-    }
-    throw new Error(`イラストの生成に失敗しました (${res.status}): ${body.slice(0, 200)}`);
-  }
-
-  const data = await res.json();
-  const parts: Record<string, unknown>[] = data.candidates?.[0]?.content?.parts ?? [];
-  for (const part of parts) {
-    // REST は camelCase で返るが、実装差を考えて snake_case も見る
-    const inline = (part.inlineData ?? part.inline_data) as
-      | { data?: string; mimeType?: string; mime_type?: string }
-      | undefined;
-    if (!inline?.data) continue;
-    const mime = inline.mimeType ?? inline.mime_type ?? "image/png";
-    const binary = atob(inline.data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return new Blob([bytes], { type: mime });
-  }
-  throw new Error("画像が返りませんでした。もう一度お試しください。");
+  return models[0]?.id ?? null;
 }
 
 export interface SocialPosts {
@@ -197,8 +125,6 @@ export interface EpisodeMeta {
   hashtags: string[];
   transcriptSummary: string;
   keywords: string[];
-  /** 告知画像に載せる一言。 */
-  imageQuote: string;
   /** 切り抜き候補。音声を聴いて選ばせる。 */
   clips?: Clip[];
   social?: SocialPosts;
@@ -452,7 +378,6 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
     hashtags: strArray(o.hashtags),
     transcriptSummary: typeof o.transcriptSummary === "string" ? o.transcriptSummary : "",
     keywords: strArray(o.keywords),
-    imageQuote: typeof o.imageQuote === "string" ? o.imageQuote : "",
     clips,
     social,
   };

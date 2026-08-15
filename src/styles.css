@@ -278,16 +278,6 @@ button.danger { background: #3a1518; border: 1px solid var(--danger); color: #ff
   flex-shrink: 0;
 }
 
-.preset-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
-.preset-tabs button {
-  flex: 1;
-  padding: 9px;
-  font-size: 0.85rem;
-  background: #2a2a2a;
-  color: var(--muted);
-}
-.preset-tabs button.active { background: var(--accent); color: var(--on-accent); font-weight: 700; }
-
 .card-preview {
   display: block;
   width: 100%;
@@ -307,8 +297,6 @@ input[type="color"] {
   border-radius: 8px;
   margin-top: 4px;
 }
-
-.illust { margin-top: 14px; padding-top: 12px; border-top: 1px solid #333; }
 
 /* 切り抜きの範囲調整 */
 .clip-trim {
@@ -584,3 +572,15 @@ video.card-preview { background: #000; }
   font-weight: 600;
   margin-bottom: 6px;
 }
+
+/* この回の写真。MP3 のカバーと切り抜きの背景に使う */
+.photo-pick {
+  display: block;
+  border: 1px dashed #444;
+  border-radius: 10px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 0;
+}
+.photo-pick input { display: none; }
