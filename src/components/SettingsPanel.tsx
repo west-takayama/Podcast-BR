@@ -309,6 +309,23 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       <label className="check">
         <input
           type="checkbox"
+          checked={settings.dsp.levelSpeech}
+          onChange={(e) => setDsp("levelSpeech", e.target.checked)}
+        />
+        <span>
+          声の大きさを揃える
+          <br />
+          <span className="muted">
+            1本にまとまった録音で<strong>2人の声量が違う</strong>とき、小さいほうを持ち上げて
+            揃えます。同じ人でもマイクから離れた区間は持ち上がります(最大 ±12dB)。
+            沈黙では動かさないので、環境音だけが大きくなることはありません。
+          </span>
+        </span>
+      </label>
+
+      <label className="check">
+        <input
+          type="checkbox"
           checked={settings.dsp.trimSilence}
           onChange={(e) => setDsp("trimSilence", e.target.checked)}
         />
