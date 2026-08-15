@@ -43,6 +43,7 @@ import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/lib/gemini";
 import { castLine, parseCast, withCast } from "../src/lib/cast";
+import { formatChapters, parseChapters } from "../src/lib/chapters";
 
 const SR = 44100;
 let failures = 0;
@@ -1307,6 +1308,46 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[29] チャプターの手直し");
+  {
+    const list = [
+      { time: "00:00", label: "オープニング" },
+      { time: "03:20", label: "本題" },
+    ];
+    check("画面の形にする", formatChapters(list) === "00:00 オープニング\n03:20 本題");
+
+    const back = parseChapters("00:00 オープニング\n03:20 本題");
+    check("そのまま読み戻せる",
+      JSON.stringify(back.chapters) === JSON.stringify(list) && back.dropped.length === 0);
+
+    // 打ち間違いで全部消えるのがいちばん困る
+    const partial = parseChapters("00:00 オープニング\nこれは時刻がない\n05:00 まとめ");
+    check("読める行だけ拾う", partial.chapters.length === 2,
+      partial.chapters.map((c) => c.time).join(","));
+    check("読めなかった行を知らせる",
+      partial.dropped.length === 1 && partial.dropped[0] === "これは時刻がない");
+
+    // 打ち足した行が途中に入っても順番を直す
+    const added = parseChapters("00:00 冒頭\n10:00 終わり\n05:00 途中で足した");
+    check("時刻順に並べ直す",
+      added.chapters.map((c) => c.time).join(",") === "00:00,05:00,10:00",
+      added.chapters.map((c) => c.time).join(","));
+
+    // 打ちやすさ。全角空白やタブ、時分秒でも受ける
+    check("全角空白でも読む", parseChapters("00:00　オープニング").chapters[0]?.label === "オープニング");
+    check("タブでも読む", parseChapters("01:30\tひとつめ").chapters[0]?.time === "01:30");
+    check("時分秒でも読む", parseChapters("01:02:03 長い回").chapters[0]?.time === "62:03",
+      parseChapters("01:02:03 長い回").chapters[0]?.time);
+    check("60分を超えても分表記のまま", parseChapters("72:30 後半").chapters[0]?.time === "72:30");
+    check("空行は落とす", parseChapters("\n\n00:00 冒頭\n\n").chapters.length === 1);
+    check("何も無ければ空", parseChapters("").chapters.length === 0);
+
+    // 見出しだけを直すのがいちばん多い使い方
+    const relabeled = parseChapters("00:00 直した見出し\n03:20 本題");
+    check("見出しだけ直せる",
+      relabeled.chapters[0].label === "直した見出し" && relabeled.chapters[0].time === "00:00");
   }
 
   console.log("\n[28] 今回の出演者(聞く前に分かるように)");

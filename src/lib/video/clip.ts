@@ -56,6 +56,8 @@ export interface ClipOptions {
   /** 字幕。区間に重なるものだけ使う。 */
   transcript?: TranscriptSegment[] | null;
   onProgress?: (fraction: number) => void;
+  /** 映像が端末で復号できず、単色の背景で作ることになったときに呼ばれる。 */
+  onVideoUnusable?: () => void;
   signal?: AbortSignal;
   /** 事前に調べたコーデック。省くとこの場で調べる。 */
   capability?: ClipCapability;
@@ -569,6 +571,23 @@ export async function extractRangeMp3(
   return encodeMp3([mono], buffer.sampleRate, 32);
 }
 
+/**
+ * その動画の映像を、この端末で使えるか。
+ *
+ * 形として読めることと、復号できることは別。ブラウザの録画機能で作った
+ * MP4 の中身が VP9 だと、読めはするが再生できない、ということが起きる。
+ * 書き出しの瞬間に分かるのでは遅いので、選んだ直後に確かめられるようにする。
+ */
+export async function canUseVideo(file: Blob): Promise<boolean> {
+  try {
+    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+    const track = await input.getPrimaryVideoTrack();
+    return track ? await track.canDecode() : false;
+  } catch {
+    return false;
+  }
+}
+
 /** 表紙(カバー画像)の候補。選ぶための小さな絵と、その時刻。 */
 export interface CoverCandidate {
   atSec: number;
@@ -592,7 +611,8 @@ export async function sampleCoverFrames(
 ): Promise<CoverCandidate[]> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
   const track = await input.getPrimaryVideoTrack();
-  if (!track) return [];
+  // 復号できない映像から表紙は作れない。ここで空を返し、呼び出し側に伝える
+  if (!track || !(await track.canDecode())) return [];
   const sink = new VideoSampleSink(track);
   // 両端は切り替わりの途中に当たりやすいので、内側に寄せて等間隔に取る
   const span = Math.max(0, endSec - startSec);
@@ -834,9 +854,14 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const source = opts.videoFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
   const { buffer, levels } = await decodeRange(input, startSec, endSec);
-  // 動画から作る場合は、その映像を背景として使う
+  // 動画から作る場合は、その映像を背景として使う。
+  // ただし端末が復号できない形式のことがある(ブラウザの録画で作った
+  // MP4 の中身が VP9、など)。そこで丸ごと失敗させると、音声も字幕も
+  // 揃っているのに何も作れない。**映像だけ諦めて**単色の背景で作る。
   const videoTrack = opts.videoFile ? await input.getPrimaryVideoTrack() : null;
-  const frameSink = videoTrack ? new VideoSampleSink(videoTrack) : null;
+  const usableVideo = videoTrack ? await videoTrack.canDecode() : false;
+  if (videoTrack && !usableVideo) opts.onVideoUnusable?.();
+  const frameSink = usableVideo && videoTrack ? new VideoSampleSink(videoTrack) : null;
   if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
   onProgress?.(0.25);
 

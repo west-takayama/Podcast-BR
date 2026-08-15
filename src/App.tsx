@@ -255,17 +255,27 @@ export default function App() {
    * タグ付けは生成直後に走るため、その時点ではまだ写真が無い。
    * 写真を入れたのに配信側のカバーが単色のまま、という状態を避ける。
    */
-  const applyArtwork = async (bitmap: ImageBitmap | null) => {
+  /** 取り込んだ写真。タグを付け直すたびに要るので持っておく。 */
+  const backgroundRef = useRef<ImageBitmap | null>(null);
+
+  /**
+   * いま画面に出ている内容で MP3 のタグを付け直す。
+   *
+   * タイトルを選び直したりチャプターを直したりしても、以前は
+   * **ファイルの中身は変換した瞬間のまま**だった。画面と配信する物が
+   * 食い違っていて、しかも気づけない。編集のたびに揃え直す。
+   */
+  const retagMp3 = async (nextMeta: EpisodeMeta, title: string, busy: string) => {
     const converted = convertedRef.current;
-    if (!converted || !meta) return;
-    setBusyText("MP3 のカバーを付け直しています…");
+    if (!converted) return;
+    setBusyText(busy);
     try {
       const blob = await buildTaggedMp3(
         converted.mp3,
-        meta,
-        chosenTitle || meta.titles[0] || "",
+        nextMeta,
+        title,
         converted.durationSec,
-        bitmap,
+        backgroundRef.current,
       );
       setMp3Url((prev) => {
         if (prev) URL.revokeObjectURL(prev);
@@ -273,10 +283,16 @@ export default function App() {
       });
       if (episodeId) await updateEpisode(episodeId, { audio: blob });
     } catch {
-      // カバーの差し替えに失敗しても、元の MP3 はそのまま使える
+      // 付け直しに失敗しても、元の MP3 はそのまま使える
     } finally {
       setBusyText("");
     }
+  };
+
+  const applyArtwork = async (bitmap: ImageBitmap | null) => {
+    backgroundRef.current = bitmap;
+    if (!meta) return;
+    await retagMp3(meta, chosenTitle || meta.titles[0] || "", "MP3 のカバーを付け直しています…");
   };
 
   /**
@@ -368,6 +384,10 @@ export default function App() {
       if (!prev) return prev;
       const next = { ...prev, ...patch };
       if (episodeId) updateEpisode(episodeId, { meta: next });
+      // チャプターと説明は MP3 の中にも入っている。直したら揃え直す
+      if (patch.chapters || patch.description) {
+        void retagMp3(next, chosenTitle || next.titles[0] || "", "MP3 の中身を直しています…");
+      }
       return next;
     });
   };
@@ -916,6 +936,8 @@ export default function App() {
                 onChooseTitle={(title) => {
                   setChosenTitle(title);
                   if (episodeId) updateEpisode(episodeId, { chosenTitle: title });
+                  // 選んだタイトルを MP3 の中にも入れ直す
+                  if (meta) void retagMp3(meta, title, "MP3 のタイトルを入れ直しています…");
                 }}
                 audioUrl={mp3Url}
                 fileName={outputName}

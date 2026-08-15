@@ -584,3 +584,14 @@ video.card-preview { background: #000; }
   margin-bottom: 0;
 }
 .photo-pick input { display: none; }
+
+/* 失敗ではないが知らせたいこと。エラーより穏やかに見せる */
+.notice {
+  background: #2a2410;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 14px;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}

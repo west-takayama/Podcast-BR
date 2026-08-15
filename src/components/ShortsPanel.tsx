@@ -68,6 +68,8 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
+  /** 映像がこの端末で復号できない動画。音声と字幕だけで作ることになる。 */
+  const [videoUnusable, setVideoUnusable] = useState(false);
   const [fileInfo, setFileInfo] = useState("");
   const [clips, setClips] = useState<Clip[]>([]);
   const [selected, setSelected] = useState(0);
@@ -216,10 +218,17 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     setPhase("extracting");
     setStatus("動画から音声を取り出しています…");
     setProgress(0);
+    setVideoUnusable(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      // 映像がこの端末で復号できるかを**先に**見る。
+      // 出来ないと分かるのが書き出しの瞬間だと、AI の呼び出し(無料枠)も
+      // 範囲の調整も全部やり直しになる。ここで一言出しておけば選び直せる
+      const { canUseVideo } = await loadClipLib();
+      if (!(await canUseVideo(file))) setVideoUnusable(true);
+
       const { mp3, durationSec } = await extractAudio(file);
       setPhase("finding");
       setProgress(0);
@@ -471,6 +480,20 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   return (
     <>
       {error && <div className="error">⚠️ {error}</div>}
+
+      {videoUnusable && (
+        <div className="notice">
+          ⚠️ <strong>この動画の映像は、この端末では再生できない形式です。</strong>
+          <br />
+          音声と字幕は使えるので、<strong>単色の背景で縦型ショートを作れます</strong>
+          (元の映像は入りません)。映像も入れたい場合は、スマホのカメラで撮った動画や、
+          MP4(H.264)で書き出した動画をお使いください。
+          <br />
+          <span className="muted">
+            パソコンの画面録画やブラウザの録画機能で作った動画で起きやすい形式の食い違いです。
+          </span>
+        </div>
+      )}
 
       {phase === "idle" && clips.length === 0 && (
         <label className="drop card">

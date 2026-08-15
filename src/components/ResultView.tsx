@@ -7,6 +7,7 @@ import type { AudioReport } from "../App";
 import type { Finding } from "../lib/audio/diagnostics";
 import { CEILING_DBFS } from "../lib/audio/limiter";
 import { castLine, withCast } from "../lib/cast";
+import { formatChapters, parseChapters } from "../lib/chapters";
 
 interface Props {
   meta: EpisodeMeta;
@@ -40,6 +41,7 @@ function EditableBlock({
   rows = 6,
   copyText,
   prefix,
+  note,
 }: {
   title: string;
   value: string;
@@ -49,6 +51,8 @@ function EditableBlock({
   copyText?: string;
   /** 本文の前に、編集できない行として見せるもの。 */
   prefix?: string;
+  /** 下に添える一言。 */
+  note?: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -98,6 +102,7 @@ function EditableBlock({
       ) : (
         <div className="result-body">{value}</div>
       )}
+      {note && <p className="muted">{note}</p>}
     </div>
   );
 }
@@ -384,7 +389,8 @@ export default function ResultView({
   // 取り込んだ写真は切り抜き動画と MP3 のカバーで共有する。
   // ここで持たないと、同じ写真を2回読み込ませることになる
   const [background, setBackground] = useState<ImageBitmap | null>(null);
-  const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
+  const [chapterWarning, setChapterWarning] = useState("");
+  const chapterText = formatChapters(meta.chapters);
   // 出演者は説明文の頭に必ず置く。再生を押す前に見えるのはここだけなので、
   // AI の書きぶりに任せず、貼り付ける文そのものに入れる
   const describedWithCast = withCast(meta.description, cast);
@@ -464,10 +470,32 @@ export default function ResultView({
         )}
 
         {meta.chapters.length > 0 && (
-          <Block title="チャプター" copyText={chapterText}>
-            <div className="result-body">{chapterText}</div>
-            {chapterNote && <p className="muted">✓ {chapterNote}</p>}
-          </Block>
+          <EditableBlock
+            title="チャプター"
+            value={chapterText}
+            rows={Math.min(12, meta.chapters.length + 1)}
+            onChange={
+              onEdit
+                ? (next) => {
+                    // 読める行だけ拾う。打ち間違いで全部消えないように
+                    const { chapters, dropped } = parseChapters(next);
+                    if (chapters.length > 0) onEdit({ chapters });
+                    setChapterWarning(
+                      dropped.length > 0
+                        ? `「${dropped[0]}」は読み取れませんでした(「00:00 見出し」の形にしてください)`
+                        : "",
+                    );
+                  }
+                : undefined
+            }
+            note={
+              chapterWarning
+                ? `⚠️ ${chapterWarning}`
+                : chapterNote
+                  ? `✓ ${chapterNote}`
+                  : "「00:00 見出し」の形で直せます。MP3 の中身にも入り直します。"
+            }
+          />
         )}
 
         {meta.hashtags.length > 0 && (
