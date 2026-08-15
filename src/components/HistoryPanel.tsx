@@ -11,6 +11,7 @@ import {
   type EpisodeRecord,
 } from "../lib/history";
 import ResultView from "./ResultView";
+import { backupFileName, buildBackup, parseBackup, restoreBackup } from "../lib/backup";
 
 interface Props {
   onChooseTitle: (id: string, title: string) => void;
@@ -46,6 +47,7 @@ export default function HistoryPanel({
   const [records, setRecords] = useState<EpisodeRecord[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
+  const [backupNote, setBackupNote] = useState("");
   const [confirming, setConfirming] = useState<"all" | "audio" | null>(null);
   const [query, setQuery] = useState("");
   /** 検索から開いた場面。その回の切り抜き候補の先頭に差し込む。 */
@@ -92,11 +94,66 @@ export default function HistoryPanel({
   if (records === null) {
     return <div className="card muted">履歴を読み込み中…</div>;
   }
+  /** 履歴を1つのファイルにして持ち出す。 */
+  const exportBackup = async () => {
+    setBackupNote("");
+    try {
+      const backup = await buildBackup(records);
+      const blob = new Blob([JSON.stringify(backup, null, 1)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = backupFileName();
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setBackupNote(`${backup.episodes.length}件を書き出しました(${a.download})`);
+    } catch (e) {
+      setBackupNote(`⚠️ 書き出せませんでした: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  /** 控えを読み込んで履歴に入れる。 */
+  const importBackup = async (file: File) => {
+    setBackupNote("");
+    try {
+      const backup = parseBackup(await file.text());
+      const r = await restoreBackup(backup);
+      const parts = [
+        r.added > 0 && `${r.added}件を追加`,
+        r.updated > 0 && `${r.updated}件を更新`,
+        r.skipped > 0 && `${r.skipped}件はこちらが新しいのでそのまま`,
+      ].filter(Boolean);
+      setBackupNote(parts.length > 0 ? `✓ ${parts.join(" / ")}` : "✓ 変わりはありませんでした");
+      refresh();
+    } catch (e) {
+      setBackupNote(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  // 履歴が空でも「控えを戻す」だけは出す。
+  // 端末を替えた直後は必ず空で、**そのときこそ戻したい**
   if (records.length === 0) {
     return (
       <div className="card">
         <h2>履歴</h2>
-        <p className="muted">まだエピソードがありません。WAVを処理すると自動で保存されます。</p>
+        <p className="muted">
+          まだエピソードがありません。音声を処理すると自動で保存されます。
+          <br />
+          別の端末で使っていた場合は、書き出しておいた控えをここから戻せます。
+        </p>
+        <label className="restore-pick">
+          <input
+            type="file"
+            accept="application/json,.json"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) void importBackup(f);
+            }}
+          />
+          <span>⬆️ 控えを読み込む</span>
+        </label>
+        {backupNote && <p className="muted">{backupNote}</p>}
       </div>
     );
   }
@@ -157,6 +214,36 @@ export default function HistoryPanel({
             </div>
           </div>
         )}
+      </div>
+
+      <div className="card">
+        <h2>💾 控えを取る / 戻す</h2>
+        <p className="muted">
+          履歴はこの端末の中だけにあります。端末を替えたり、閲覧履歴を消したりすると
+          <strong>全部消えます</strong>。書き出しておけば、別の端末でも戻せます。
+          <br />
+          入るのはタイトル・説明文・チャプター・書き起こし・出演者など
+          <strong>作り直せないもの</strong>です。音声は入りません(元の録音から作り直せるうえ、
+          数百MBになるため)。
+        </p>
+        <div className="row-buttons">
+          <button onClick={exportBackup} disabled={records.length === 0}>
+            ⬇️ 控えを書き出す
+          </button>
+          <label className="restore-pick">
+            <input
+              type="file"
+              accept="application/json,.json"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (f) void importBackup(f);
+              }}
+            />
+            <span>⬆️ 控えを読み込む</span>
+          </label>
+        </div>
+        {backupNote && <p className="muted">{backupNote}</p>}
       </div>
 
       <div className="card">

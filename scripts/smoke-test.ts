@@ -44,6 +44,7 @@ import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/lib/gemini";
 import { castLine, parseCast, withCast } from "../src/lib/cast";
 import { formatChapters, parseChapters } from "../src/lib/chapters";
+import { backupFileName, buildBackup, parseBackup } from "../src/lib/backup";
 
 const SR = 44100;
 let failures = 0;
@@ -1308,6 +1309,52 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[30] 履歴の控え");
+  {
+    const ep = (id: string, createdAt: number, title: string) => ({
+      id, createdAt, fileName: "a.wav", durationSec: 100, removedSec: 0,
+      chosenTitle: title,
+      meta: { titles: [title], description: "d", showNotes: "", chapters: [],
+              hashtags: [], transcriptSummary: "", keywords: [] },
+    });
+
+    const backup = await buildBackup([
+      { ...ep("a", 100, "ひとつめ"), audio: new Blob(["x"]) } as never,
+      ep("b", 200, "ふたつめ") as never,
+    ]);
+    check("控えの形が分かる", backup.format === "podcast-br-backup" && backup.version === 1);
+    check("2件入る", backup.episodes.length === 2);
+    // 音声は入れない。数百MBになるうえ、元の録音から作り直せる
+    check("音声は入れない", !("audio" in backup.episodes[0]),
+      Object.keys(backup.episodes[0]).join(","));
+    check("作り直せないものは入る",
+      backup.episodes[0].meta.titles[0] === "ひとつめ" && backup.episodes[0].chosenTitle === "ひとつめ");
+
+    // 名前に日付を入れて、世代を並べても分かるようにする
+    check("ファイル名に日付", backupFileName(new Date(2026, 7, 15)) === "podcast-br-20260815.json",
+      backupFileName(new Date(2026, 7, 15)));
+
+    // 他所のファイルを投げ込まれても壊れない
+    const rejects = (text: string) => {
+      try { parseBackup(text); return false; } catch { return true; }
+    };
+    check("JSON でなければ弾く", rejects("これはテキスト"));
+    check("別のアプリの JSON は弾く", rejects(JSON.stringify({ hello: 1 })));
+    check("新しい版の控えは弾く",
+      rejects(JSON.stringify({ format: "podcast-br-backup", version: 99, episodes: [] })));
+    check("中身が空なら弾く",
+      rejects(JSON.stringify({ format: "podcast-br-backup", version: 1, episodes: [] })));
+    // 一部が壊れていても、読める回は拾う
+    const mixed = parseBackup(JSON.stringify({
+      format: "podcast-br-backup", version: 1,
+      episodes: [ep("a", 1, "読める"), { id: "b" }, null],
+    }));
+    check("読める回だけ拾う", mixed.episodes.length === 1 && mixed.episodes[0].id === "a");
+
+    check("書き出して読み戻せる",
+      parseBackup(JSON.stringify(backup)).episodes.length === 2);
   }
 
   console.log("\n[29] チャプターの手直し");
