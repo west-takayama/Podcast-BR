@@ -44,6 +44,7 @@ import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/lib/gemini";
+import { castLine, parseCast, withCast } from "../src/lib/cast";
 
 const SR = 44100;
 let failures = 0;
@@ -1358,6 +1359,60 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[28] 今回の出演者(聞く前に分かるように)");
+  {
+    // どう打っても同じ並びになる
+    check("読点で区切る", castLine("たかやま、にし") === "出演: たかやま・にし", castLine("たかやま、にし"));
+    check("中黒で区切る", castLine("たかやま・にし") === "出演: たかやま・にし");
+    check("カンマで区切る", castLine("たかやま, にし") === "出演: たかやま・にし");
+    check("改行で区切る", castLine("たかやま\nにし") === "出演: たかやま・にし");
+    check("余計な空白を落とす", castLine("  たかやま 、 にし  ") === "出演: たかやま・にし",
+      castLine("  たかやま 、 にし  "));
+    check("空なら行を作らない", castLine("") === "" && castLine("  、 ,") === "");
+    // 名前に空白が入ることはある(「ゲスト 山田さん」)。1つの空白では割らない
+    check("名前の中の空白では割らない",
+      castLine("たかやま、ゲスト 山田さん") === "出演: たかやま・ゲスト 山田さん",
+      castLine("たかやま、ゲスト 山田さん"));
+    check("名前を数える", parseCast("A、B・C").length === 3);
+
+    // 説明文の頭に足す
+    const desc = "今回は新しいマイクの話をしました。";
+    check("説明文の頭に入る",
+      withCast(desc, "たかやま、にし") === `出演: たかやま・にし\n\n${desc}`,
+      JSON.stringify(withCast(desc, "たかやま、にし")));
+    check("出演者が無ければ触らない", withCast(desc, "") === desc);
+
+    // 何度足しても増えない。表示・コピー・保存で何度も通るため
+    const once = withCast(desc, "たかやま");
+    check("二重にならない", withCast(once, "たかやま") === once, JSON.stringify(withCast(once, "たかやま")));
+
+    // 直したらちゃんと入れ替わる(前の名前が残らない)
+    const changed = withCast(once, "にし、ゲスト 山田さん");
+    check("直すと入れ替わる",
+      changed.startsWith("出演: にし・ゲスト 山田さん") && !changed.includes("たかやま"),
+      JSON.stringify(changed));
+    check("消すと行ごと消える", withCast(once, "") === desc, JSON.stringify(withCast(once, "")));
+
+    // AI が気を利かせて自分で書いてきた場合も、こちらの行で置き換える
+    const aiWrote = "出演者: だれか\n\n" + desc;
+    check("AI が書いた行を置き換える",
+      withCast(aiWrote, "たかやま") === `出演: たかやま\n\n${desc}`,
+      JSON.stringify(withCast(aiWrote, "たかやま")));
+    check("全角コロンでも拾う",
+      withCast("パーソナリティ:だれか\n\n" + desc, "たかやま") === `出演: たかやま\n\n${desc}`);
+
+    // 本文が「出演」で始まる普通の文を消してしまわないこと
+    const tricky = "出演したイベントの話をしました。";
+    check("本文を出演者の行と間違えない", withCast(tricky, "") === tricky, withCast(tricky, ""));
+
+    // プロンプトにも渡る(AI が二重に書かないように頼む)
+    const prompted = buildPrompt(DEFAULT_PROMPT_CONFIG, { cast: "たかやま、にし" });
+    check("出演者をAIに伝える", prompted.includes("たかやま、にし"));
+    check("AIに二重書きを止めさせる", prompted.includes("出演:") && prompted.includes("書かないこと"));
+    check("出演者が無ければ指示も出さない",
+      !buildPrompt(DEFAULT_PROMPT_CONFIG, {}).includes("出演者の扱い"));
   }
 
   console.log("\n[27] うまくいかなかったときの案内");

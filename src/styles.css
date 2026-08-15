@@ -573,3 +573,14 @@ video.card-preview { background: #000; }
   width: 100%;
   margin-top: 4px;
 }
+
+/* 今回の出演者。聞く前に誰の回か分かるようにするための欄 */
+.cast-card { padding: 14px 16px; }
+.cast-card input[type="text"] { margin-top: 0; }
+
+/* 説明文の頭に入る「出演: …」。本文と区別できるようにする */
+.cast-line {
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
