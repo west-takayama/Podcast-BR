@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { suggestTopics, type TopicSuggestions } from "../lib/gemini";
+import { loadPlan, savePlan, type Plan } from "../lib/plan";
 import {
   buildInsights,
   digestForPrompt,
@@ -33,6 +34,7 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [plan, setPlan] = useState<Plan | null>(() => loadPlan());
 
   // タブは切り替えるたびに作り直されるので、開くたびに数え直される
   useEffect(() => {
@@ -149,8 +151,11 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
       <div className="card">
         <h2>💡 次に話すお題</h2>
         <p className="muted">
-          これまでの回を読んで、次のお題を6個考えます。送るのはタイトル・日付・要約・チャプターの見出しだけで、
+          これまでの回に加えて、<strong>いま世の中で話されていること</strong>を Google 検索で
+          確かめたうえで、次のお題を6個考えます。送るのはタイトル・日付・要約・チャプターの見出しだけで、
           <strong>音声は送りません</strong>。
+          <br />
+          設定の「想定している聴き手」を書いておくと、同年代の人が引っかかる入り口を選びやすくなります。
         </p>
 
         {busy ? (
@@ -188,6 +193,17 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
             )}
 
             <h3>お題の案</h3>
+            {suggestions.searched ? (
+              <p className="muted">
+                🔎 いま話されていることを検索で確かめたうえでの案です。
+                <strong>伸びるかどうかは分かりません</strong>(再生数のデータは手元にありません)。
+                下の出典を見て、ぴんと来たものを選んでください。
+              </p>
+            ) : (
+              <p className="muted">
+                今回は検索を使えなかったので、<strong>これまでの回だけ</strong>から考えた案です。
+              </p>
+            )}
             {suggestions.ideas.map((idea, i) => (
               <div key={i} className="idea">
                 <div className="idea-head">
@@ -206,8 +222,34 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
                 {idea.related.length > 0 && (
                   <p className="muted">つながる回: {idea.related.join(" / ")}</p>
                 )}
+                {/* 決めたら持ち回る。収録の直前に探し直さなくて済む */}
+                <button
+                  className={plan?.title === idea.title ? "copy-btn copied" : "copy-btn"}
+                  onClick={() =>
+                    setPlan(
+                      savePlan({ title: idea.title, hook: idea.hook, angles: idea.angles }),
+                    )
+                  }
+                >
+                  {plan?.title === idea.title ? "✓ 次はこれ" : "📌 次はこれにする"}
+                </button>
               </div>
             ))}
+
+            {suggestions.sources && suggestions.sources.length > 0 && (
+              <>
+                <h3>調べたもと</h3>
+                <ul className="findings">
+                  {suggestions.sources.map((src, i) => (
+                    <li key={i}>
+                      <a href={src.uri} target="_blank" rel="noreferrer noopener">
+                        {src.title}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
 
             <CopyButton
               text={suggestions.ideas

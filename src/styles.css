@@ -609,3 +609,7 @@ video.card-preview { background: #000; }
   cursor: pointer;
 }
 .restore-pick input { display: none; }
+
+/* 次に話すと決めたこと。収録の直前に見えるように作成画面へ出す */
+.plan-card { border: 1px solid var(--accent); }
+.plan-title { font-weight: 700; font-size: 1.05rem; margin: 4px 0 6px; }

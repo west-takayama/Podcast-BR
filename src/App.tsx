@@ -24,6 +24,7 @@ import {
 } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import { castLine } from "./lib/cast";
+import { clearPlan, loadPlan, planAsText, type Plan } from "./lib/plan";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
@@ -31,6 +32,7 @@ import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
 import { ScreenWakeLock } from "./lib/wakeLock";
 import { applyAccent } from "./lib/theme";
+import CopyButton from "./components/CopyButton";
 import SettingsPanel from "./components/SettingsPanel";
 import ResultView from "./components/ResultView";
 import HistoryPanel from "./components/HistoryPanel";
@@ -71,6 +73,8 @@ export default function App() {
   // 今回の出演者。回ごとに変わるので設定ではなく、その都度打ち込む。
   // 前回の値を初期値にして、同じ顔ぶれが続くときに打ち直さずに済むようにする
   const [cast, setCast] = useState<string>(() => loadSettings().lastCast ?? "");
+  // 「次の回」で決めたお題。収録の直前に見えないと意味がない
+  const [plan, setPlan] = useState<Plan | null>(() => loadPlan());
   // 変換だけ終わって文章が未完成のまま中断された回。開き直したときに続けられる。
   const [pending, setPending] = useState<PendingConversion | null>(null);
   const [pendingUrl, setPendingUrl] = useState("");
@@ -120,6 +124,11 @@ export default function App() {
   useEffect(() => {
     mp3UrlRef.current = mp3Url;
   }, [mp3Url]);
+
+  // お題は別のタブで決める。作成画面に戻ってきた時点で拾い直す
+  useEffect(() => {
+    if (tab === "create") setPlan(loadPlan());
+  }, [tab]);
 
   // Service Worker が新しい版を用意したら知らせる(切り替えは利用者の操作で)
   useEffect(() => {
@@ -859,6 +868,39 @@ export default function App() {
 
           {phase === "idle" && !pickingTracks && (
             <>
+            {/* 「次の回」で決めたお題。収録の直前に探し直さなくて済むように */}
+            {plan && (
+              <div className="card plan-card">
+                <div className="result-head">
+                  <h2>📌 今日話すと決めたこと</h2>
+                  <div className="head-actions">
+                    <CopyButton text={planAsText(plan)} />
+                    <button
+                      className="copy-btn"
+                      onClick={() => {
+                        clearPlan();
+                        setPlan(null);
+                      }}
+                    >
+                      消す
+                    </button>
+                  </div>
+                </div>
+                <p className="plan-title">{plan.title}</p>
+                {plan.hook && <p className="idea-hook">「{plan.hook}」</p>}
+                {plan.angles.length > 0 && (
+                  <ul className="idea-angles">
+                    {plan.angles.map((a, i) => (
+                      <li key={i}>{a}</li>
+                    ))}
+                  </ul>
+                )}
+                <p className="muted">
+                  「次の回」で選んだお題です。収録が終わったら消してください。
+                </p>
+              </div>
+            )}
+
             {/* 今回のパーソナリティ。聞く前に誰の回か分かるよう説明文の頭に出す */}
             <div className="card cast-card">
               <label htmlFor="cast-input" style={{ marginBottom: 4, fontWeight: 600 }}>

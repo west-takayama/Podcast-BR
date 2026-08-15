@@ -149,6 +149,20 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       </p>
 
       <label>
+        話し手と、想定している聴き手(次のお題の提案に効きます)
+        <input
+          type="text"
+          value={settings.prompt.audience}
+          placeholder="例: 30代前半の社会人ふたり。同年代の共働き世帯に向けて"
+          onChange={(e) => setPrompt("audience", e.target.value)}
+        />
+      </label>
+      <p className="muted">
+        「次の回」でお題を考えるときに使います。年代や暮らしぶりが分かると、
+        <strong>同年代の人が引っかかる入り口</strong>を選びやすくなります。
+      </p>
+
+      <label>
         番組の背景情報(生成品質が大きく上がります)
         <textarea
           value={settings.prompt.showContext}

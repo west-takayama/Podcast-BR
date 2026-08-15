@@ -45,6 +45,8 @@ import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/l
 import { castLine, parseCast, withCast } from "../src/lib/cast";
 import { formatChapters, parseChapters } from "../src/lib/chapters";
 import { backupFileName, buildBackup, parseBackup } from "../src/lib/backup";
+import { suggestTopics } from "../src/lib/gemini";
+import { clearPlan, loadPlan, planAsText, savePlan } from "../src/lib/plan";
 
 const SR = 44100;
 let failures = 0;
@@ -1309,6 +1311,102 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[31] 次のお題(検索での裏取りと、決めたことの持ち回り)");
+  {
+    const original = globalThis.fetch;
+    const calls: { body: string; hasSearch: boolean }[] = [];
+    const answer = {
+      patterns: ["傾向1"], gaps: ["穴1"],
+      ideas: [{ title: "お題1", why: "理由", angles: ["切り口1"], hook: "引き", related: [] }],
+    };
+    const reply = (text: string, sources?: { uri: string; title: string }[]) =>
+      new Response(JSON.stringify({
+        candidates: [{
+          content: { parts: [{ text }] },
+          ...(sources ? { groundingMetadata: { groundingChunks: sources.map((web) => ({ web })) } } : {}),
+        }],
+      }), { status: 200 });
+
+    const install = (handler: (n: number, hasSearch: boolean) => Response) => {
+      let n = 0;
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        const body = String(init?.body ?? "");
+        const hasSearch = body.includes("google_search");
+        calls.push({ body, hasSearch });
+        return handler(++n, hasSearch);
+      }) as unknown as typeof fetch;
+    };
+
+    const ask = (extra: Record<string, unknown> = {}) =>
+      suggestTopics({
+        apiKey: "k", model: "gemini-3-flash", digest: "過去回", stats: "傾向",
+        config: { ...DEFAULT_PROMPT_CONFIG, audience: "30代前半の社会人" },
+        onStatus: () => {}, ...extra,
+      });
+
+    // 検索つきで通る場合
+    calls.length = 0;
+    install(() => reply("```json\n" + JSON.stringify(answer) + "\n```",
+      [{ uri: "https://example.com/a", title: "出典A" }]));
+    const withSearch = await ask();
+    check("既定で検索を使う", calls[0].hasSearch);
+    check("聴き手をプロンプトに入れる", calls[0].body.includes("30代前半の社会人"));
+    check("検索を使うときは JSON 強制を外す", !calls[0].body.includes("response_mime_type"));
+    check("``` で囲まれていても読める", withSearch.ideas[0].title === "お題1");
+    check("出典を返す", withSearch.sources?.length === 1 && withSearch.sources[0].title === "出典A");
+    check("調べたと言える", withSearch.searched === true);
+
+    // 検索が使えないキー/モデル → 黙って過去回だけに落とす
+    calls.length = 0;
+    install((n) => n === 1
+      ? new Response(JSON.stringify({ error: { message: "Search tool is not supported" } }), { status: 400 })
+      : reply(JSON.stringify(answer)));
+    const fallback = await ask();
+    check("検索が駄目なら落として出す", fallback.ideas.length === 1, `呼び出し ${calls.length} 回`);
+    check("2回目は検索なし", calls.length === 2 && !calls[1].hasSearch);
+    check("2回目は JSON を強制する", calls[1].body.includes("response_mime_type"));
+    check("調べていないと分かる", !fallback.searched);
+
+    // 出典が返らなければ「調べた」と言わない
+    calls.length = 0;
+    install(() => reply(JSON.stringify(answer)));
+    const noSources = await ask();
+    check("出典が無ければ調べたと言わない", !noSources.searched);
+
+    // 検索を切ることもできる
+    calls.length = 0;
+    install(() => reply(JSON.stringify(answer)));
+    await ask({ useSearch: false });
+    check("切れば検索を使わない", !calls[0].hasSearch);
+
+    // 400 以外は落とさずに伝える(混雑などは待つべき)
+    calls.length = 0;
+    install(() => new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 }));
+    let raised = "";
+    try { await ask(); } catch (e) { raised = e instanceof Error ? e.message : String(e); }
+    check("混雑は落とさず伝える", raised.includes("混雑"), raised.slice(0, 40));
+
+    globalThis.fetch = original;
+
+    // 決めたお題の持ち回り
+    const store: Record<string, string> = {};
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => { store[k] = v; },
+      removeItem: (k: string) => { delete store[k]; },
+    };
+    check("何も決めていなければ空", loadPlan() === null);
+    const saved = savePlan({ title: "お題1", hook: "引き", angles: ["切り口1", "切り口2"] });
+    check("決めたら残る", loadPlan()?.title === "お題1" && saved.savedAt > 0);
+    check("収録メモとして読める",
+      planAsText(loadPlan()!) === "お題1\n「引き」\n- 切り口1\n- 切り口2",
+      JSON.stringify(planAsText(loadPlan()!)));
+    clearPlan();
+    check("消せる", loadPlan() === null);
+    store["podcast-br-plan"] = "{壊れている";
+    check("壊れていても落ちない", loadPlan() === null);
   }
 
   console.log("\n[30] 履歴の控え");
