@@ -40,7 +40,18 @@ export default function ClipStudio({
   // null は判定前、false は書き出せない端末
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
   const [shared, setShared] = useState(false);
+  // 音声が端末に残っていない回のために、その場で選んでもらった MP3
+  const [picked, setPicked] = useState<{ url: string; name: string; durationSec: number } | null>(
+    null,
+  );
+  const [pickError, setPickError] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  // 片付け用。作った URL を全部覚えておく(二重に解放しても害はない)
+  const madeUrls = useRef<string[]>([]);
+  const keep = (url: string) => {
+    madeUrls.current.push(url);
+    return url;
+  };
 
   useEffect(() => {
     loadClipLib()
@@ -50,7 +61,12 @@ export default function ClipStudio({
   }, []);
 
   useEffect(() => {
-    return () => abortRef.current?.abort();
+    return () => {
+      abortRef.current?.abort();
+      // 出来上がった動画は数十MBになる。閉じたら手放す
+      madeUrls.current.forEach(URL.revokeObjectURL);
+      madeUrls.current = [];
+    };
   }, []);
 
   // 候補を選び直したら、前の書き出しは意味を失う
@@ -72,15 +88,42 @@ export default function ClipStudio({
   const endSec = Math.max(startSec + 5, rawEnd + nudge.end);
   const duration = endSec - startSec;
 
+  /**
+   * 選ばれた音声の長さを先に確かめる。
+   *
+   * 時刻はこのアプリが書き出した MP3 を基準にしている。収録時の元ファイルや
+   * 別の回を選ぶと、無関係な場所が切り出される。長さを見れば大半は弾ける。
+   */
+  const pick = async (file: File) => {
+    setPickError("");
+    const url = keep(URL.createObjectURL(file));
+    const durationSec = await new Promise<number>((resolve) => {
+      const el = new Audio();
+      el.preload = "metadata";
+      el.onloadedmetadata = () => resolve(el.duration);
+      el.onerror = () => resolve(NaN);
+      el.src = url;
+    });
+    if (!Number.isFinite(durationSec) || durationSec <= 0) {
+      setPickError("この音声を読み取れませんでした。別のファイルをお試しください。");
+      return;
+    }
+    setPicked({ url, name: file.name, durationSec });
+  };
+
+  const source = audioUrl || picked?.url || "";
+  // 選んだ音声が短すぎる = 別の回か、元の収録ファイルを選んでいる
+  const tooShort = picked && !audioUrl && picked.durationSec < rawEnd - 1;
+
   const make = async () => {
-    if (!audioUrl) return;
+    if (!source) return;
     setError("");
     setProgress(0);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       const { renderClip } = await loadClipLib();
-      const mp3 = await (await fetch(audioUrl)).arrayBuffer();
+      const mp3 = await (await fetch(source)).arrayBuffer();
       const blob = await renderClip({
         mp3,
         startSec,
@@ -97,7 +140,7 @@ export default function ClipStudio({
       setVideoBlob(blob);
       setVideoUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
-        return URL.createObjectURL(blob);
+        return keep(URL.createObjectURL(blob));
       });
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
@@ -170,16 +213,48 @@ export default function ClipStudio({
           <button onClick={() => setNudge((n) => ({ ...n, end: n.end - 3 }))}>終了 -3秒</button>
           <button onClick={() => setNudge((n) => ({ ...n, end: n.end + 3 }))}>終了 +3秒</button>
         </div>
-        {audioUrl && (
+        {source && (
           // 書き出す前に耳で確かめられるようにする。範囲の調整はこれを聴きながら
           <audio
             controls
             preload="none"
-            src={`${audioUrl}#t=${startSec.toFixed(1)},${endSec.toFixed(1)}`}
+            src={`${source}#t=${startSec.toFixed(1)},${endSec.toFixed(1)}`}
             style={{ width: "100%", marginTop: 10 }}
           />
         )}
       </div>
+
+      {!audioUrl && (
+        <div className="clip-source">
+          <p className="muted">
+            この回の音声は端末に残っていません(容量のため、音声は直近5回ぶんだけ残しています)。
+            <strong>このアプリで書き出した MP3 を選べば、この回も切り抜けます。</strong>
+            <br />
+            時刻は書き出した MP3 を基準にしているので、収録時の元ファイルではなく
+            <strong>ダウンロードした MP3</strong> を選んでください。
+          </p>
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void pick(f);
+            }}
+          />
+          {picked && (
+            <p className="muted">
+              選んだ音声: {picked.name}({fmt(picked.durationSec)})
+            </p>
+          )}
+          {pickError && <p className="muted">⚠️ {pickError}</p>}
+          {tooShort && (
+            <p className="muted">
+              ⚠️ 選んだ音声({fmt(picked.durationSec)})が、切り抜きたい位置({fmt(rawEnd)})より
+              短いです。別の回か、収録時の元ファイルを選んでいる可能性があります。
+            </p>
+          )}
+        </div>
+      )}
 
       {error && <p className="muted">⚠️ {error}</p>}
 
@@ -192,7 +267,7 @@ export default function ClipStudio({
         </>
       ) : (
         cap !== null && (
-          <button className="primary" onClick={make} disabled={!audioUrl || cap === undefined}>
+          <button className="primary" onClick={make} disabled={!source || cap === undefined}>
             🎬 この範囲を縦型動画にする
           </button>
         )

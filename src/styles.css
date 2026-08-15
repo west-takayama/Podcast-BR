@@ -560,3 +560,16 @@ video.card-preview { background: #000; }
 .tone-row span { text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tone-row span:first-child { text-align: left; }
 .tone-row span.on { color: var(--accent); font-weight: 700; }
+
+/* 音声が残っていない回で、元の MP3 を選んでもらう欄 */
+.clip-source {
+  border: 1px dashed #444;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.clip-source input[type="file"] {
+  width: 100%;
+  margin-top: 4px;
+}
