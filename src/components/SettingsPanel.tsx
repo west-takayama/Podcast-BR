@@ -1,7 +1,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import type { Settings } from "../lib/settings";
 import { TONE_LABELS, TITLE_STYLE_LABELS, type Tone, type TitleStyle } from "../lib/prompt";
-import { listModels, pickDefaultModel, pickImageModel, type ModelInfo } from "../lib/gemini";
+import { listModels, pickDefaultModel, type ModelInfo } from "../lib/gemini";
 
 interface Props {
   settings: Settings;
@@ -35,18 +35,10 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
             const next = { ...prev };
             let changed = false;
             // 保存済みのモデルが廃止されていたら、使えるものへ寄せておく
-            if (list.length > 0 && !list.some((m) => m.id === prev.model && !m.image)) {
+            if (list.length > 0 && !list.some((m) => m.id === prev.model)) {
               const fallback = pickDefaultModel(list);
               if (fallback) {
                 next.model = fallback;
-                changed = true;
-              }
-            }
-            // イラスト用モデルは利用者に選ばせず、無料枠のあるものを自動で採る
-            if (!list.some((m) => m.id === prev.imageModel && m.image)) {
-              const picked = pickImageModel(list) ?? "";
-              if (picked !== prev.imageModel) {
-                next.imageModel = picked;
                 changed = true;
               }
             }
@@ -102,8 +94,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         >
           {models === null && <option>{settings.apiKey ? "取得中…" : "APIキーを入力してください"}</option>}
           {models
-            ?.filter((m) => !m.image)
-            .map((m, i) => (
+            ?.map((m, i) => (
               <option key={m.id} value={m.id}>
                 {m.id}
                 {i === 0 ? "(推奨)" : ""}
@@ -121,7 +112,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
 
       <h3>番組の個性</h3>
       <label>
-        番組名(告知画像にも入ります)
+        番組名(MP3 のカバー画像にも入ります)
         <input
           type="text"
           value={settings.prompt.showName}
@@ -234,7 +225,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         SNS告知文(X / Instagram / メール)も生成する
       </label>
 
-      <h3>告知画像</h3>
+      <h3>見た目</h3>
       <label>
         アクセント色
         <input
@@ -244,10 +235,8 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         />
       </label>
       <p className="muted">
-        告知画像の差し色です。毎回同じ色にしておくと、並んだときに番組として見分けやすくなります。
-        {settings.imageModel
-          ? ` AIイラストの生成には ${settings.imageModel} を使います。`
-          : " このキーではAIイラストの生成は利用できません。"}
+        MP3 のカバー画像と、切り抜き動画の差し色です。毎回同じ色にしておくと、
+        並んだときに番組として見分けやすくなります。
       </p>
 
       <h3>書き出し</h3>

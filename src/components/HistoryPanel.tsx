@@ -19,8 +19,6 @@ interface Props {
   onCastEdit: (id: string, cast: string) => void;
   showName: string;
   accentColor: string;
-  apiKey?: string;
-  imageModel?: string | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -44,8 +42,6 @@ export default function HistoryPanel({
   onCastEdit,
   showName,
   accentColor,
-  apiKey,
-  imageModel,
 }: Props) {
   const [records, setRecords] = useState<EpisodeRecord[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -261,8 +257,6 @@ export default function HistoryPanel({
                 fileName={r.fileName.replace(/\.wav$/i, ".mp3")}
                 showName={showName}
                 accentColor={accentColor}
-                apiKey={apiKey}
-                imageModel={imageModel}
                 transcript={r.transcript}
                 onEdit={(patch) => {
                   onEditMeta(r.id, patch);

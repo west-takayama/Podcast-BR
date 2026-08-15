@@ -14,15 +14,13 @@ import {
   isPreviewModel,
   listModels,
   pickDefaultModel,
-  pickImageModel,
   snapChapters,
   transcriptToText,
 } from "../src/lib/gemini";
 import { PauseDetector } from "../src/lib/audio/dsp";
 import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
-import { wrapJapanese, PRESETS } from "../src/lib/image";
+import { wrapJapanese } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
-import { buildImagePrompt } from "../src/lib/imagePrompt";
 import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/clip";
 import { decimationFactor } from "../src/lib/audio/mp3";
 import { buildInsights, digestForPrompt, normalizeWord } from "../src/lib/insights";
@@ -279,9 +277,7 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("プレビュー版は安定版より後", ids.indexOf("gemini-3.5-flash-preview-05-20") > ids.indexOf("gemini-3.5-flash"));
     check("古い世代は後ろ", ids.indexOf("gemini-2.5-flash") > ids.indexOf("gemini-3.5-flash"));
     check("空の一覧でも落ちない", pickDefaultModel([]) === null);
-    check("テキスト用に画像モデルを選ばない", !pickDefaultModel(models)!.includes("image"));
-    check("イラストは無料枠のある flash 系", pickImageModel(models) === "gemini-3.1-flash-image", String(pickImageModel(models)));
-    check("画像モデルが無ければ null", pickImageModel(models.filter((m) => !m.image)) === null);
+    check("画像生成のモデルは一覧に出さない", !ids.some((i) => i.includes("image")), ids.join(", "));
 
     // 実際に起きた不具合: 新しい世代が試験版しか出ていない時期に、
     // 世代の新しさ(+100)が試験版の減点(-60)を上回り、
@@ -333,7 +329,6 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const withBreaks = wrapJapanese(ctx, "一行目\n二行目", 20);
     check("改行を尊重する", withBreaks.length === 2 && withBreaks[0] === "一行目");
     check("空文字でも落ちない", wrapJapanese(ctx, "", 10).length === 0);
-    check("プリセットは3種", PRESETS.length === 3 && PRESETS.some((p) => p.width === 3000));
   }
 
   console.log("\n[13] 話の切り替わり検出");
@@ -437,7 +432,6 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const p = buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "", showContext: "テスト番組", bannedWords: "超, 神回", fixedFooter: "お便りはこちら" });
     check("背景情報が入る", p.includes("テスト番組"));
     check("番組名が入る", buildPrompt({ ...DEFAULT_PROMPT_CONFIG, showName: "ブリッジラジオ" }).includes("番組名: ブリッジラジオ"));
-    check("imageQuote がスキーマに入る", p.includes("imageQuote"));
     check("禁止語が入る", p.includes("超 / 神回"));
     check("定型文が入る", p.includes("お便りはこちら"));
     check("SNS項目が入る", p.includes('"social"'));
@@ -542,52 +536,6 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
 
     // 無音を渡しても落ちない
     check("空の入力で落ちない", new Diagnostics().result(SR, -Infinity, 0, 0).length === 0);
-  }
-
-  console.log("\n[19] 画像生成の注文文");
-  {
-    const scene = buildImagePrompt({
-      headline: "ねぎ塩を超える最強のコラボを考える〜ジャガイモは全てを壊す〜 #64",
-      showName: "ブリッジラジオ",
-      subject: "ねぎ塩に勝てる食材の組み合わせを出し合う回",
-      accent: "#ffd400",
-      shape: "square",
-      speakers: "たかやま, にし",
-    });
-    check("実写の写真だと伝える", scene.includes("実写の写真として仕上げて"));
-    check("タイトルを渡す", scene.includes("「ねぎ塩を超える最強のコラボを考える〜ジャガイモは全てを壊す〜 #64」"));
-    check("話している内容を渡す", scene.includes("ねぎ塩に勝てる食材の組み合わせを出し合う回"));
-    check("場面に翻訳させる", scene.includes("実際に交わされている場面"));
-    check("記号的な絵を避けさせる", scene.includes("記号的な比喩やアイコンではなく"));
-    check("話者の人数を反映する", scene.includes("日本人 2人"), "たかやま/にし → 2人");
-    check("撮影の指定を入れる", scene.includes("50mm") && scene.includes("f/2.0"));
-    check("差し色を無理強いしない", scene.includes("無理に入れないでください"));
-    check("題名は画像に載せさせない", scene.includes("題名やロゴを画像に載せないでください"));
-    check("場面の中の文字は許す", scene.includes("ホワイトボードの手書き"));
-    check("文字を置く余地を残させる", scene.includes("あとから文字を重ねます"));
-    check("正方形の用途を伝える", scene.includes("正方形(1:1)"));
-
-    const solo = buildImagePrompt({
-      headline: "ひとりで話した回", showName: "", accent: "#ffd400", shape: "story", speakers: "たかやま",
-    });
-    check("1人なら1人と伝える", solo.includes("日本人 1人"));
-    check("話者未設定なら2人にする",
-      buildImagePrompt({ headline: "x", showName: "", accent: "#ffd400", shape: "square" }).includes("日本人 2人"));
-    check("縦長では9:16を指定する", solo.includes("9:16"));
-    check("縦長では下半分を空けさせる", solo.includes("下半分"));
-    check("話題が無ければ触れない", !solo.includes("話している内容"));
-
-    // 題名まで描かせるモード
-    const poster = buildImagePrompt({
-      headline: "AIに任せられる仕事", showName: "ブリッジラジオ",
-      accent: "#ffd400", shape: "square", mode: "poster",
-    });
-    check("題名を鍵括弧で囲んで渡す", poster.includes("「AIに任せられる仕事」"));
-    check("一字一句そのままと指示する", poster.includes("一字一句"));
-    check("指定外の文字を足させない", poster.includes("透かし"));
-    check("番組名を小さく入れる", poster.includes("小さく: 「ブリッジラジオ」"));
-    check("ポスターでも実写を保つ", poster.includes("実写の写真として仕上げて"));
-    check("ポスターでは余地の指示を出さない", !poster.includes("あとから文字を重ねます"));
   }
 
   console.log("\n[20] 切り抜きの字幕");

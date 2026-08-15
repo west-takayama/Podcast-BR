@@ -1,5 +1,5 @@
 import CopyButton from "./CopyButton";
-import ImageCards from "./ImageCards";
+import EpisodePhoto from "./EpisodePhoto";
 import ClipStudio from "./ClipStudio";
 import { useEffect, useState } from "react";
 import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
@@ -15,10 +15,7 @@ interface Props {
   audioUrl?: string;
   fileName?: string;
   showName: string;
-  speakers?: string;
   accentColor: string;
-  apiKey?: string;
-  imageModel?: string | null;
   audioReport?: AudioReport | null;
   chapterNote?: string;
   transcript?: TranscriptSegment[] | null;
@@ -371,10 +368,7 @@ export default function ResultView({
   audioUrl,
   fileName,
   showName,
-  speakers,
   accentColor,
-  apiKey,
-  imageModel,
   audioReport,
   chapterNote,
   transcript,
@@ -387,8 +381,8 @@ export default function ResultView({
   cast = "",
   onCastChange,
 }: Props) {
-  // 取り込んだ写真は告知画像・切り抜き動画・MP3のカバーで共有する。
-  // ここで持たないと、同じ写真を3回読み込ませることになる
+  // 取り込んだ写真は切り抜き動画と MP3 のカバーで共有する。
+  // ここで持たないと、同じ写真を2回読み込ませることになる
   const [background, setBackground] = useState<ImageBitmap | null>(null);
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
   // 出演者は説明文の頭に必ず置く。再生を押す前に見えるのはここだけなので、
@@ -514,16 +508,8 @@ export default function ResultView({
         onMake={onMakeTranscript}
       />
 
-      <ImageCards
-        quote={meta.imageQuote || chosenTitle || meta.titles[0]}
-        title={chosenTitle || meta.titles[0]}
-        showName={showName}
-        speakers={speakers}
-        accent={accentColor}
-        apiKey={apiKey}
-        imageModel={imageModel}
-        subject={[meta.transcriptSummary, meta.keywords.join("、")].filter(Boolean).join(" / ")}
-        onBackground={(b, restored) => {
+      <EpisodePhoto
+        onChange={(b, restored) => {
           setBackground(b);
           // 読み戻しただけなら MP3 は触らない。開いた瞬間に付け直しが走ってしまう
           if (!restored) onBackgroundChange?.(b);

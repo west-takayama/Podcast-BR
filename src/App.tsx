@@ -229,12 +229,10 @@ export default function App() {
   ): Promise<Blob> => {
     try {
       const artwork = await renderArtworkJpeg({
-        quote: generated.imageQuote || title,
         title,
         showName: settings.prompt.showName,
         accent: settings.accentColor,
         background: background ?? undefined,
-        template: "band",
       });
       const tag = buildId3Tag({
         title,
@@ -252,10 +250,10 @@ export default function App() {
   };
 
   /**
-   * 告知画像で取り込んだ写真を、MP3 に埋め込むカバーにも反映する。
+   * 取り込んだ写真を、MP3 に埋め込むカバーにも反映する。
    *
    * タグ付けは生成直後に走るため、その時点ではまだ写真が無い。
-   * 告知画像だけ立派で、配信側のカバーは単色のまま、という状態を避ける。
+   * 写真を入れたのに配信側のカバーが単色のまま、という状態を避ける。
    */
   const applyArtwork = async (bitmap: ImageBitmap | null) => {
     const converted = convertedRef.current;
@@ -786,8 +784,6 @@ export default function App() {
           }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
-          apiKey={settings.apiKey}
-          imageModel={settings.imageModel || null}
         />
       )}
 
@@ -924,10 +920,7 @@ export default function App() {
                 audioUrl={mp3Url}
                 fileName={outputName}
                 showName={settings.prompt.showName}
-                speakers={settings.prompt.speakers}
                 accentColor={settings.accentColor}
-                apiKey={settings.apiKey}
-                imageModel={settings.imageModel || null}
                 audioReport={audioReport}
                 chapterNote={chapterNote}
                 transcript={transcript}

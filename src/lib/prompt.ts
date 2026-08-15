@@ -20,7 +20,7 @@ export const TITLE_STYLE_LABELS: Record<TitleStyle, string> = {
 };
 
 export interface PromptConfig {
-  /** 番組名。プロンプトと告知画像の両方で使う。 */
+  /** 番組名。プロンプトと MP3 のカバー画像の両方で使う。 */
   showName: string;
   showContext: string;
   /** 話者の呼び名(カンマ区切り)。書き起こしで話者を具体名にするために使う。 */
@@ -70,7 +70,6 @@ function schemaBlock(generateSocial: boolean): string {
   "hashtags": string[],   // "#"付きのハッシュタグ5つ
   "transcriptSummary": string,  // 200文字以内の要約
   "keywords": string[],   // 検索されうるキーワード5〜8語(#なし)
-  "imageQuote": string,   // 告知画像に載せる一言。30文字以内
   "clips": [{ "start": string, "end": string, "hook": string, "why": string }]  // 切り抜き候補3つ${social}
 }`;
 }
@@ -168,11 +167,6 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
   候補: ${context.pauses.map(formatTimecode).join(", ")}`
       : ""
   }
-
-## imageQuote
-- SNSの告知画像に大きく載せる一言。この回で最も引きの強い言葉を選ぶ。
-- 全角30文字以内。体言止めか短い問いかけが望ましい。
-- エピソード内で実際に語られた言葉を優先する。
 
 ## clips(切り抜き候補)
 - 縦型ショート動画(TikTok / Reels / YouTube Shorts)にする箇所を3つ選ぶ。

@@ -1,52 +1,20 @@
-// SNS告知画像の生成。端末内の Canvas で描くため、API 費用も通信も発生しない。
+// MP3 に埋め込むカバー画像を端末内の Canvas で描く。
+// 配信アプリの一覧に出るのはこの絵なので、番組名と回のタイトルを載せる。
 //
-// AI に絵を描かせる方式は採らなかった。ポッドキャストの告知で効くのは
-// 「何が語られたか」が一目で伝わる言葉であり、回ごとに絵柄が変わると
-// 番組としての見た目の統一感が失われるため。
+// もとは SNS 告知画像も同じ仕組みで作っていたが、使われないので外した。
+// 残っているのはカバー画像に要るぶんだけ。
 
-export type Preset = "square" | "story" | "cover";
-
-export interface PresetSpec {
-  id: Preset;
-  label: string;
+interface Size {
   width: number;
   height: number;
-  note: string;
 }
-
-export const PRESETS: PresetSpec[] = [
-  { id: "square", label: "正方形", width: 1080, height: 1080, note: "Instagram フィード投稿" },
-  { id: "story", label: "ストーリー", width: 1080, height: 1920, note: "ストーリーズ / リール" },
-  { id: "cover", label: "カバー画像", width: 3000, height: 3000, note: "Spotify エピソード画像" },
-];
-
-/**
- * 文字の載せ方。素材(背景画像)の見せ方と、文字の読みやすさの折り合いが
- * 回ごとに違うため、選べるようにしている。
- */
-export type Template = "band" | "full" | "minimal";
-
-export interface TemplateSpec {
-  id: Template;
-  label: string;
-  note: string;
-}
-
-export const TEMPLATES: TemplateSpec[] = [
-  { id: "band", label: "帯", note: "下に帯を敷いて文字を置く。絵を大きく見せたいとき" },
-  { id: "full", label: "全面", note: "画面いっぱいに文字。言葉を主役にしたいとき" },
-  { id: "minimal", label: "余白", note: "絵をほぼそのまま見せ、下に小さく添える" },
-];
 
 export interface CardContent {
-  quote: string; // 大きく載せる一言
   title: string;
   showName: string;
   accent: string; // #RRGGBB
-  /** 背景に敷く AI イラスト。無ければ単色の背景になる。 */
+  /** 背景に敷く写真。無ければ単色の背景になる。 */
   background?: CanvasImageSource & { width: number; height: number };
-  /** 文字の載せ方。既定は「帯」。 */
-  template?: Template;
 }
 
 const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif`;
@@ -196,7 +164,8 @@ function drawHeadline(
   return cursor;
 }
 
-export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasElement {
+/** カバー画像を描く。下に帯を敷き、その中で番組名とタイトルを読ませる。 */
+function renderCard(spec: Size, content: CardContent): HTMLCanvasElement {
   const { width: W, height: H } = spec;
   const canvas = document.createElement("canvas");
   canvas.width = W;
@@ -209,18 +178,15 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
   const accent = `rgb(${r}, ${g}, ${b})`;
   const pad = W * 0.078;
   const inner = W - pad * 2;
-  const template = content.template ?? "band";
-  const quote = content.quote || content.title;
+  const quote = content.title;
 
-  // ストーリーは上下に SNS の UI が重なるため、その内側に収める
-  const isStory = H / W > 1.5;
-  const safeBottom = isStory ? H * 0.14 : pad;
+  const safeBottom = pad;
 
   drawBackground(ctx, W, H, content, rgb);
   ctx.textBaseline = "top";
 
-  if (template === "band") {
-    // --- 帯: 絵を大きく見せ、下に敷いた面の中だけで文字を読ませる ---
+  // 絵を大きく見せ、下に敷いた面の中だけで文字を読ませる
+  {
     const showSize = W * 0.032;
     const head = fitText(ctx, quote, inner, W * 0.078, 3);
     const headBlock = head.lines.length * head.size * 1.3;
@@ -249,103 +215,12 @@ export function renderCard(spec: PresetSpec, content: CardContent): HTMLCanvasEl
     y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
     if (content.showName) y += W * 0.03;
     drawHeadline(ctx, head.lines, pad, y, head.size);
-  } else if (template === "full") {
-    // --- 全面: 言葉が主役。絵は質感として残す ---
-    const scrim = ctx.createLinearGradient(0, 0, 0, H);
-    scrim.addColorStop(0, "rgba(8, 8, 8, 0.62)");
-    scrim.addColorStop(0.5, "rgba(8, 8, 8, 0.74)");
-    scrim.addColorStop(1, "rgba(8, 8, 8, 0.93)");
-    ctx.fillStyle = scrim;
-    ctx.fillRect(0, 0, W, H);
-
-    const showSize = W * 0.034;
-    const head = fitText(ctx, quote, inner, W * 0.098, 4);
-    const headBlock = head.lines.length * head.size * 1.3;
-    const rule = Math.max(5, W * 0.009);
-    const titleShown = content.title && content.title !== quote;
-    const t = titleShown ? fitText(ctx, content.title, inner, W * 0.04, 2, "500") : null;
-    const titleBlock = t ? W * 0.055 + t.lines.length * t.size * 1.5 : 0;
-    const total =
-      (content.showName ? showSize * 1.05 + W * 0.045 : 0) + headBlock + titleBlock;
-
-    // 上下の余白を釣り合わせる。文字量が変わっても重心がぶれない
-    let y = Math.max(pad * 1.2, (H - total) / 2);
-    y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
-    if (content.showName) y += W * 0.045;
-    y = drawHeadline(ctx, head.lines, pad, y, head.size);
-    if (t) {
-      y += W * 0.03;
-      ctx.fillStyle = accent;
-      ctx.fillRect(pad, y, W * 0.13, rule);
-      y += W * 0.025 + rule;
-      setTracking(ctx, 0);
-      ctx.font = `500 ${t.size}px ${FONT_STACK}`;
-      ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
-      for (const line of t.lines) {
-        ctx.fillText(line, pad, y);
-        y += t.size * 1.5;
-      }
-    }
-  } else {
-    // --- 余白: 絵をほぼそのまま見せ、下端に最小限だけ添える ---
-    const showSize = W * 0.028;
-    const head = fitText(ctx, quote, inner, W * 0.064, 3, "700");
-    const headBlock = head.lines.length * head.size * 1.3;
-    const barHeight = W * 0.06 + (content.showName ? showSize * 1.05 + W * 0.022 : 0) + headBlock + W * 0.06;
-    const barTop = H - safeBottom - barHeight;
-
-    const fade = ctx.createLinearGradient(0, barTop - H * 0.16, 0, barTop + barHeight);
-    fade.addColorStop(0, "rgba(8, 8, 8, 0)");
-    fade.addColorStop(1, "rgba(8, 8, 8, 0.82)");
-    ctx.fillStyle = fade;
-    ctx.fillRect(0, barTop - H * 0.16, W, barHeight + H * 0.16);
-
-    let y = barTop + W * 0.06;
-    y = drawShowName(ctx, content.showName, pad, y, showSize, accent);
-    if (content.showName) y += W * 0.022;
-    setTracking(ctx, 0);
-    ctx.font = `700 ${head.size}px ${FONT_STACK}`;
-    ctx.fillStyle = "#ffffff";
-    for (const line of head.lines) {
-      ctx.fillText(line, pad, y);
-      y += head.size * 1.3;
-    }
-    // 下端のアクセント線。番組として並んだときの目印になる
-    ctx.fillStyle = accent;
-    ctx.fillRect(0, H - Math.max(6, W * 0.011), W, Math.max(6, W * 0.011));
   }
 
   return canvas;
 }
 
-/**
- * 取り込んだ画像を、文字を重ねずにプリセットの寸法へ収める。
- *
- * ChatGPT などで題名まで描いてもらった画像を使う場合、こちらで文字を重ねると
- * 二重になる。縦横比が違うプリセットに合わせる切り出しだけを行う。
- */
-export function renderPlainImage(
-  spec: PresetSpec,
-  image: CanvasImageSource & { width: number; height: number },
-): HTMLCanvasElement {
-  const { width: W, height: H } = spec;
-  const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("画像を描画できませんでした");
-
-  ctx.fillStyle = "#0a0a0a";
-  ctx.fillRect(0, 0, W, H);
-  // 短辺に合わせて拡大し、はみ出す分を均等に切る(歪ませない)
-  const scale = Math.max(W / image.width, H / image.height);
-  const dw = image.width * scale;
-  const dh = image.height * scale;
-  ctx.drawImage(image, (W - dw) / 2, (H - dh) / 2, dw, dh);
-  return canvas;
-}
-
-export function canvasToBlob(
+function canvasToBlob(
   canvas: HTMLCanvasElement,
   type = "image/png",
   quality?: number,
@@ -365,13 +240,10 @@ export function canvasToBlob(
  * 1400px の JPEG にする(Spotify の推奨サイズでもある)。
  */
 export async function renderArtworkJpeg(content: CardContent): Promise<Uint8Array> {
-  const spec: PresetSpec = {
-    id: "cover",
-    label: "アートワーク",
-    width: 1400,
-    height: 1400,
-    note: "MP3 埋め込み用",
-  };
-  const blob = await canvasToBlob(renderCard(spec, content), "image/jpeg", 0.85);
+  const blob = await canvasToBlob(
+    renderCard({ width: 1400, height: 1400 }, content),
+    "image/jpeg",
+    0.85,
+  );
   return new Uint8Array(await blob.arrayBuffer());
 }

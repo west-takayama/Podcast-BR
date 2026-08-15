@@ -16,8 +16,6 @@ export interface Settings {
   bitrate: number;
   /** 告知画像のアクセント色。番組の見た目を揃えるために保存する。 */
   accentColor: string;
-  /** イラスト生成に使うモデル。一覧から自動で選ぶ。 */
-  imageModel: string;
   /**
    * 前回入力した出演者。次の回の初期値にするためだけに持つ。
    * 顔ぶれは回ごとに変わるので、設定ではなく「この前はこうだった」の控え。
@@ -33,7 +31,6 @@ export const DEFAULT_SETTINGS: Settings = {
   mono: true,
   bitrate: 96,
   accentColor: "#ffd400",
-  imageModel: "",
   lastCast: "",
 };
 

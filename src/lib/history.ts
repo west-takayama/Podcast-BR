@@ -13,7 +13,7 @@ const PENDING_STORE = "pending";
 const PENDING_KEY = "current";
 /**
  * 読み込んだ写真を置く場所。
- * 告知画像・MP3のカバー・縦型ショートの背景で共有する素材なので、
+ * MP3のカバーと縦型ショートの背景で共有する素材なので、
  * タブを切り替えたり開き直したりしても残るようにする。
  */
 const ASSET_STORE = "assets";
