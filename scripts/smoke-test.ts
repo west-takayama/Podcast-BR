@@ -43,7 +43,7 @@ import { LoudnessMeter } from "../src/lib/audio/loudness";
 import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
 import { LowPassFilter } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
-import { __testNormalizeClips } from "../src/lib/gemini";
+import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/lib/gemini";
 
 const SR = 44100;
 let failures = 0;
@@ -1358,6 +1358,57 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[27] うまくいかなかったときの案内");
+  {
+    const say = (status: number, body: string) => {
+      try {
+        __testThrowForStatus(status, body, "生成");
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+      return "(例外が投げられなかった)";
+    };
+
+    // 1分あたりの上限と1日あたりの上限は別物。
+    // 「1分待って」は1日の枠を使い切った人には通用しない
+    const perMinute = say(429, JSON.stringify({
+      error: { message: "Quota exceeded for quota metric 'Generate Content API requests per minute'" },
+    }));
+    const perDay = say(429, JSON.stringify({
+      error: { message: "You exceeded your current quota: generate_requests_per_model_per_day, limit: 50" },
+    }));
+    check("1分の上限は待つよう伝える", perMinute.includes("1分"), perMinute.slice(0, 40));
+    check("1日の上限は待っても戻らないと伝える",
+      perDay.includes("1日") && !perDay.includes("1分ほど待って"), perDay.slice(0, 50));
+    check("1日の上限では打つ手を出す", perDay.includes("モデル"));
+
+    // 403 を「音声の保持期限切れ」と決めつけない。
+    // キーの制限で 403 になる人が、音声を上げ直し続けることになる
+    const fileGone = say(403, JSON.stringify({
+      error: { message: "You do not have permission to access the File files/abc123 or it may not exist." },
+    }));
+    const keyBlocked = say(403, JSON.stringify({
+      error: { message: "Requests from referer <empty> are blocked." },
+    }));
+    check("音声の話なら保持期限を案内する", fileGone.includes("保持期限"), fileGone.slice(0, 40));
+    check("キーの話を保持期限と言わない",
+      !keyBlocked.includes("保持期限") && keyBlocked.includes("APIキー"), keyBlocked.slice(0, 50));
+    check("キーの話では Google の説明を渡す",
+      keyBlocked.includes("referer"), keyBlocked.slice(-60));
+
+    // 待てば直る類いは、番号で伝え分ける
+    const busy = say(503, JSON.stringify({ error: { message: "overloaded" } }));
+    const internal = say(500, JSON.stringify({ error: { message: "internal" } }));
+    check("503 は混雑と伝える", busy.includes("混雑") && busy.includes("503"));
+    check("500 はモデルを替える案内", internal.includes("モデル") && internal.includes("500"));
+
+    // 説明の取り出し
+    check("JSON から説明だけ取り出す",
+      reasonFrom(JSON.stringify({ error: { message: "こういう理由です" } })) === "こういう理由です");
+    check("JSON でなくても落ちない", reasonFrom("<html>502 Bad Gateway</html>").includes("502"));
+    check("長すぎる説明は切り詰める", reasonFrom(JSON.stringify({ error: { message: "あ".repeat(500) } })).length <= 200);
   }
 
   console.log("\n[22] 切り抜き候補の受け取り(AIの返し方の揺れ)");

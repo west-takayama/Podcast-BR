@@ -411,6 +411,8 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
 
 /** 検証用。AI の返し方の揺れを吸収できているかをテストから確かめる。 */
 export const __testNormalizeClips = normalizeClips;
+/** 応答の番号と本文から出す文言。検証のために公開する。 */
+export const __testThrowForStatus = throwForStatus;
 
 /** 生成物の欠けを埋める。項目が1つ欠けただけで全体を失敗させない。 */
 function normalizeMeta(raw: unknown): EpisodeMeta {
@@ -787,15 +789,48 @@ async function callWithModelFallback(
   return res;
 }
 
+/** 応答から Google 自身の説明だけを取り出す。JSON でないこともある。 */
+export function reasonFrom(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown } };
+    const message = parsed?.error?.message;
+    if (typeof message === "string" && message.trim()) return message.trim().slice(0, 200);
+  } catch {
+    // JSON でなければ本文をそのまま短く見せる
+  }
+  return body.trim().slice(0, 200);
+}
+
 function throwForStatus(status: number, body: string, what: string): never {
   if (status === 400 && body.includes("API_KEY_INVALID")) {
     throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
   }
   if (status === 429) {
-    throw new Error("無料枠のレート制限に達しました。1分ほど待って再試行してください。");
+    // 1分あたりの上限と1日あたりの上限は別物。
+    // 「1分待って」は前者にしか効かない。1日の枠を使い切った人が
+    // 1分おきに押し続けることになるので、どちらかを見て伝え分ける
+    const daily = /per[\s_-]?day|\bdaily\b/i.test(body);
+    throw new Error(
+      daily
+        ? "無料枠の1日あたりの上限に達しました。しばらく押し直しても戻りません。" +
+          "設定画面で別のモデルに替えると、そのモデルぶんの枠を使えます。" +
+          `変換済みMP3はそのまま使えます。(${reasonFrom(body)})`
+        : "無料枠の1分あたりの上限に達しました。1分ほど待って再試行してください。",
+    );
   }
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
-    throw new Error("音声の保持期限(48時間)が切れている可能性があります。もう一度アップロードしてください。");
+    // 「音声の保持期限切れ」と決めつけていたが、403 はキー側の制限でも出る。
+    // 決めつけると、キーの設定を直せば済む人が音声を上げ直し続けることになる。
+    // 音声の話をしているときだけそう言い、それ以外は Google の説明をそのまま渡す
+    const aboutFile = /\bfiles?\//i.test(body) || /\bFile\b/.test(body);
+    throw new Error(
+      aboutFile
+        ? "送った音声にアクセスできませんでした。保持期限(48時間)が切れている可能性があります。" +
+          "「生成だけやり直す」を押すと送り直します。"
+        : `APIキーが許可されていません (${status})。キーに制限(HTTPリファラーやIPアドレスの指定)が` +
+          "掛かっていないか、Google AI Studio で確認してください。作り直すのが早いこともあります。" +
+          `Google の説明: ${reasonFrom(body)}`,
+    );
   }
   // ここに来るのは自動再試行を使い切った場合。
   // どれも「待てば直るかもしれない」応答だが、中身は同じではない。
