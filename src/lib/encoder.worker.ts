@@ -27,6 +27,7 @@ import {
   NoiseReducer,
   PauseDetector,
   SilenceTrimmer,
+  SpeechLeveler,
   applyGain,
   type DspOptions,
 } from "./audio/dsp";
@@ -315,11 +316,14 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     const diagnostics = new Diagnostics();
     const rawMeter = new LoudnessMeter(info.sampleRate, info.numChannels);
     const floorHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
+    // 声の大きさの移り変わりも同じ読みで溜める。読み直しは増やさない
+    const leveler = dsp.levelSpeech ? new SpeechLeveler(info.sampleRate) : null;
     await forEachBlock(file, info, (channels, length, fraction) => {
       diagnostics.push(channels, length);
       rawMeter.push(channels, length);
       if (floorHp) floorHp.process(channels, length);
       analyzer.push(channels, length);
+      leveler?.push(channels, length);
       post("analyze", fraction / 3);
     });
     const { noiseFloor, voiceRms } = analyzer.result();
@@ -331,6 +335,11 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       noiseFloor,
       voiceRms,
     );
+    // 声の大きさを揃える曲線。ここから先のパスは「揃えたあと」を見る。
+    // 揃える前で測ると、目標のラウドネスを外す
+    const curve = leveler ? leveler.build(noiseFloor) : null;
+    const levelRange = curve && !curve.isEmpty ? curve.rangeDb : null;
+
     // 2人別マイクの独立処理では、チャンネルごとのノイズフロアを使う
     const perChannel = dsp.perChannelNoise && info.numChannels > 1;
     const floors: number | number[] = perChannel ? analyzer.channelNoiseFloors() : noiseFloor;
@@ -345,9 +354,11 @@ self.onmessage = async (e: MessageEvent<Request>) => {
     const meter = new LoudnessMeter(info.sampleRate, outChannels);
     const measureHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
     const measureNr = makeNr();
+    curve?.reset();
     await forEachBlock(file, info, (channels, length, fraction) => {
       if (measureHp) measureHp.process(channels, length);
       if (measureNr) measureNr.process(channels, length);
+      curve?.process(channels, length);
       // ラウドネスは配信されるチャンネル構成で測る
       meter.push(
         outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels,
@@ -378,9 +389,11 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       const trialHp = dsp.highPass ? new HighPassFilter(info.sampleRate, info.numChannels) : null;
       const trialNr = makeNr();
 
+      curve?.reset();
       await forEachBlock(file, info, (channels, length, fraction) => {
         if (trialHp) trialHp.process(channels, length);
         if (trialNr) trialNr.process(channels, length);
+        curve?.process(channels, length);
         const shaped =
           outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels;
         applyGain(shaped, length, gain);
@@ -465,9 +478,12 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       await Promise.all(pending);
     };
 
+    curve?.reset();
     await forEachBlock(file, info, async (channels, length, fraction) => {
       if (hp) hp.process(channels, length);
       if (nr) nr.process(channels, length);
+      // 無音カットより前に掛ける。解析と同じ時間軸でないと位置がずれる
+      curve?.process(channels, length);
 
       if (trimmer) trimmer.process(channels, length, collect);
       else collect(channels, length);
@@ -514,6 +530,8 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         correctionDb,
         peakDbfs: outMeter.peakDbfs(),
         limitedSamples: limiter.reducedSamples,
+        // 声の大きさをどれだけ動かしたか。効いたかどうかを見せる
+        levelRange,
         // チャプター時刻を吸着させるための候補位置(秒)
         pauses: pauses.result(),
         // 収録そのものの問題。次回の設定で直せるものが多いので伝える

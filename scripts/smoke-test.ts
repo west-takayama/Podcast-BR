@@ -39,7 +39,7 @@ import {
 import type { ToneCurve } from "../src/lib/audio/tone";
 import { LoudnessMeter } from "../src/lib/audio/loudness";
 import type { BlockHandler, BlockReader } from "../src/lib/audio/source";
-import { LowPassFilter } from "../src/lib/audio/dsp";
+import { LowPassFilter, SpeechLeveler, LEVELER_MAX_DB } from "../src/lib/audio/dsp";
 import { parseTimestamp } from "../src/lib/id3";
 import { __testNormalizeClips, __testThrowForStatus, reasonFrom } from "../src/lib/gemini";
 import { castLine, parseCast, withCast } from "../src/lib/cast";
@@ -1311,6 +1311,107 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       low ? low.db.map((v) => v.toFixed(0)).join(",") : "null");
     check("測れない帯域は持ち上げない",
       low !== null && low.snrDb[6] === 0 && low.db[6] === 0);
+  }
+
+  console.log("\n[32] 声の大きさを揃える(1本にまとまった録音)");
+  {
+    const LSR = 48000;
+    /** 交互に喋る1本の音声。gapDb ぶん B のほうが小さい */
+    const twoVoices = (gapDb: number, seconds = 36) => {
+      const n = LSR * seconds;
+      const out = new Float32Array(n);
+      const quiet = Math.pow(10, -gapDb / 20);
+      for (let i = 0; i < n; i++) {
+        const t = i / LSR;
+        const isB = Math.floor(t / 3) % 2 === 1;
+        const inGap = t % 3 > 2.65;
+        out[i] = inGap
+          ? 0.0003 * (Math.random() - 0.5)
+          : 0.3 * Math.sin(2 * Math.PI * 160 * t) * (isB ? quiet : 1);
+      }
+      return out;
+    };
+    const runLeveler = (buf: Float32Array, floorRms = 0.0002) => {
+      const meter = new SpeechLeveler(LSR);
+      const block = 4800;
+      for (let at = 0; at < buf.length; at += block) {
+        const n = Math.min(block, buf.length - at);
+        meter.push([buf.subarray(at, at + n)], n);
+      }
+      const curve = meter.build(floorRms);
+      const out = Float32Array.from(buf);
+      for (let at = 0; at < out.length; at += block) {
+        const n = Math.min(block, out.length - at);
+        curve.process([out.subarray(at, at + n)], n);
+      }
+      return { out, curve };
+    };
+    const rmsDbOf = (buf: Float32Array, from: number, to: number) => {
+      let s = 0;
+      let n = 0;
+      for (let i = Math.floor(from * LSR); i < Math.floor(to * LSR) && i < buf.length; i++) {
+        s += buf[i] * buf[i];
+        n++;
+      }
+      return 10 * Math.log10(s / Math.max(1, n) + 1e-20);
+    };
+    const speakerGap = (buf: Float32Array) => {
+      const a = [0, 6, 12, 18].map((k) => rmsDbOf(buf, k + 0.4, k + 2.5));
+      const b = [3, 9, 15, 21].map((k) => rmsDbOf(buf, k + 0.4, k + 2.5));
+      const avg = (x: number[]) => x.reduce((p, c) => p + c, 0) / x.length;
+      return avg(a) - avg(b);
+    };
+
+    const src10 = twoVoices(10);
+    const before10 = speakerGap(src10);
+    const { out: after10 } = runLeveler(src10);
+    check("2人の差が縮む", Math.abs(speakerGap(after10)) < 1.5,
+      `${before10.toFixed(1)}dB → ${speakerGap(after10).toFixed(1)}dB`);
+
+    // 上限を超える差でも、できるところまで詰める
+    const src24 = twoVoices(24);
+    const { out: after24 } = runLeveler(src24);
+    check("上限を超えても縮む",
+      Math.abs(speakerGap(after24)) < Math.abs(speakerGap(src24)) / 2,
+      `${speakerGap(src24).toFixed(1)}dB → ${speakerGap(after24).toFixed(1)}dB`);
+
+    // もともと揃っている音を壊さない
+    const flat = twoVoices(0);
+    const { out: afterFlat, curve: flatCurve } = runLeveler(flat);
+    const moved = Math.abs(rmsDbOf(afterFlat, 0.4, 2.5) - rmsDbOf(flat, 0.4, 2.5));
+    check("揃っている音は動かさない", moved < 1.5, `${moved.toFixed(2)}dB`);
+    check("そのときの増減幅も小さい",
+      flatCurve.rangeDb.max - flatCurve.rangeDb.min < 2,
+      `${flatCurve.rangeDb.min.toFixed(1)}〜${flatCurve.rangeDb.max.toFixed(1)}dB`);
+
+    // 沈黙で持ち上げない。環境音だけ大きくなるのがいちばん困る
+    const gapBefore = rmsDbOf(src10, 2.7, 2.95);
+    const gapAfter = rmsDbOf(after10, 2.7, 2.95);
+    check("間の環境音を持ち上げない", gapAfter - gapBefore < 6,
+      `${gapBefore.toFixed(1)} → ${gapAfter.toFixed(1)}dB`);
+
+    // 短い抑揚(笑い声など)は残す。ここを潰すと平板な音になる
+    const withBurst = twoVoices(0);
+    for (let i = Math.floor(1.0 * LSR); i < Math.floor(1.4 * LSR); i++) withBurst[i] *= 3;
+    const { out: burstOut } = runLeveler(withBurst);
+    const burstBefore = rmsDbOf(withBurst, 1.05, 1.35) - rmsDbOf(withBurst, 0.4, 0.9);
+    const burstAfter = rmsDbOf(burstOut, 1.05, 1.35) - rmsDbOf(burstOut, 0.4, 0.9);
+    check("短い抑揚は潰さない", burstAfter > burstBefore - 2,
+      `盛り上がり ${burstBefore.toFixed(1)}dB → ${burstAfter.toFixed(1)}dB`);
+
+    // 曲線が滑らかであること。段差があると「カッ」と鳴る
+    const { curve: c10 } = runLeveler(src10);
+    check("上限を守る",
+      c10.rangeDb.max <= LEVELER_MAX_DB + 0.01 && c10.rangeDb.min >= -LEVELER_MAX_DB - 0.01,
+      `${c10.rangeDb.min.toFixed(1)}〜${c10.rangeDb.max.toFixed(1)}dB`);
+
+    // 声が見つからない素材では何もしない
+    const silence = new Float32Array(LSR * 5);
+    for (let i = 0; i < silence.length; i++) silence[i] = 0.0001 * (Math.random() - 0.5);
+    const { curve: silentCurve } = runLeveler(silence);
+    check("声が無ければ何もしない", silentCurve.isEmpty);
+    const shortBuf = new Float32Array(LSR);
+    check("短すぎても落ちない", runLeveler(shortBuf).curve.isEmpty);
   }
 
   console.log("\n[31] 次のお題(検索での裏取りと、決めたことの持ち回り)");

@@ -18,6 +18,13 @@ export interface DspOptions {
    * 定位が崩れるため、既定は無効。
    */
   perChannelNoise: boolean;
+  /**
+   * 声の大きさを揃えるか(レベラー)。
+   *
+   * 1本にまとまった録音で2人の声量が違うときに効く。人ごとに分かれた
+   * ファイルなら別々に測って合わせられるが、混ざった1本ではそれができない。
+   */
+  levelSpeech: boolean;
 }
 
 export const FRAME_MS = 20;
@@ -547,5 +554,196 @@ export function applyGain(channels: Float32Array[], length: number, gain: number
   if (gain === 1) return;
   for (const ch of channels) {
     for (let i = 0; i < length; i++) ch[i] *= gain;
+  }
+}
+
+/**
+ * 声の大きさを揃える(レベラー)。
+ *
+ * **1本にまとまった録音で、2人の声量が違う**場合の手当て。人ごとに
+ * ファイルが分かれていれば別々に測って合わせられるが、混ざった1本では
+ * その手が使えない。かといって話者を分離するのは無理がある。
+ *
+ * そこで**誰が喋っているかは考えず、いま鳴っている声の大きさだけを見て**
+ * 目標へ寄せる。小さい人の番では持ち上がり、大きい人の番では下がる。
+ * 同じ人でもマイクから離れた区間は持ち上がる。
+ *
+ * 生放送の機械と違って、こちらは**先に全体を見られる**。
+ * 曲線を作ってから均して掛けるので、
+ *  ・喋り出しに間に合わない(頭だけ小さい)ことがない
+ *  ・急に上下してポンピングすることがない
+ * という利点がある。
+ */
+export const LEVELER_MAX_DB = 12;
+/** 何秒ごとに大きさを見るか。細かすぎると音の抑揚まで潰す。 */
+const FRAME_SEC = 0.1;
+/**
+ * 「その辺りの声の大きさ」を見る幅(秒)。
+ * これより短い山谷(笑い声・語気)は抑揚として残り、これより長く続く
+ * 違い(話者が替わった、マイクから離れた)にだけ反応する。
+ */
+const MEDIAN_SEC = 3.0;
+/** 最後に段差を取る幅(秒)。 */
+const SMOOTH_SEC = 0.4;
+/** 環境音より何dB上なら「声」とみなすか。 */
+const SPEECH_OVER_FLOOR_DB = 10;
+
+export class SpeechLeveler {
+  private readonly framesPer: number;
+  private readonly levels: number[] = [];
+  private acc = 0;
+  private accN = 0;
+  private scratch = new Float32Array(0);
+
+  constructor(sampleRate: number) {
+    this.framesPer = Math.max(1, Math.round(sampleRate * FRAME_SEC));
+  }
+
+  /** 解析のときに呼ぶ。100ms ごとの大きさを溜めるだけ。 */
+  push(channels: Float32Array[], length: number): void {
+    if (this.scratch.length < length) this.scratch = new Float32Array(length);
+    const mono = this.scratch;
+    if (channels.length === 1) mono.set(channels[0].subarray(0, length));
+    else for (let i = 0; i < length; i++) mono[i] = (channels[0][i] + channels[1][i]) * 0.5;
+
+    let at = 0;
+    while (at < length) {
+      const take = Math.min(length - at, this.framesPer - this.accN);
+      for (let i = 0; i < take; i++) this.acc += mono[at + i] * mono[at + i];
+      this.accN += take;
+      at += take;
+      if (this.accN >= this.framesPer) {
+        this.levels.push(10 * Math.log10(this.acc / this.framesPer + 1e-20));
+        this.acc = 0;
+        this.accN = 0;
+      }
+    }
+  }
+
+  /**
+   * 掛ける倍率の曲線を作る。
+   * @param noiseFloorRms 解析で測った環境音の大きさ(**振幅**。dB ではない)。
+   *   このファイルの他の処理と単位を揃えてある。声かどうかの線引きに使う。
+   */
+  build(noiseFloorRms: number, maxDb = LEVELER_MAX_DB): GainCurve {
+    const n = this.levels.length;
+    if (n === 0) return new GainCurve(new Float32Array(0), this.framesPer);
+
+    // 振幅を dB に直してから比べる。溜めてあるのは dB のため
+    const floorDb = 20 * Math.log10(Math.max(noiseFloorRms, 1e-8));
+    const threshold = floorDb + SPEECH_OVER_FLOOR_DB;
+    const speech = this.levels.filter((v) => v > threshold);
+    if (speech.length < 4) return new GainCurve(new Float32Array(0), this.framesPer);
+
+    // 目標は「声の大きさの真ん中」。平均だと、たまたま入った大きな音に
+    // 引っ張られて全体が下がる
+    const sorted = [...speech].sort((a, b) => a - b);
+    const target = sorted[Math.floor(sorted.length / 2)];
+
+    // 各時点の「その辺りの声の大きさ」を、前後の中央値で求める。
+    //
+    // その瞬間の大きさをそのまま使うと、**笑い声や語気の強い一言まで
+    // 打ち消してしまう**(実測で 9.5dB の盛り上がりが 6.6dB に潰れた)。
+    // 中央値なら、短い山谷は多数決で無視され、話者が替わったような
+    // 続く変化にだけ反応する。
+    //
+    // 発話の切れ目にかかった半端な区間に引きずられないのも利点。
+    const half = Math.max(1, Math.round(MEDIAN_SEC / FRAME_SEC / 2));
+    const gain = new Float32Array(n);
+    const window: number[] = [];
+    let last = 0;
+    for (let i = 0; i < n; i++) {
+      window.length = 0;
+      for (let k = Math.max(0, i - half); k <= Math.min(n - 1, i + half); k++) {
+        if (this.levels[k] > threshold) window.push(this.levels[k]);
+      }
+      if (window.length > 0) {
+        window.sort((a, b) => a - b);
+        const local = window[Math.floor(window.length / 2)];
+        last = Math.max(-maxDb, Math.min(maxDb, target - local));
+      }
+      // 周りに声が無い(長い沈黙の中)なら直前の値を延ばす。
+      // 沈黙で持ち上げると環境音だけが大きくなる
+      gain[i] = last;
+    }
+    // 先頭が沈黙で始まると 0 のままになるので、最初に決まった値で埋め戻す
+    let firstDecided = -1;
+    for (let i = 0; i < n; i++) {
+      if (gain[i] !== 0) { firstDecided = i; break; }
+    }
+    if (firstDecided > 0) for (let i = 0; i < firstDecided; i++) gain[i] = gain[firstDecided];
+
+    // 最後に軽く均して段差を取る(左右対称なので位相がずれない=
+    // 喋り出しに間に合う)
+    const smoothHalf = Math.max(1, Math.round(SMOOTH_SEC / FRAME_SEC / 2));
+    const smoothed = movingAverage(movingAverage(gain, smoothHalf), smoothHalf);
+    return new GainCurve(smoothed, this.framesPer);
+  }
+}
+
+/** 前後を見て均す。窓の中心が現在なので、結果は時間的にずれない。 */
+function movingAverage(src: Float32Array, half: number): Float32Array {
+  const n = src.length;
+  const out = new Float32Array(n);
+  let sum = 0;
+  for (let i = 0; i < Math.min(n, half + 1); i++) sum += src[i];
+  let count = Math.min(n, half + 1);
+  for (let i = 0; i < n; i++) {
+    out[i] = sum / count;
+    const add = i + half + 1;
+    const drop = i - half;
+    if (add < n) { sum += src[add]; count++; }
+    if (drop >= 0) { sum -= src[drop]; count--; }
+  }
+  return out;
+}
+
+/** 作った曲線を実際に掛ける。読み進めた位置を覚えておく。 */
+export class GainCurve {
+  private at = 0;
+
+  constructor(
+    private readonly gainDb: Float32Array,
+    private readonly framesPerPoint: number,
+  ) {}
+
+  /** 曲線が空(声が見つからなかった)なら何もしない。 */
+  get isEmpty(): boolean {
+    return this.gainDb.length === 0;
+  }
+
+  /** 掛けた増減の幅(dB)。何が起きたかを伝えるために使う。 */
+  get rangeDb(): { min: number; max: number } {
+    if (this.gainDb.length === 0) return { min: 0, max: 0 };
+    let min = Infinity;
+    let max = -Infinity;
+    for (const v of this.gainDb) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return { min, max };
+  }
+
+  process(channels: Float32Array[], length: number): void {
+    if (this.gainDb.length === 0) {
+      this.at += length;
+      return;
+    }
+    const last = this.gainDb.length - 1;
+    for (let i = 0; i < length; i++) {
+      // 点と点の間は直線でつなぐ。段差が出ると「カッ」と鳴る
+      const pos = (this.at + i) / this.framesPerPoint;
+      const k = Math.min(last, Math.floor(pos));
+      const frac = Math.min(1, Math.max(0, pos - k));
+      const db = this.gainDb[k] + (this.gainDb[Math.min(last, k + 1)] - this.gainDb[k]) * frac;
+      const g = Math.pow(10, db / 20);
+      for (let c = 0; c < channels.length; c++) channels[c][i] *= g;
+    }
+    this.at += length;
+  }
+
+  /** 読み直しのたびに先頭へ戻す。 */
+  reset(): void {
+    this.at = 0;
   }
 }
