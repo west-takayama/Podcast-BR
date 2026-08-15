@@ -89,6 +89,8 @@ export interface PromptContext {
   durationSec?: number;
   /** 直近の回のタイトル。番号の付け方や切り口の重複を避けるために渡す。 */
   previousTitles?: string[];
+  /** 今回の出演者。回ごとに変わるので、設定の話者とは別に渡す。 */
+  cast?: string;
 }
 
 export function buildPrompt(config: PromptConfig, context: PromptContext = {}): string {
@@ -100,7 +102,11 @@ export function buildPrompt(config: PromptConfig, context: PromptContext = {}): 
 
   const background = [
     config.showName.trim() && `番組名: ${config.showName.trim()}`,
-    config.speakers.trim() && `話者: ${config.speakers.trim()}`,
+    // 今回の出演者が分かっていればそちらを使う。設定の「話者」はレギュラーの
+    // 控えで、ゲスト回だと実際と食い違うため、どちらを渡したかも書き分ける
+    context.cast?.trim()
+      ? `今回の出演者: ${context.cast.trim()}`
+      : config.speakers.trim() && `話者: ${config.speakers.trim()}`,
     config.glossary.trim() && `この番組でよく出る言葉(この表記を使う): ${config.glossary.trim()}`,
     config.showContext.trim(),
   ]
@@ -117,6 +123,13 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
   使われていなければ番号を付けない。
 - 過去回と同じ切り口・同じ言い回しの繰り返しを避ける。
 - ただし今回の内容が過去回と関連する場合は、その繋がりが伝わる表現にしてよい。`);
+  }
+
+  if (context.cast?.trim()) {
+    sections.push(`# 出演者の扱い
+- 今回の出演者は「${context.cast.trim()}」。書き起こしや説明文で人を指すときはこの呼び名を使う。
+- **description に「出演:」から始まる行を自分で書かないこと。** その行はアプリ側で必ず頭に付ける。
+  二重になるので、説明文の本文は内容の話から始める。`);
   }
 
   sections.push(`# 文体

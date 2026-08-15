@@ -15,6 +15,8 @@ import ResultView from "./ResultView";
 interface Props {
   onChooseTitle: (id: string, title: string) => void;
   onEditMeta: (id: string, patch: Partial<EpisodeRecord["meta"]>) => void;
+  /** 過去回の出演者をあとから足す・直す。 */
+  onCastEdit: (id: string, cast: string) => void;
   showName: string;
   accentColor: string;
   apiKey?: string;
@@ -39,6 +41,7 @@ const fmtTime = (sec: number) =>
 export default function HistoryPanel({
   onChooseTitle,
   onEditMeta,
+  onCastEdit,
   showName,
   accentColor,
   apiKey,
@@ -265,6 +268,14 @@ export default function HistoryPanel({
                   onEditMeta(r.id, patch);
                   setRecords((prev) =>
                     prev?.map((x) => (x.id === r.id ? { ...x, meta: { ...x.meta, ...patch } } : x)) ??
+                    prev,
+                  );
+                }}
+                cast={r.cast ?? ""}
+                onCastChange={(next) => {
+                  onCastEdit(r.id, next.trim());
+                  setRecords((prev) =>
+                    prev?.map((x) => (x.id === r.id ? { ...x, cast: next.trim() || undefined } : x)) ??
                     prev,
                   );
                 }}

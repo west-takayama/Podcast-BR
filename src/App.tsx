@@ -23,6 +23,7 @@ import {
   type PendingConversion,
 } from "./lib/history";
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
+import { castLine } from "./lib/cast";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
@@ -67,6 +68,9 @@ export default function App() {
   const [busyText, setBusyText] = useState("");
   const [chapterNote, setChapterNote] = useState("");
   const [previousTitles, setPreviousTitles] = useState<string[]>([]);
+  // 今回の出演者。回ごとに変わるので設定ではなく、その都度打ち込む。
+  // 前回の値を初期値にして、同じ顔ぶれが続くときに打ち直さずに済むようにする
+  const [cast, setCast] = useState<string>(() => loadSettings().lastCast ?? "");
   // 変換だけ終わって文章が未完成のまま中断された回。開き直したときに続けられる。
   const [pending, setPending] = useState<PendingConversion | null>(null);
   const [pendingUrl, setPendingUrl] = useState("");
@@ -293,7 +297,7 @@ export default function App() {
         model: settings.model,
         audio: uploaded!,
         config: settings.prompt,
-        context: { pauses, previousTitles },
+        context: { pauses, previousTitles, cast },
         onStatus: setBusyText,
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         signal: controller.signal,
@@ -488,6 +492,7 @@ export default function App() {
         mp3: publishBlob,
         aiMp3: new Blob([result.aiMp3], { type: "audio/mpeg" }),
         report,
+        cast: cast.trim() || undefined,
       };
       // 保存できなくても処理は続ける(空き容量が無い端末でも生成は通す)
       await savePending(record).catch(() => {});
@@ -524,6 +529,7 @@ export default function App() {
           pauses: converted.pauses,
           durationSec: converted.durationSec,
           previousTitles,
+          cast,
         },
         onStatus: (text) => {
           if (text.includes("生成中") || text.includes("モデル")) advance("generate", 0.15, text);
@@ -592,6 +598,7 @@ export default function App() {
         audio: blob,
         uploaded: uploadedAudio ?? undefined,
         pauses: converted.pauses,
+        cast: cast.trim() || undefined,
       })
         .then(() => {
           // 履歴に入ったので、中断復帰用の控えは用済み
@@ -647,6 +654,8 @@ export default function App() {
     setOutputName(saved.outputName);
     setAudioReport(saved.report);
     setUploaded(saved.uploaded ?? null);
+    // 変換前に打ち込んだ出演者を戻す。打ち直させない
+    if (saved.cast) setCast(saved.cast);
     void wakeLockRef.current.start();
 
     try {
@@ -772,6 +781,9 @@ export default function App() {
           onEditMeta={(id, patch) => {
             void listEpisodeAndPatch(id, patch);
           }}
+          onCastEdit={(id, next) => {
+            void updateEpisode(id, { cast: next || undefined });
+          }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
           apiKey={settings.apiKey}
@@ -830,6 +842,37 @@ export default function App() {
           )}
 
           {phase === "idle" && !pickingTracks && (
+            <>
+            {/* 今回のパーソナリティ。聞く前に誰の回か分かるよう説明文の頭に出す */}
+            <div className="card cast-card">
+              <label htmlFor="cast-input" style={{ marginBottom: 4, fontWeight: 600 }}>
+                🎤 今回の出演者
+              </label>
+              <input
+                id="cast-input"
+                type="text"
+                value={cast}
+                placeholder="例: たかやま・にし、ゲスト 山田さん"
+                onChange={(e) => {
+                  setCast(e.target.value);
+                  setSettings((prev) => ({ ...prev, lastCast: e.target.value }));
+                }}
+              />
+              <p className="muted" style={{ marginTop: 6, marginBottom: 0 }}>
+                {castLine(cast) ? (
+                  <>
+                    説明文の頭に <strong>「{castLine(cast)}」</strong> と入ります。
+                    Spotify の一覧では再生前にここが見えるので、今回誰の回かが分かります。
+                  </>
+                ) : (
+                  <>
+                    入れておくと説明文の頭に「出演: ◯◯・△△」と入り、
+                    <strong>聞く前に今回のパーソナリティが分かります</strong>。あとから足せます。
+                  </>
+                )}
+              </p>
+            </div>
+
             <label className="drop card">
               <input
                 type="file"
@@ -855,6 +898,7 @@ export default function App() {
                 それぞれの音量を測って揃えてから1本にします
               </p>
             </label>
+            </>
           )}
 
           {phase === "running" && (
@@ -893,6 +937,12 @@ export default function App() {
                 onMakeTranscript={makeTranscript}
                 onEdit={editMeta}
                 onBackgroundChange={(b) => void applyArtwork(b)}
+                cast={cast}
+                onCastChange={(next) => {
+                  setCast(next);
+                  setSettings((prev) => ({ ...prev, lastCast: next }));
+                  if (episodeId) updateEpisode(episodeId, { cast: next.trim() || undefined });
+                }}
               />
               <button className="primary" onClick={reset}>
                 次のエピソードを処理する

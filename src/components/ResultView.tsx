@@ -6,6 +6,7 @@ import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../l
 import type { AudioReport } from "../App";
 import type { Finding } from "../lib/audio/diagnostics";
 import { CEILING_DBFS } from "../lib/audio/limiter";
+import { castLine, withCast } from "../lib/cast";
 
 interface Props {
   meta: EpisodeMeta;
@@ -29,6 +30,9 @@ interface Props {
   onEdit?: (patch: Partial<EpisodeMeta>) => void;
   /** 取り込んだ写真。MP3 のカバーを付け直すために親へ渡す。 */
   onBackgroundChange?: (bitmap: ImageBitmap | null) => void;
+  /** 今回の出演者。説明文の頭に出す。 */
+  cast?: string;
+  onCastChange?: (next: string) => void;
 }
 
 /** 投稿前の手直しをその場でできるようにする。編集は履歴にも残る。 */
@@ -37,11 +41,17 @@ function EditableBlock({
   value,
   onChange,
   rows = 6,
+  copyText,
+  prefix,
 }: {
   title: string;
   value: string;
   onChange?: (next: string) => void;
   rows?: number;
+  /** コピーされる文。表示と違う場合に指定する(出演者の行を足すときなど)。 */
+  copyText?: string;
+  /** 本文の前に、編集できない行として見せるもの。 */
+  prefix?: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -82,14 +92,86 @@ function EditableBlock({
                 ✎ 編集
               </button>
             ))}
-          <CopyButton text={value} />
+          <CopyButton text={copyText ?? value} />
         </div>
       </div>
+      {prefix && <div className="result-body cast-line">{prefix}</div>}
       {editing ? (
         <textarea rows={rows} value={draft} onChange={(e) => setDraft(e.target.value)} />
       ) : (
         <div className="result-body">{value}</div>
       )}
+    </div>
+  );
+}
+
+/**
+ * 今回の出演者。あとから足したり直したりできるようにする。
+ *
+ * 変換の前に打ち忘れても、ここで足せば説明文の頭に入る。
+ * 打ち忘れのために数分かけた変換をやり直させない。
+ */
+function CastBlock({ cast, onChange }: { cast: string; onChange?: (next: string) => void }) {
+  const [draft, setDraft] = useState(cast);
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setDraft(cast);
+  }, [cast, editing]);
+
+  const line = castLine(cast);
+
+  if (!onChange) return line ? null : null;
+
+  return (
+    <div className="result-block">
+      <div className="result-head">
+        <h2>🎤 今回の出演者</h2>
+        <div className="head-actions">
+          {editing ? (
+            <>
+              <button
+                className="copy-btn"
+                onClick={() => {
+                  onChange(draft);
+                  setEditing(false);
+                }}
+              >
+                保存
+              </button>
+              <button
+                className="copy-btn"
+                onClick={() => {
+                  setDraft(cast);
+                  setEditing(false);
+                }}
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <button className="copy-btn" onClick={() => setEditing(true)}>
+              ✎ {line ? "編集" : "入力"}
+            </button>
+          )}
+        </div>
+      </div>
+      {editing ? (
+        <input
+          type="text"
+          value={draft}
+          placeholder="例: たかやま・にし、ゲスト 山田さん"
+          onChange={(e) => setDraft(e.target.value)}
+        />
+      ) : (
+        <div className="result-body">
+          {line || <span className="muted">未入力(入れると説明文の頭に「出演: …」が入ります)</span>}
+        </div>
+      )}
+      <p className="muted" style={{ marginTop: 6 }}>
+        下の説明文とまとめて貼り付けの<strong>いちばん上</strong>に入ります。
+        Spotify の一覧では再生前にここが見えるので、今回誰の回かが伝わります。
+      </p>
     </div>
   );
 }
@@ -302,14 +384,19 @@ export default function ResultView({
   onMakeTranscript,
   onEdit,
   onBackgroundChange,
+  cast = "",
+  onCastChange,
 }: Props) {
   // 取り込んだ写真は告知画像・切り抜き動画・MP3のカバーで共有する。
   // ここで持たないと、同じ写真を3回読み込ませることになる
   const [background, setBackground] = useState<ImageBitmap | null>(null);
   const chapterText = meta.chapters.map((c) => `${c.time} ${c.label}`).join("\n");
+  // 出演者は説明文の頭に必ず置く。再生を押す前に見えるのはここだけなので、
+  // AI の書きぶりに任せず、貼り付ける文そのものに入れる
+  const describedWithCast = withCast(meta.description, cast);
   // Creators の説明欄に一度で貼れるよう、説明文・チャプター・タグを1つにまとめる
   const fullDescription = [
-    meta.description,
+    describedWithCast,
     chapterText && `\n【チャプター】\n${chapterText}`,
     meta.hashtags.length > 0 && `\n${meta.hashtags.join(" ")}`,
   ]
@@ -359,11 +446,15 @@ export default function ResultView({
           <p className="muted">タップで採用タイトルを選ぶと履歴に残ります。</p>
         </Block>
 
+        <CastBlock cast={cast} onChange={onCastChange} />
+
         <EditableBlock
           title="説明文"
           value={meta.description}
           onChange={onEdit ? (v) => onEdit({ description: v }) : undefined}
           rows={8}
+          copyText={describedWithCast}
+          prefix={castLine(cast)}
         />
 
         <Block title="説明欄まとめて貼り付け" copyText={fullDescription}>

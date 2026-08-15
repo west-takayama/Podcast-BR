@@ -36,6 +36,8 @@ export interface EpisodeRecord {
   uploaded?: UploadedAudio;
   /** 端末側で検出した話の切り替わり候補(秒)。作り直しでも使う。 */
   pauses?: number[];
+  /** 今回の出演者。説明文の頭に出すために回ごとに持つ。 */
+  cast?: string;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -152,6 +154,8 @@ export interface PendingConversion {
   report: AudioReport;
   /** アップロードまで済んでいれば、復帰後の送信も省ける。 */
   uploaded?: UploadedAudio;
+  /** 変換前に打ち込んだ出演者。開き直しても消えないように控える。 */
+  cast?: string;
 }
 
 /** 保持するのは常に1件。新しい変換を始めたら前のものは用済みになる。 */
