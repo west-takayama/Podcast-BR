@@ -813,6 +813,10 @@ export default function App() {
           }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
+          promptConfig={settings.prompt}
+          apiKey={settings.apiKey}
+          model={settings.model}
+          onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
         />
       )}
 
@@ -985,6 +989,10 @@ export default function App() {
                 fileName={outputName}
                 showName={settings.prompt.showName}
                 accentColor={settings.accentColor}
+                promptConfig={settings.prompt}
+                apiKey={settings.apiKey}
+                model={settings.model}
+                onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
                 audioReport={audioReport}
                 chapterNote={chapterNote}
                 transcript={transcript}

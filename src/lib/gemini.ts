@@ -1036,7 +1036,7 @@ async function callTopics(
 }
 
 /** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */
-function extractJson(text: string): Record<string, unknown> {
+function extractJson(text: string, what = "お題"): Record<string, unknown> {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const candidates = [fenced?.[1], text];
   for (const c of candidates) {
@@ -1050,7 +1050,7 @@ function extractJson(text: string): Record<string, unknown> {
       // 次の候補を試す
     }
   }
-  throw new Error("お題の形式が読めませんでした。もう一度お試しください。");
+  throw new Error(`${what}の形式が読めませんでした。もう一度お試しください。`);
 }
 
 /** 応答に付いてくる出典を取り出す。 */
@@ -1203,4 +1203,116 @@ ${
     // 出典が1つも返らなければ、実際には調べていない。そう見せない
     searched: searched && sources.length > 0,
   };
+}
+
+/**
+ * カバー画像の「絵柄の案」。
+ *
+ * タイトルだけを画像生成に渡すと、題名を図解しただけの記号的な絵になる。
+ * 何を写すかまで先に決めてから注文すると、その回らしい一枚になる。
+ *
+ * **音声は使わない。** 保存してある本文だけで考えるので、音声を消した
+ * 古い回でも、アップロードの48時間を過ぎた回でも同じように出せる。
+ */
+export interface CoverIdea {
+  /** 一行でどんな絵か。選ぶときに見る。 */
+  headline: string;
+  /** 実際に注文文へ入れる情景。何が写っているかを具体的に書いたもの。 */
+  scene: string;
+}
+
+export async function suggestCoverIdeas(opts: {
+  apiKey: string;
+  model: string;
+  /** その回のカバーか、番組そのもののカバーか。 */
+  scope: "episode" | "show";
+  title?: string;
+  summary?: string;
+  keywords?: string[];
+  config: PromptConfig;
+  count?: number;
+  onStatus: (status: string) => void;
+  onModelChanged?: (model: string) => void;
+  signal?: AbortSignal;
+}): Promise<CoverIdea[]> {
+  const { apiKey, model, scope, config, onStatus, onModelChanged, signal } = opts;
+  const count = opts.count ?? 3;
+  onStatus("絵柄を考えています…");
+
+  const material = [
+    config.showName.trim() && `番組名: ${config.showName.trim()}`,
+    config.showContext.trim() && `どんな番組か: ${config.showContext.trim()}`,
+    config.audience.trim() && `想定している聴き手: ${config.audience.trim()}`,
+    scope === "episode" && opts.title?.trim() && `この回のタイトル: 「${opts.title.trim()}」`,
+    scope === "episode" && opts.summary?.trim() && `話している内容: ${opts.summary.trim()}`,
+    scope === "episode" &&
+      (opts.keywords ?? []).length > 0 &&
+      `出てくる言葉: ${(opts.keywords ?? []).slice(0, 8).join(" / ")}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const prompt = `あなたはポッドキャストのカバー画像を作ってきたアートディレクターです。
+${
+  scope === "show"
+    ? "この番組の顔になる一枚に、何を写すかを"
+    : "この回のカバー画像に、何を写すかを"
+}${count}案考えてください。
+
+## 材料
+${material || "(材料が足りません。番組名から想像してください)"}
+
+## 考え方
+- **記号にしない。** 「電球=ひらめき」「歯車=仕組み」のような比喩は、
+  一覧に並んだときに他と見分けが付かない。
+- ${
+    scope === "show"
+      ? "この番組を一言で表す「場」を選び、そこに何が置いてあるかで見せる。"
+      : "その話が実際に交わされている「場」を選び、そこに何が置いてあるかで見せる。タイトルを図解しない。"
+  }
+- **写す物は3つまで。** 一覧では 1〜2cm で表示される。それより多いと潰れる。
+- 3案はそれぞれ違う入り口にする。同じ絵の言い換えを並べない。
+- **文字は描かせない。** 案の中に看板や本の題名など、文字が読める物を入れない。
+- マイク・ヘッドホン・音波・ON AIR のランプは使わない。使われすぎていて見分けが付かない。
+- 材料に書いていないことを事実として決めつけない。
+
+## 各案に付けるもの
+- headline: どんな絵かが一言で分かる見出し(20文字以内)
+- scene: 実際に何が写っているか。物・場所・光を具体的に書く(80文字程度)。
+  そのまま画像生成への注文文に入れるので、これだけ読んで絵が浮かぶように書く。
+
+次の構造の JSON のみを出力する:
+{ "ideas": [{ "headline": string, "scene": string }] }`;
+
+  const res = await callWithModelFallback(
+    apiKey,
+    model,
+    {
+      contents: [{ parts: [{ text: prompt }] }],
+      // 案出しなので散らす。固くすると似た絵が並ぶ
+      generationConfig: { response_mime_type: "application/json", temperature: 1.0 },
+    },
+    onStatus,
+    onModelChanged,
+    signal,
+  );
+  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案");
+
+  const data = await res.json();
+  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("絵柄が返りませんでした。もう一度お試しください。");
+
+  const parsed = extractJson(text, "絵柄");
+  const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
+    .map((raw) => {
+      const o = (raw ?? {}) as Record<string, unknown>;
+      return {
+        headline: typeof o.headline === "string" ? o.headline.trim() : "",
+        scene: typeof o.scene === "string" ? o.scene.trim() : "",
+      };
+    })
+    .filter((i) => i.scene);
+
+  if (ideas.length === 0) throw new Error("絵柄が返りませんでした。もう一度お試しください。");
+  return ideas;
 }

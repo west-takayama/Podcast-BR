@@ -10,6 +10,7 @@ import {
 import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
+import { buildCoverPrompt, colorName, COVER_STYLE_LABELS, type CoverStyle } from "../src/lib/coverPrompt";
 import {
   isPreviewModel,
   listModels,
@@ -1745,6 +1746,73 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     );
     check("短い動画でも候補が残る", shortVideo.length === 2,
       shortVideo.map((c) => `${c.start}〜${c.end}`).join(" / "));
+  }
+
+  console.log("\n[33] カバー画像の注文文");
+  {
+    const base = {
+      scope: "episode" as const,
+      style: "photo" as CoverStyle,
+      title: "ねぎ塩だれを作りすぎた回",
+      summary: "自作のねぎ塩だれが余って、毎食にかけ続けた話。",
+      keywords: ["ねぎ塩", "自炊", "作り置き"],
+      showName: "うちらのラジオ",
+      showContext: "30代2人の雑談番組",
+      accent: "#ffd400",
+    };
+    const p = buildCoverPrompt(base);
+
+    // 一覧では 1〜2cm。ここを外すと何を作っても使えない
+    check("正方形と書き出しサイズを伝える", p.includes("1:1") && p.includes("3000×3000"));
+    check("小さく表示されることを伝える", p.includes("1〜2cm"));
+    check("写す物の数を絞らせる", p.includes("3つまで"));
+    check("端の余白を確保させる", p.includes("10%"));
+
+    // 日本語の文字は必ず崩れる。番組名まで名指しで止める
+    check("文字を入れさせない", p.includes("文字を一切入れない"));
+    check("番組名も描かせない", p.includes("うちらのラジオ") && p.includes("描かないこと"));
+
+    // 一覧に並んだとき全部同じ絵になるもの
+    check("使い古された題材を避けさせる",
+      p.includes("マイク") && p.includes("ヘッドホン") && p.includes("音波"));
+
+    // 材料が入っているか
+    check("タイトルが入る", p.includes("ねぎ塩だれを作りすぎた回"));
+    check("要約が入る", p.includes("毎食にかけ続けた"));
+    check("キーワードが入る", p.includes("作り置き"));
+    check("アクセント色が色名付きで入る", p.includes("#ffd400") && p.includes("黄"));
+
+    // 絵柄で本文が変わる
+    const styles = Object.keys(COVER_STYLE_LABELS) as CoverStyle[];
+    const bodies = styles.map((style) => buildCoverPrompt({ ...base, style }));
+    check("絵柄ごとに違う指示になる", new Set(bodies).size === styles.length,
+      `${new Set(bodies).size}/${styles.length}種類`);
+    check("ミニマルは図形の指示になる",
+      buildCoverPrompt({ ...base, style: "minimal" }).includes("図形"));
+
+    // 番組カバーは回の内容を持ち込まない
+    const show = buildCoverPrompt({ ...base, scope: "show" });
+    check("番組カバーに回のタイトルを入れない", !show.includes("ねぎ塩だれを作りすぎた回"));
+    check("番組カバーは番組の背景を使う", show.includes("30代2人の雑談番組"));
+    check("番組カバーは毎回使うと伝える", show.includes("毎回"));
+
+    // AI に考えてもらった場面を入れたとき
+    const withIdea = buildCoverPrompt({ ...base, idea: "深夜の台所、瓶に詰めた緑のたれが3つ並んでいる" });
+    check("採用した場面が入る", withIdea.includes("瓶に詰めた緑のたれ"));
+    check("場面を入れたら既定の言い回しは消える",
+      !withIdea.includes("翻訳して一枚にしてください"));
+
+    // 材料が無くても壊れない(音声を消した古い回、設定が空の状態)
+    const bare = buildCoverPrompt({ scope: "episode", style: "illustration" });
+    check("材料が無くても注文文になる", bare.includes("3000×3000") && bare.length > 200,
+      `${bare.length}文字`);
+    check("材料が無いとき undefined を書かない", !bare.includes("undefined"));
+
+    // 色名
+    check("色名: 黄", colorName("#ffd400") === "黄", colorName("#ffd400"));
+    check("色名: 青", colorName("#1a3fd0").includes("青"), colorName("#1a3fd0"));
+    check("色名: 灰色", colorName("#808080") === "灰色", colorName("#808080"));
+    check("色名: 読めない値は空", colorName("なんとか") === "");
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
