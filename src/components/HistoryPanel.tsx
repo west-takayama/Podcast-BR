@@ -12,6 +12,7 @@ import {
 } from "../lib/history";
 import ResultView from "./ResultView";
 import { backupFileName, buildBackup, parseBackup, restoreBackup } from "../lib/backup";
+import type { PromptConfig } from "../lib/prompt";
 
 interface Props {
   onChooseTitle: (id: string, title: string) => void;
@@ -20,6 +21,11 @@ interface Props {
   onCastEdit: (id: string, cast: string) => void;
   showName: string;
   accentColor: string;
+  /** カバー画像の注文文に使う。過去回でも同じように出せるようにするため。 */
+  promptConfig: PromptConfig;
+  apiKey: string;
+  model: string;
+  onModelChanged: (model: string) => void;
 }
 
 function formatBytes(bytes: number): string {
@@ -43,6 +49,10 @@ export default function HistoryPanel({
   onCastEdit,
   showName,
   accentColor,
+  promptConfig,
+  apiKey,
+  model,
+  onModelChanged,
 }: Props) {
   const [records, setRecords] = useState<EpisodeRecord[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
@@ -344,6 +354,10 @@ export default function HistoryPanel({
                 fileName={r.fileName.replace(/\.wav$/i, ".mp3")}
                 showName={showName}
                 accentColor={accentColor}
+                promptConfig={promptConfig}
+                apiKey={apiKey}
+                model={model}
+                onModelChanged={onModelChanged}
                 transcript={r.transcript}
                 onEdit={(patch) => {
                   onEditMeta(r.id, patch);

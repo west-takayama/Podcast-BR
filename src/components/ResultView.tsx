@@ -8,6 +8,8 @@ import type { Finding } from "../lib/audio/diagnostics";
 import { CEILING_DBFS } from "../lib/audio/limiter";
 import { castLine, withCast } from "../lib/cast";
 import { formatChapters, parseChapters } from "../lib/chapters";
+import CoverPrompt from "./CoverPrompt";
+import type { PromptConfig } from "../lib/prompt";
 
 interface Props {
   meta: EpisodeMeta;
@@ -31,6 +33,12 @@ interface Props {
   /** 今回の出演者。説明文の頭に出す。 */
   cast?: string;
   onCastChange?: (next: string) => void;
+  /** カバー画像の注文文を組み立てるために使う。番組名・背景・想定聴き手が入る。 */
+  promptConfig?: PromptConfig;
+  /** 絵柄をAIに考えてもらうために要る。無ければその機能だけ出さない。 */
+  apiKey?: string;
+  model?: string;
+  onModelChanged?: (model: string) => void;
 }
 
 /** 投稿前の手直しをその場でできるようにする。編集は履歴にも残る。 */
@@ -385,6 +393,10 @@ export default function ResultView({
   onBackgroundChange,
   cast = "",
   onCastChange,
+  promptConfig,
+  apiKey,
+  model,
+  onModelChanged,
 }: Props) {
   // 取り込んだ写真は切り抜き動画と MP3 のカバーで共有する。
   // ここで持たないと、同じ写真を2回読み込ませることになる
@@ -535,6 +547,19 @@ export default function ResultView({
         busy={!!busyText}
         onMake={onMakeTranscript}
       />
+
+      {promptConfig && (
+        <CoverPrompt
+          title={chosenTitle || meta.titles[0] || ""}
+          summary={meta.transcriptSummary}
+          keywords={meta.keywords}
+          accent={accentColor}
+          config={promptConfig}
+          apiKey={apiKey}
+          model={model}
+          onModelChanged={onModelChanged}
+        />
+      )}
 
       <EpisodePhoto
         onChange={(b, restored) => {
