@@ -16,6 +16,11 @@ const API_BASE = "https://generativelanguage.googleapis.com";
 const TRANSIENT_STATUS = [500, 502, 503, 504];
 /** 待ち時間。混雑は数十秒で解けることが多いので、そこまで粘る。 */
 const RETRY_WAIT_MS = [3000, 8000, 20000];
+/**
+ * 待っても駄目なときに試す、別のモデルの数。
+ * 一覧は良いものから並んでいるので、上から順に当たる。
+ */
+const MAX_MODEL_SWITCHES = 2;
 
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -672,10 +677,44 @@ async function callWithModelFallback(
       body: JSON.stringify(body),
     });
 
+  // 混雑は**モデルごとに**起きる。同じモデルを待ち続けるより、空いている
+  // モデルへ移るほうが早い(試験版なら特に。割り当てが細く、混雑と
+  // 区別の付かない形で弾かれる)。
+  //
+  // 移った先が駄目でも、元の応答をそのまま持って帰る。乗り換え先の
+  // 別の事情(その機能に対応していない等)を原因として伝えてしまうと、
+  // 何を直せばいいのか分からなくなる。
+  let alternatives: string[] | null = null;
+  const tryAlternatives = async (): Promise<Response | null> => {
+    if (alternatives === null) {
+      alternatives = (await listModels(apiKey, signal).catch(() => []))
+        .map((m) => m.id)
+        .filter((id) => id !== model)
+        // 試験版は詰まりやすいので後回しにする
+        .sort((a, b) => Number(isPreviewModel(a)) - Number(isPreviewModel(b)))
+        .slice(0, MAX_MODEL_SWITCHES);
+    }
+    for (const alt of alternatives) {
+      onStatus(`${model} が混んでいるため ${alt} で試します…`);
+      const retried = await call(alt).catch(() => null);
+      if (retried?.ok) {
+        onModelChanged?.(alt);
+        return retried;
+      }
+    }
+    return null;
+  };
+
   let res = await call(model);
 
   // 混雑はこちらに原因が無く待てば解ける。利用者に押し直させる必要はない
   for (let i = 0; i < RETRY_WAIT_MS.length && TRANSIENT_STATUS.includes(res.status); i++) {
+    // 短い待ちが一度外れた時点で、先に別のモデルを当たる。
+    // 全部待ち切ってから移ると 30 秒以上かかるが、ここなら数秒で済む。
+    if (i === 1) {
+      const moved = await tryAlternatives();
+      if (moved) return moved;
+    }
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
     onStatus(`Gemini が混雑しています。${sec}秒待って自動で再試行します(${i + 1}/${RETRY_WAIT_MS.length})…`);
     await sleep(RETRY_WAIT_MS[i], signal);
@@ -683,20 +722,10 @@ async function callWithModelFallback(
     res = await call(model);
   }
 
-  // 待っても駄目で、使っているのが試験版なら、正式版に替えて一度試す。
-  // 試験版は無料枠の割り当てが細く、混雑と区別が付かない形で弾かれる。
-  // 待つだけでは何度やり直しても通らないので、ここで乗り換える
-  if (TRANSIENT_STATUS.includes(res.status) && isPreviewModel(model)) {
-    onStatus("試験版のモデルが応答しないため、正式版に切り替えて試します…");
-    const stable = pickDefaultModel(await listModels(apiKey, signal));
-    if (stable && stable !== model && !isPreviewModel(stable)) {
-      const retried = await call(stable);
-      if (retried.ok) {
-        onModelChanged?.(stable);
-        return retried;
-      }
-      // 正式版でも駄目なら、元の応答で判断させる(原因は別にある)
-    }
+  // 待ち切ってもまだ混んでいるなら、別のモデルをもう一度当たる
+  if (TRANSIENT_STATUS.includes(res.status)) {
+    const moved = await tryAlternatives();
+    if (moved) return moved;
   }
 
   if (res.status === 404) {
@@ -765,10 +794,12 @@ function throwForStatus(status: number, body: string, what: string): never {
     const crowded = status === 503 || status === 504;
     throw new Error(
       (crowded
-        ? `Gemini が混雑しているため受け付けられませんでした(${status}・自動で${RETRY_WAIT_MS.length}回試しました)。数分待ってから「生成だけやり直す」を押してください。`
-        : `Gemini 側で処理できませんでした(${status}・自動で${RETRY_WAIT_MS.length}回試しました)。` +
-          `待っても直らない場合は、設定画面でモデルを別のものに替えてみてください。`) +
-        "変換済みMP3はそのまま使えます。",
+        ? `Gemini が混雑しています(${status})。待ち直しを${RETRY_WAIT_MS.length}回、` +
+          `別のモデルも${MAX_MODEL_SWITCHES}つ試しましたが、いずれも空いていませんでした。` +
+          `数分待ってから「生成だけやり直す」を押してください。`
+        : `Gemini 側で処理できませんでした(${status})。待ち直しと別のモデルを試しても同じでした。` +
+          `設定画面でモデルを替えるか、しばらく置いてからお試しください。`) +
+        "変換済みMP3はそのまま使えます(音声の送り直しも不要です)。",
     );
   }
   throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
