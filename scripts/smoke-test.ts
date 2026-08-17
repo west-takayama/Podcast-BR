@@ -1692,7 +1692,9 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const busy = say(503, JSON.stringify({ error: { message: "overloaded" } }));
     const internal = say(500, JSON.stringify({ error: { message: "internal" } }));
     check("503 は混雑と伝える", busy.includes("混雑") && busy.includes("503"));
+    check("何をどこまで試したか伝える", busy.includes("別のモデル"), busy.slice(0, 70));
     check("500 はモデルを替える案内", internal.includes("モデル") && internal.includes("500"));
+    check("音声の送り直しが要らないと伝える", busy.includes("送り直し"));
 
     // 説明の取り出し
     check("JSON から説明だけ取り出す",
