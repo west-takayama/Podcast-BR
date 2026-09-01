@@ -12,6 +12,8 @@ import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
 import { buildCoverPrompt, colorName, COVER_STYLE_LABELS, type CoverStyle } from "../src/lib/coverPrompt";
 import {
+  __testAnswerFrom,
+  __testExtractJson,
   isPreviewModel,
   listModels,
   pickDefaultModel,
@@ -1813,6 +1815,61 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("色名: 青", colorName("#1a3fd0").includes("青"), colorName("#1a3fd0"));
     check("色名: 灰色", colorName("#808080") === "灰色", colorName("#808080"));
     check("色名: 読めない値は空", colorName("なんとか") === "");
+  }
+
+  console.log("\n[34] 応答の形の揺れ(本物は部品が分かれて返る)");
+  {
+    const IDEAS = '{"ideas":[{"title":"ねぎ塩の続き"}]}';
+    const answer = (parts: unknown[], finishReason?: string, promptFeedback?: unknown) =>
+      __testAnswerFrom(
+        { candidates: parts ? [{ content: { parts }, finishReason }] : [], promptFeedback },
+        "お題",
+      );
+
+    // これまでは parts[0] だけを見ていた。検索で裏を取らせると分かれて返る
+    check("部品が1つ", answer([{ text: IDEAS }]).text === IDEAS);
+    check("先頭が空でも読める", answer([{ text: "" }, { text: IDEAS }]).text === IDEAS);
+    check("前置きの部品ごと繋ぐ",
+      answer([{ text: "はい。\n" }, { text: IDEAS }]).text.includes(IDEAS));
+    check("考えている途中の部品は答えではない",
+      answer([{ text: "まず過去回を…", thought: true }, { text: IDEAS }]).text === IDEAS);
+    check("文字以外の部品を混ぜない",
+      answer([{ inlineData: { data: "x" } }, { text: IDEAS }]).text === IDEAS);
+
+    // 空のときは、なぜ空なのかまで言う。同じ操作を繰り返させないため
+    const why = (parts: unknown[], finishReason?: string, promptFeedback?: unknown) => {
+      try {
+        answer(parts, finishReason, promptFeedback);
+        return "(例外にならなかった)";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+    check("長さ上限は「切れた」と伝える", why([{ text: "" }], "MAX_TOKENS").includes("切れ"),
+      why([{ text: "" }], "MAX_TOKENS").slice(0, 40));
+    check("安全フィルタは理由を伝える", why([], "SAFETY").includes("安全"));
+    check("入力側で止められた理由も伝える",
+      why([], "", { blockReason: "OTHER" }).includes("OTHER"));
+
+    // 字幕だけは空を許す(無音の範囲を選んだだけということがある)
+    check("空を許す呼び方では例外にしない",
+      __testAnswerFrom({ candidates: [{ content: { parts: [] } }] }, "字幕", true).text === "");
+
+    // 途中で切れた JSON は、形の間違いではなく長さの問題として伝える
+    let cut = "";
+    try {
+      __testExtractJson('{"ideas":[{"title":"ね', "お題", "MAX_TOKENS");
+    } catch (e) {
+      cut = e instanceof Error ? e.message : String(e);
+    }
+    check("切れた JSON は長さのせいだと伝える", cut.includes("切れ"), cut.slice(0, 40));
+
+    // ``` で囲まれていても読める(検索を使うと JSON の形を強制できない)
+    check("コードブロックから取り出す",
+      (__testExtractJson("```json\n" + IDEAS + "\n```") as { ideas?: unknown[] }).ideas?.length === 1);
+    check("前後に文が付いていても取り出す",
+      (__testExtractJson("考えました。\n" + IDEAS + "\n以上です。") as { ideas?: unknown[] })
+        .ideas?.length === 1);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
