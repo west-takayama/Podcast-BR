@@ -344,6 +344,9 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
 export const __testNormalizeClips = normalizeClips;
 /** 応答の番号と本文から出す文言。検証のために公開する。 */
 export const __testThrowForStatus = throwForStatus;
+/** 応答の形の揺れに強いかを直に確かめるため。 */
+export const __testAnswerFrom = answerFrom;
+export const __testExtractJson = extractJson;
 
 /** 生成物の欠けを埋める。項目が1つ欠けただけで全体を失敗させない。 */
 function normalizeMeta(raw: unknown): EpisodeMeta {
@@ -537,14 +540,8 @@ ${lengthRule}
   if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("候補が返りませんでした。もう一度お試しください。");
-  let parsed: { clips?: unknown };
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("候補を読み取れませんでした。もう一度お試しください。");
-  }
+  const { text, finishReason } = answerFrom(data, "切り抜きの候補");
+  const parsed = extractJson(text, "切り抜きの候補", finishReason) as { clips?: unknown };
   const clips = normalizeClips(parsed.clips, total || undefined);
   if (clips.length > 0) return clips;
 
@@ -637,10 +634,11 @@ ${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組
   if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) return [];
+  // 字幕は空でも先に進める。無音の範囲を選んだだけということがある
+  const { text } = answerFrom(data, "字幕", true);
+  if (!text.trim()) return [];
   try {
-    const parsed = JSON.parse(text) as { segments?: Record<string, unknown>[] };
+    const parsed = extractJson(text, "字幕") as { segments?: Record<string, unknown>[] };
     return (parsed.segments ?? [])
       .filter((s) => s && typeof s.text === "string" && (s.text as string).trim())
       .map((s) => ({
@@ -741,6 +739,50 @@ async function callWithModelFallback(
     if (res.ok) onModelChanged?.(replacement);
   }
   return res;
+}
+
+/**
+ * 応答から本文を取り出す。
+ *
+ * **本文は parts[0] とは限らない。** Google 検索で裏を取らせると、応答が
+ * 複数の部品に分かれて返ってくることがあり(前置きの文と本体、空の部品など)、
+ * 先頭だけを見ていると「返りませんでした」になる。実際に「次のお題」が
+ * 出せなくなっていたのはこれが原因。考えている途中の部品(thought)は答えではない。
+ *
+ * 本文が空のときは、なぜ空なのかまで伝える。「もう一度お試しください」だけでは
+ * 何度押しても同じことが起きる。
+ */
+function answerFrom(
+  data: Record<string, unknown>,
+  what: string,
+  allowEmpty = false,
+): { text: string; finishReason: string } {
+  const candidate = (data?.candidates as Record<string, unknown>[] | undefined)?.[0];
+  const content = candidate?.content as { parts?: Record<string, unknown>[] } | undefined;
+  const text = (content?.parts ?? [])
+    .filter((p) => p && p.thought !== true && typeof p.text === "string")
+    .map((p) => p.text as string)
+    .join("");
+  const finishReason = typeof candidate?.finishReason === "string" ? candidate.finishReason : "";
+  if (text.trim() || allowEmpty) return { text, finishReason };
+
+  const blockReason = (data?.promptFeedback as { blockReason?: string } | undefined)?.blockReason;
+  if (finishReason === "MAX_TOKENS") {
+    throw new Error(
+      `${what}が長さの上限に当たって、本文が返る前に切れました。設定でモデルを替えるか、もう一度お試しください。`,
+    );
+  }
+  if (finishReason === "SAFETY" || blockReason === "SAFETY") {
+    throw new Error(
+      `${what}が Gemini の安全フィルタで止められました。内容の一部が引っかかっています。もう一度押すと通ることもあります。`,
+    );
+  }
+  if (finishReason === "RECITATION") {
+    throw new Error(`${what}が既存の文章に近いとして止められました。もう一度お試しください。`);
+  }
+  throw new Error(
+    `${what}が返りませんでした${blockReason ? `(${blockReason})` : finishReason ? `(${finishReason})` : ""}。もう一度お試しください。`,
+  );
 }
 
 /** 応答から Google 自身の説明だけを取り出す。JSON でないこともある。 */
@@ -855,15 +897,8 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
   if (!res.ok) throwForStatus(res.status, await res.text(), "生成");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("生成結果が空でした。もう一度お試しください。");
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("生成結果がJSONとして読み取れませんでした。もう一度お試しください。");
-  }
+  const { text, finishReason } = answerFrom(data, "生成結果");
+  const parsed: unknown = extractJson(text, "生成結果", finishReason);
   return normalizeMeta(parsed);
 }
 
@@ -926,15 +961,8 @@ export async function generateTranscript(opts: TranscriptOptions): Promise<Trans
   if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("書き起こしが空でした。もう一度お試しください。");
-
-  let parsed: { segments?: unknown };
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("書き起こしを読み取れませんでした。もう一度お試しください。");
-  }
+  const { text, finishReason } = answerFrom(data, "書き起こし");
+  const parsed = extractJson(text, "書き起こし", finishReason) as { segments?: unknown };
   const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
   const cleaned = (segments as Record<string, unknown>[])
     .filter((s) => s && typeof s.text === "string" && s.text.trim())
@@ -1036,7 +1064,7 @@ async function callTopics(
 }
 
 /** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */
-function extractJson(text: string, what = "お題"): Record<string, unknown> {
+function extractJson(text: string, what = "お題", finishReason = ""): Record<string, unknown> {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   const candidates = [fenced?.[1], text];
   for (const c of candidates) {
@@ -1049,6 +1077,11 @@ function extractJson(text: string, what = "お題"): Record<string, unknown> {
     } catch {
       // 次の候補を試す
     }
+  }
+  if (finishReason === "MAX_TOKENS") {
+    throw new Error(
+      `${what}が長すぎて途中で切れました。設定でモデルを替えるか、もう一度お試しください。`,
+    );
   }
   throw new Error(`${what}の形式が読めませんでした。もう一度お試しください。`);
 }
@@ -1173,11 +1206,10 @@ ${
   if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("お題が返りませんでした。もう一度お試しください。");
+  const { text, finishReason } = answerFrom(data, "お題");
 
   // 検索を使った応答は JSON の形を強制できないため、本文から取り出す
-  const parsed = searched ? extractJson(text) : extractJson(text);
+  const parsed = extractJson(text, "お題", finishReason);
   const sources = searched ? groundingSources(data) : [];
 
   const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
@@ -1299,10 +1331,9 @@ ${material || "(材料が足りません。番組名から想像してくださ�
   if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案");
 
   const data = await res.json();
-  const text: string | undefined = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("絵柄が返りませんでした。もう一度お試しください。");
+  const { text, finishReason } = answerFrom(data, "絵柄");
 
-  const parsed = extractJson(text, "絵柄");
+  const parsed = extractJson(text, "絵柄", finishReason);
   const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
     .map((raw) => {
       const o = (raw ?? {}) as Record<string, unknown>;
