@@ -21,6 +21,45 @@ const RETRY_WAIT_MS = [3000, 8000, 20000];
  * 一覧は良いものから並んでいるので、上から順に当たる。
  */
 const MAX_MODEL_SWITCHES = 2;
+/**
+ * 1分あたりの上限(429)に当たったとき、自動で待つ上限。
+ * この枠は 60 秒で戻るので、ここまで待てば十分。1日の上限は待っても戻らない。
+ */
+const QUOTA_MAX_WAIT_MS = 70000;
+
+/** 1日あたりの上限か。こちらは待っても戻らないので、待たせてはいけない。 */
+function isDailyQuota(body: string): boolean {
+  return /per[\s_-]?day|\bdaily\b/i.test(body);
+}
+
+/**
+ * Google が「何秒後に来い」と教えてくれる値(google.rpc.RetryInfo)。
+ * 勝手に決めた秒数より、向こうの言う秒数のほうが確か。
+ */
+function retryDelayMs(body: string): number {
+  const m = /"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(body);
+  const sec = m ? Number(m[1]) : NaN;
+  if (!Number.isFinite(sec) || sec <= 0) return 60000;
+  return Math.min(Math.ceil(sec) * 1000 + 1000, QUOTA_MAX_WAIT_MS);
+}
+
+/**
+ * 残り秒数を出しながら待つ。
+ * 1分の沈黙は「固まった」と見分けが付かないので、減っていく数字を見せる。
+ */
+async function countdown(
+  ms: number,
+  onTick: (secondsLeft: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const remain = end - Date.now();
+    if (remain <= 0) return;
+    onTick(Math.ceil(remain / 1000));
+    await sleep(Math.min(1000, remain), signal);
+  }
+}
 
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -246,6 +285,16 @@ async function uploadFile(
     ({ status, text } = await send());
   }
 
+  // 送信も1分あたりの上限に当たることがある。数十MB を上限ひとつで捨てない
+  if (status === 429 && !isDailyQuota(text)) {
+    await countdown(
+      retryDelayMs(text),
+      (left) => onStatus?.(`無料枠の1分あたりの上限です。${left}秒待って送信し直します…`),
+      signal,
+    );
+    ({ status, text } = await send());
+  }
+
   if (status < 200 || status >= 300) {
     if (status === 400 && text.includes("API_KEY_INVALID")) {
       throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
@@ -347,6 +396,8 @@ export const __testThrowForStatus = throwForStatus;
 /** 応答の形の揺れに強いかを直に確かめるため。 */
 export const __testAnswerFrom = answerFrom;
 export const __testExtractJson = extractJson;
+export const __testIsDailyQuota = isDailyQuota;
+export const __testRetryDelayMs = retryDelayMs;
 
 /** 生成物の欠けを埋める。項目が1つ欠けただけで全体を失敗させない。 */
 function normalizeMeta(raw: unknown): EpisodeMeta {
@@ -683,7 +734,7 @@ async function callWithModelFallback(
   // 別の事情(その機能に対応していない等)を原因として伝えてしまうと、
   // 何を直せばいいのか分からなくなる。
   let alternatives: string[] | null = null;
-  const tryAlternatives = async (): Promise<Response | null> => {
+  const tryAlternatives = async (reason: string): Promise<Response | null> => {
     if (alternatives === null) {
       alternatives = (await listModels(apiKey, signal).catch(() => []))
         .map((m) => m.id)
@@ -693,7 +744,7 @@ async function callWithModelFallback(
         .slice(0, MAX_MODEL_SWITCHES);
     }
     for (const alt of alternatives) {
-      onStatus(`${model} が混んでいるため ${alt} で試します…`);
+      onStatus(`${model} が${reason} ${alt} で試します…`);
       const retried = await call(alt).catch(() => null);
       if (retried?.ok) {
         onModelChanged?.(alt);
@@ -710,7 +761,7 @@ async function callWithModelFallback(
     // 短い待ちが一度外れた時点で、先に別のモデルを当たる。
     // 全部待ち切ってから移ると 30 秒以上かかるが、ここなら数秒で済む。
     if (i === 1) {
-      const moved = await tryAlternatives();
+      const moved = await tryAlternatives("混んでいるため");
       if (moved) return moved;
     }
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
@@ -722,8 +773,30 @@ async function callWithModelFallback(
 
   // 待ち切ってもまだ混んでいるなら、別のモデルをもう一度当たる
   if (TRANSIENT_STATUS.includes(res.status)) {
-    const moved = await tryAlternatives();
+    const moved = await tryAlternatives("混んでいるため");
     if (moved) return moved;
+  }
+
+  // 1分あたりの上限(429)も、待てば戻る。
+  //
+  // これまでは 429 を一律「押し直してください」にしていた。1日の上限には
+  // それが正しいが、**1分の上限は 60 秒で戻る**。向こうが「何秒後に来い」と
+  // 教えてくれているのに、その待ちを利用者に肩代わりさせていた。
+  //
+  // 枠はモデルごとなので、まず空いているモデルを当たる。そのほうが速い。
+  if (res.status === 429) {
+    const body = await res.clone().text();
+    if (!isDailyQuota(body)) {
+      const moved = await tryAlternatives("上限に達したため");
+      if (moved) return moved;
+      await countdown(
+        retryDelayMs(body),
+        (left) => onStatus(`無料枠の1分あたりの上限です。${left}秒待って自動で試し直します…`),
+        signal,
+      );
+      onStatus("再試行中…");
+      res = await call(model);
+    }
   }
 
   if (res.status === 404) {
@@ -805,13 +878,14 @@ function throwForStatus(status: number, body: string, what: string): never {
     // 1分あたりの上限と1日あたりの上限は別物。
     // 「1分待って」は前者にしか効かない。1日の枠を使い切った人が
     // 1分おきに押し続けることになるので、どちらかを見て伝え分ける
-    const daily = /per[\s_-]?day|\bdaily\b/i.test(body);
+    const daily = isDailyQuota(body);
     throw new Error(
       daily
         ? "無料枠の1日あたりの上限に達しました。しばらく押し直しても戻りません。" +
           "設定画面で別のモデルに替えると、そのモデルぶんの枠を使えます。" +
           `変換済みMP3はそのまま使えます。(${reasonFrom(body)})`
-        : "無料枠の1分あたりの上限に達しました。1分ほど待って再試行してください。",
+        : "無料枠の1分あたりの上限に達しました。別のモデルを試し、1分ほど待って自動で投げ直しましたが、" +
+          "まだ上限のままでした。少し間を置いてからお試しください。変換済みMP3はそのまま使えます。",
     );
   }
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {

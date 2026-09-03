@@ -13,6 +13,8 @@ import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
 import { buildCoverPrompt, colorName, COVER_STYLE_LABELS, type CoverStyle } from "../src/lib/coverPrompt";
 import {
   __testAnswerFrom,
+  __testIsDailyQuota,
+  __testRetryDelayMs,
   __testExtractJson,
   isPreviewModel,
   listModels,
@@ -1870,6 +1872,64 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("前後に文が付いていても取り出す",
       (__testExtractJson("考えました。\n" + IDEAS + "\n以上です。") as { ideas?: unknown[] })
         .ideas?.length === 1);
+  }
+
+  console.log("\n[35] 無料枠の上限(429)の扱い");
+  {
+    // 1分の枠は60秒で戻る。1日の枠は待っても戻らない。混ぜてはいけない
+    const perMinute = JSON.stringify({
+      error: {
+        code: 429, status: "RESOURCE_EXHAUSTED",
+        message: "Quota exceeded for quota metric 'Generate Content API requests per minute'",
+        details: [
+          { "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            violations: [{ quotaId: "GenerateRequestsPerMinutePerProjectPerModel" }] },
+          { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "24s" },
+        ],
+      },
+    });
+    const perDay = JSON.stringify({
+      error: {
+        code: 429, status: "RESOURCE_EXHAUSTED",
+        message: "You exceeded your current quota",
+        details: [{ "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+          violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel" }] }],
+      },
+    });
+
+    check("1分の上限を1日の上限と取り違えない", !__testIsDailyQuota(perMinute));
+    check("1日の上限は待たせない側に振り分ける", __testIsDailyQuota(perDay));
+
+    // 勝手に決めた秒数より、向こうの言う秒数のほうが確か
+    check("向こうが言う待ち時間を使う", __testRetryDelayMs(perMinute) === 25000,
+      `${__testRetryDelayMs(perMinute)}ms`);
+    check("言われなければ60秒", __testRetryDelayMs(perDay) === 60000,
+      `${__testRetryDelayMs(perDay)}ms`);
+    // 何分も待たせない。1分の枠なのだから60秒で戻る
+    check("長すぎる指示は切り詰める",
+      __testRetryDelayMs('{"retryDelay":"600s"}') === 70000,
+      `${__testRetryDelayMs('{"retryDelay":"600s"}')}ms`);
+    check("小数の秒も読める", __testRetryDelayMs('{"retryDelay":"7.5s"}') === 9000,
+      `${__testRetryDelayMs('{"retryDelay":"7.5s"}')}ms`);
+    check("壊れた値でも落ちない", __testRetryDelayMs("なにこれ") === 60000);
+
+    // 待っても駄目だったときの文面
+    const say = (body: string) => {
+      try {
+        __testThrowForStatus(429, body, "お題の提案");
+        return "";
+      } catch (e) {
+        return e instanceof Error ? e.message : String(e);
+      }
+    };
+    const min = say(perMinute);
+    const day = say(perDay);
+    check("1分の上限: 自動で試したことを伝える", min.includes("自動") && min.includes("別のモデル"),
+      min.slice(0, 50));
+    check("1分の上限: 変換が無駄でないと伝える", min.includes("変換済みMP3"));
+    check("1日の上限: 押し直しても戻らないと伝える", day.includes("戻りません"), day.slice(0, 40));
+    check("1日の上限: モデルを替える道を示す", day.includes("別のモデル"));
+    check("1日の上限で「1分待って」と言わない", !day.includes("1分ほど待って"));
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
