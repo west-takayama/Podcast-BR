@@ -62,8 +62,10 @@ export default function EpisodePhoto({ onChange }: Props) {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(file);
       });
+      // **控えを書き終えてから**知らせる。App 側はこの控えを読んで
+      // カバーを描くので、先に知らせると1つ前の絵で描いてしまう
+      await saveArtwork(file, true).catch(() => {});
       onChange?.(bitmap);
-      void saveArtwork(file, true);
     } catch {
       setError("この画像は読み込めませんでした(PNG / JPEG をお試しください)");
     }
@@ -75,8 +77,9 @@ export default function EpisodePhoto({ onChange }: Props) {
       if (prev) URL.revokeObjectURL(prev);
       return "";
     });
-    onChange?.(null);
-    void clearArtwork().catch(() => {});
+    void clearArtwork()
+      .catch(() => {})
+      .then(() => onChange?.(null));
   };
 
   return (

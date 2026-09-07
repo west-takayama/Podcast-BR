@@ -24,6 +24,15 @@ const MAX_AUDIO_RETAINED = 5;
 export interface EpisodeRecord {
   id: string;
   createdAt: number;
+  /**
+   * 最後に手を入れた時刻。
+   *
+   * 控えを戻すときに「どちらが新しいか」を決めるのに要る。
+   * createdAt は作った瞬間の値で**あとから変わらない**ので、同じ回どうしを
+   * 比べても必ず引き分けになり、判定として働かなかった。
+   * 古い控えを読ませると、直したタイトルが黙って元に戻っていた。
+   */
+  updatedAt?: number;
   fileName: string;
   durationSec: number;
   removedSec: number;
@@ -84,7 +93,7 @@ export async function listEpisodes(): Promise<EpisodeRecord[]> {
 }
 
 export async function saveEpisode(record: EpisodeRecord): Promise<void> {
-  await tx("readwrite", (s) => s.put(record));
+  await tx("readwrite", (s) => s.put({ updatedAt: Date.now(), ...record }));
   await pruneAudio();
 }
 
@@ -94,7 +103,7 @@ export async function updateEpisode(
 ): Promise<void> {
   const existing = await tx<EpisodeRecord | undefined>("readonly", (s) => s.get(id));
   if (!existing) return;
-  await tx("readwrite", (s) => s.put({ ...existing, ...patch, id }));
+  await tx("readwrite", (s) => s.put({ ...existing, ...patch, id, updatedAt: Date.now() }));
 }
 
 export async function deleteEpisode(id: string): Promise<void> {

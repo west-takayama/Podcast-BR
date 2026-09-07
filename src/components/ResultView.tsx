@@ -8,6 +8,7 @@ import type { Finding } from "../lib/audio/diagnostics";
 import { CEILING_DBFS } from "../lib/audio/limiter";
 import { castLine, withCast } from "../lib/cast";
 import { formatChapters, parseChapters } from "../lib/chapters";
+import { readId3Summary, type Id3Summary } from "../lib/id3";
 import CoverPrompt from "./CoverPrompt";
 import type { PromptConfig } from "../lib/prompt";
 
@@ -28,8 +29,8 @@ interface Props {
   onRegenerate?: () => void;
   onMakeTranscript?: () => void;
   onEdit?: (patch: Partial<EpisodeMeta>) => void;
-  /** 取り込んだ写真。MP3 のカバーを付け直すために親へ渡す。 */
-  onBackgroundChange?: (bitmap: ImageBitmap | null) => void;
+  /** 写真が入れ替わったことを親へ知らせる。カバーを付け直すために使う。 */
+  onBackgroundChange?: () => void;
   /** 今回の出演者。説明文の頭に出す。 */
   cast?: string;
   onCastChange?: (next: string) => void;
@@ -183,6 +184,69 @@ function CastBlock({ cast, onChange }: { cast: string; onChange?: (next: string)
         Spotify の一覧では再生前にここが見えるので、今回誰の回かが伝わります。
       </p>
     </div>
+  );
+}
+
+/**
+ * 書き出した MP3 に**実際に**入っているものを読み返して見せる。
+ *
+ * ここは「画面ではできているのにファイルは空」がいちばん起こりやすく、
+ * しかも出すまで気づけない場所だった(カバーの描画に失敗するとタグが
+ * 丸ごと落ちる不具合が実際にあった)。約束ではなく、出来上がった物を
+ * 読んだ結果を出す。
+ */
+function Id3Readback({ url }: { url: string }) {
+  const [got, setGot] = useState<Id3Summary | null>(null);
+  const [size, setSize] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    setGot(null);
+    (async () => {
+      try {
+        const blob = await (await fetch(url)).blob();
+        // 60分の回は数十MBある。**頭だけ読む**。タグの長さは先頭10バイトに書いてある
+        const head = new Uint8Array(await blob.slice(0, 10).arrayBuffer());
+        const declared =
+          head.length === 10
+            ? 10 +
+              (((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) |
+                ((head[8] & 0x7f) << 7) | (head[9] & 0x7f))
+            : 10;
+        const front = await blob.slice(0, Math.min(Math.max(declared, 10), blob.size)).arrayBuffer();
+        if (!alive) return;
+        setGot(readId3Summary(new Uint8Array(front)));
+        setSize(blob.size);
+      } catch {
+        // 読み返せなくても音声そのものは使える
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [url]);
+
+  if (!got) return null;
+  const mb = size > 0 ? `${(size / 1024 / 1024).toFixed(1)} MB` : "";
+
+  if (!got.tagged) {
+    return (
+      <p className="muted">
+        ⚠️ このファイルにタイトル・チャプター・カバーが入っていません。
+        画面の内容をどれか編集すると付け直します。{mb && ` (${mb})`}
+      </p>
+    );
+  }
+  return (
+    <p className="muted">
+      ✓ ファイルの中身: 「{got.title || "題名なし"}」
+      {got.showName && ` / ${got.showName}`}
+      {got.chapterCount > 0 ? ` / チャプター${got.chapterCount}件` : " / チャプターなし"}
+      {got.artworkBytes > 0
+        ? ` / カバーあり(${Math.round(got.artworkBytes / 1024)} KB)`
+        : " / カバーなし"}
+      {mb && ` / ${mb}`}
+    </p>
   );
 }
 
@@ -428,9 +492,7 @@ export default function ResultView({
           <a className="dl" href={audioUrl} download={fileName ?? "episode.mp3"}>
             ⬇️ 変換済み MP3 をダウンロード
           </a>
-          <p className="muted" style={{ marginTop: 8 }}>
-            タイトル・番組名・説明文・アートワーク・チャプターを MP3 に埋め込んでいます。
-          </p>
+          <Id3Readback url={audioUrl} />
         </div>
       )}
 
@@ -565,7 +627,7 @@ export default function ResultView({
         onChange={(b, restored) => {
           setBackground(b);
           // 読み戻しただけなら MP3 は触らない。開いた瞬間に付け直しが走ってしまう
-          if (!restored) onBackgroundChange?.(b);
+          if (!restored) onBackgroundChange?.();
         }}
       />
 
