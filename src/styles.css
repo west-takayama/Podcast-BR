@@ -40,6 +40,8 @@ h3 {
 .tabs { display: flex; gap: 6px; }
 .tabs button {
   flex: 1;
+  /* 指で押す的。iOS/Android とも 44px 以上が目安 */
+  min-height: 44px;
   padding: 10px 4px;
   background: #1e1e1e;
   color: var(--muted);
@@ -79,9 +81,14 @@ button.primary {
 button.primary:active { background: var(--accent-dark); }
 button:disabled { opacity: 0.5; cursor: default; }
 
+/*
+ * コピーと編集。この道具でいちばん多く押される的。
+ * 貼り付け作業のたびに何度も押すので、31px は小さすぎた。
+ */
 .copy-btn {
   font-size: 0.8rem;
-  padding: 6px 12px;
+  min-height: 40px;
+  padding: 8px 14px;
   background: #2e2e2e;
   border: 1px solid #444;
   flex-shrink: 0;
@@ -101,6 +108,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 input[type="text"], input[type="password"], textarea, select {
   width: 100%;
   font: inherit;
+  /* 打ち込む的。指で狙う前提なので 44px 以上にする */
+  min-height: 44px;
   background: #2a2a2a;
   color: var(--text);
   border: 1px solid #444;
@@ -108,22 +117,28 @@ input[type="text"], input[type="password"], textarea, select {
   padding: 10px;
   margin-top: 4px;
 }
-input[type="range"] { width: 100%; margin-top: 8px; accent-color: var(--accent); }
+/* 指でつまむもの。細いと掴めないので、当たり判定を高くする */
+input[type="range"] { width: 100%; height: 40px; margin-top: 4px; accent-color: var(--accent); }
 textarea { resize: vertical; min-height: 72px; }
 label { display: block; margin-bottom: 12px; font-size: 0.9rem; }
 
+/* 入り切りの的はラベル全体。1行の項目だと 24px しかなく、狙いづらかった */
 label.check {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   line-height: 1.5;
+  min-height: 44px;
+  padding: 10px 0;
+  margin-bottom: 2px;
 }
 label.check input[type="checkbox"] {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
   accent-color: var(--accent);
   flex-shrink: 0;
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .eta {
@@ -271,8 +286,11 @@ button.danger { background: #3a1518; border: 1px solid var(--danger); color: #ff
 .confirm p { margin: 0; }
 
 .history-main { flex: 1; min-width: 0; cursor: pointer; }
+/* 消す的。押し間違いが取り返しにつかないので、小さくしない */
 .icon-btn {
   background: transparent;
+  min-width: 44px;
+  min-height: 44px;
   padding: 8px 10px;
   font-size: 1.1rem;
   flex-shrink: 0;
@@ -306,7 +324,8 @@ input[type="color"] {
   margin: 12px 0;
 }
 .clip-trim .row-buttons { flex-wrap: wrap; }
-.clip-trim .row-buttons button { flex: 1 1 40%; font-size: 0.85rem; padding: 9px; }
+/* 切り抜きの前後をずらす的。何度も押すので小さくしない */
+.clip-trim .row-buttons button { flex: 1 1 40%; font-size: 0.85rem; min-height: 44px; padding: 9px; }
 video.card-preview { background: #000; }
 
 /* 字幕の下書き。焼き込む前に直せるようにする */
@@ -619,4 +638,52 @@ video.card-preview { background: #000; }
   color: var(--accent);
   font-size: 0.85rem;
   margin: 6px 0 0;
+}
+
+/*
+ * 長い本文の開け閉め。
+ *
+ * 結果画面は上から順に貼り付けていく場所なので、たまにしか読まない
+ * ものが縦を占めると、必要な項目に辿り着くまでの距離が伸びる。
+ * 実測で 15591px(スマホ18画面ぶん)あった。
+ */
+.fold > summary {
+  cursor: pointer;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+  list-style: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before { content: "▶ "; margin-right: 4px; }
+.fold[open] > summary::before { content: "▼ "; }
+
+/* 設定の畳んだ塊。見出しとして目に入る程度には立てる */
+.section-fold > summary {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+  padding: 10px 0;
+  border-top: 1px solid #333;
+  margin-top: 12px;
+}
+
+/*
+ * キーを取りに行くための入り口。
+ * 初めて開いた人にとって、この画面でいちばん大事な操作がこれ。
+ * 文中のリンク(高さ15px)では、指で狙うには細すぎた。
+ */
+.key-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 14px;
+  margin: 4px 0;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
 }

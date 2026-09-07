@@ -140,12 +140,15 @@ export default function CoverPrompt({
           <button onClick={think} disabled={!!busy}>
             {busy || "💡 何を写すかAIに考えてもらう"}
           </button>
-          <p className="muted" style={{ marginTop: 6 }}>
-            タイトルだけを渡すと、題名を図解しただけの絵になりがちです。何を写すかを先に決めると、
-            その回らしい一枚になります。
-            <strong>音声は使いません</strong>(保存してある本文だけで考えるので、
-            音声を消した古い回でも出せます)。
-          </p>
+          <details className="fold" style={{ marginTop: 6 }}>
+            <summary>なぜ相談すると良くなるのか</summary>
+            <p className="muted" style={{ marginTop: 4 }}>
+              タイトルだけを渡すと、題名を図解しただけの絵になりがちです。何を写すかを先に決めると、
+              その回らしい一枚になります。
+              <strong>音声は使いません</strong>(保存してある本文だけで考えるので、
+              音声を消した古い回でも出せます)。
+            </p>
+          </details>
         </div>
       )}
 
@@ -173,9 +176,17 @@ export default function CoverPrompt({
         </div>
       )}
 
-      <div className="result-body" style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
-        {prompt}
-      </div>
+      {/*
+        本文は「コピーして貼る」もので、読み物ではない。開いたままだと
+        結果画面の縦を大きく占め、下にある写真や切り抜きが遠くなる。
+        中身を確かめたいときだけ開けばよい。
+      */}
+      <details className="fold" style={{ marginTop: 10 }}>
+        <summary>注文文を確認する({prompt.length}文字)</summary>
+        <div className="result-body" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>
+          {prompt}
+        </div>
+      </details>
 
       <p className="muted" style={{ marginTop: 8 }}>
         できた画像は、この画面の下の<strong>「この回の写真」</strong>から読み込めます。MP3

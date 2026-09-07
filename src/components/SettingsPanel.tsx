@@ -79,10 +79,16 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         />
       </label>
       <p className="muted">
-        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
-          Google AI Studio
+        <a
+          className="key-link"
+          href="https://aistudio.google.com/apikey"
+          target="_blank"
+          rel="noreferrer"
+        >
+          🔑 Google AI Studio でキーを発行
         </a>
-        で無料発行できます(クレジットカード不要)。キーはこの端末にのみ保存されます。
+        <br />
+        無料です(クレジットカード不要)。キーはこの端末にのみ保存されます。
       </p>
 
       <label>
@@ -239,6 +245,14 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         SNS告知文(X / Instagram / メール)も生成する
       </label>
 
+      {/*
+        ここから下は、一度決めたら滅多に触らない。開いたままだと、
+        初めて開いた人は「キーを入れて音声を選ぶ」までに 15 個以上の
+        入力を見ることになる。畳んでおいて、必要なときだけ開く。
+      */}
+      <details className="fold section-fold">
+        <summary>見た目・書き出し・音声処理(一度決めたら触らなくて大丈夫)</summary>
+
       <h3>見た目</h3>
       <label>
         アクセント色
@@ -334,6 +348,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       <p className="muted">
         音量の正規化は常に適用されます。処理はすべて端末内で行われ、音声がサーバーに送られることはありません(生成時のみ Gemini に送信)。
       </p>
+      </details>
 
       <button className="primary" onClick={onClose}>
         保存して閉じる

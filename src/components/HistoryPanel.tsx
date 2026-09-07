@@ -71,6 +71,14 @@ export default function HistoryPanel({
   const [backupNote, setBackupNote] = useState("");
   const [backedUpAt, setBackedUpAt] = useState<number | null>(() => lastBackupAt());
   const [confirming, setConfirming] = useState<"all" | "audio" | null>(null);
+  /**
+   * 消そうとしている1件。
+   *
+   * 行の 🗑 は、開くための行のすぐ隣にある小さな的で、押すと**その場で
+   * 消えていた**。全部消すほうには確認があるのに、押し間違えやすい
+   * こちらには無かった。控えを取っていなければ戻せない。
+   */
+  const [removing, setRemoving] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   /** 検索から開いた場面。その回の切り抜き候補の先頭に差し込む。 */
   const [picked, setPicked] = useState<Hit | null>(null);
@@ -103,6 +111,7 @@ export default function HistoryPanel({
   );
 
   const remove = async (id: string) => {
+    setRemoving(null);
     await deleteEpisode(id);
     if (openId === id) setOpenId(null);
     setAudioUrls((prev) => {
@@ -363,8 +372,8 @@ export default function HistoryPanel({
               {/* 開かなくても消せるよう、行に削除ボタンを置く */}
               <button
                 className="icon-btn"
-                aria-label="この履歴を削除"
-                onClick={() => remove(r.id)}
+                aria-label={`${r.chosenTitle || r.meta.titles[0]} を削除`}
+                onClick={() => setRemoving(removing === r.id ? null : r.id)}
               >
                 🗑
               </button>
@@ -372,6 +381,22 @@ export default function HistoryPanel({
                 {isOpen ? "▲" : "▼"}
               </span>
             </div>
+
+            {removing === r.id && (
+              <div className="confirm">
+                <p>
+                  「{r.chosenTitle || r.meta.titles[0]}」を削除します。
+                  {r.audio ? "音声も一緒に消えます。" : ""}
+                  控えを取っていなければ<strong>戻せません</strong>。
+                </p>
+                <div className="row-buttons">
+                  <button onClick={() => setRemoving(null)}>やめる</button>
+                  <button className="danger" onClick={() => remove(r.id)}>
+                    削除する
+                  </button>
+                </div>
+              </div>
+            )}
 
             {isOpen && (
               <ResultView
