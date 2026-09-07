@@ -21,6 +21,11 @@ export interface Settings {
    * 顔ぶれは回ごとに変わるので、設定ではなく「この前はこうだった」の控え。
    */
   lastCast?: string;
+  /**
+   * 最後に保存した時刻。
+   * 控えを戻すときに、手元と控えのどちらが新しいかを決めるのに使う。
+   */
+  savedAt?: number;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -61,6 +66,64 @@ export function loadSettings(): Settings {
   }
 }
 
+/**
+ * 中身だけを、並び順に左右されない形で文字列にする。
+ * 「本当に変わったか」を見るためのものなので、鍵と時刻は外す。
+ */
+function fingerprint(s: Partial<Settings>): string {
+  const stable = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(stable);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>)
+          .filter(([k]) => k !== "apiKey" && k !== "savedAt")
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, x]) => [k, stable(x)]),
+      );
+    }
+    return v;
+  };
+  return JSON.stringify(stable(s));
+}
+
+/**
+ * 設定を保存する。
+ *
+ * savedAt は「**中身が変わった**時刻」にする。書いた時刻にすると、
+ * アプリを開くたびに走る保存だけで新しくなってしまい、控えを戻すときの
+ * 「どちらが新しいか」の判定が必ず手元の勝ちになる。実際それで、
+ * 端末を替えた直後という**いちばん戻したい場面**で設定が戻らなかった。
+ *
+ * 何も決めていない状態(既定のまま)は時刻を持たせない。まっさらな端末では
+ * 控えのほうが必ず新しいものとして扱われる。
+ */
 export function saveSettings(settings: Settings): void {
-  localStorage.setItem(KEY, JSON.stringify(settings));
+  const next = fingerprint(settings);
+  let savedAt: number | undefined;
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      const prev = JSON.parse(raw) as Partial<Settings>;
+      savedAt = fingerprint(prev) === next ? prev.savedAt : Date.now();
+    } else {
+      savedAt = next === fingerprint(DEFAULT_SETTINGS) ? undefined : Date.now();
+    }
+  } catch {
+    savedAt = Date.now();
+  }
+  localStorage.setItem(KEY, JSON.stringify({ ...settings, savedAt }));
+}
+
+/**
+ * 控えに載せてよい設定。
+ *
+ * **APIキーは絶対に入れない。** 控えはメールや Drive に載せて別の端末へ運ぶ
+ * ものなので、鍵が同じ袋に入っていると、ファイルが漏れた時点で鍵も漏れる。
+ * キーは各端末で入れ直す(無料で再発行もできる)。
+ */
+export type PortableSettings = Omit<Settings, "apiKey">;
+
+export function portableSettings(settings: Settings): PortableSettings {
+  const { apiKey: _apiKey, ...rest } = settings;
+  return rest;
 }

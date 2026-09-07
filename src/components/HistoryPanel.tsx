@@ -11,7 +11,15 @@ import {
   type EpisodeRecord,
 } from "../lib/history";
 import ResultView from "./ResultView";
-import { backupFileName, buildBackup, parseBackup, restoreBackup } from "../lib/backup";
+import {
+  backupFileName,
+  buildBackup,
+  lastBackupAt,
+  markBackedUp,
+  parseBackup,
+  restoreBackup,
+  unsavedSince,
+} from "../lib/backup";
 import type { PromptConfig } from "../lib/prompt";
 
 interface Props {
@@ -21,6 +29,8 @@ interface Props {
   onCastEdit: (id: string, cast: string) => void;
   showName: string;
   accentColor: string;
+  /** 控えから設定を戻したときに、動いているアプリへ反映するため。 */
+  onSettingsRestored: () => void;
   /** カバー画像の注文文に使う。過去回でも同じように出せるようにするため。 */
   promptConfig: PromptConfig;
   apiKey: string;
@@ -47,6 +57,7 @@ export default function HistoryPanel({
   onChooseTitle,
   onEditMeta,
   onCastEdit,
+  onSettingsRestored,
   showName,
   accentColor,
   promptConfig,
@@ -58,6 +69,7 @@ export default function HistoryPanel({
   const [openId, setOpenId] = useState<string | null>(null);
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
   const [backupNote, setBackupNote] = useState("");
+  const [backedUpAt, setBackedUpAt] = useState<number | null>(() => lastBackupAt());
   const [confirming, setConfirming] = useState<"all" | "audio" | null>(null);
   const [query, setQuery] = useState("");
   /** 検索から開いた場面。その回の切り抜き候補の先頭に差し込む。 */
@@ -116,7 +128,12 @@ export default function HistoryPanel({
       a.download = backupFileName();
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      setBackupNote(`${backup.episodes.length}件を書き出しました(${a.download})`);
+      markBackedUp(backup.exportedAt);
+      setBackedUpAt(backup.exportedAt);
+      setBackupNote(
+        `${backup.episodes.length}件と設定を書き出しました(${a.download})。` +
+          `APIキーは入っていません。`,
+      );
     } catch (e) {
       setBackupNote(`⚠️ 書き出せませんでした: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -132,8 +149,11 @@ export default function HistoryPanel({
         r.added > 0 && `${r.added}件を追加`,
         r.updated > 0 && `${r.updated}件を更新`,
         r.skipped > 0 && `${r.skipped}件はこちらが新しいのでそのまま`,
+        r.settings === "restored" && "設定も戻しました(APIキーはこの端末のまま)",
+        r.settings === "kept-newer" && "設定はこちらが新しいのでそのまま",
       ].filter(Boolean);
       setBackupNote(parts.length > 0 ? `✓ ${parts.join(" / ")}` : "✓ 変わりはありませんでした");
+      if (r.settings === "restored") onSettingsRestored();
       refresh();
     } catch (e) {
       setBackupNote(`⚠️ ${e instanceof Error ? e.message : String(e)}`);
@@ -149,7 +169,8 @@ export default function HistoryPanel({
         <p className="muted">
           まだエピソードがありません。音声を処理すると自動で保存されます。
           <br />
-          別の端末で使っていた場合は、書き出しておいた控えをここから戻せます。
+          別の端末で使っていた場合は、書き出しておいた控えをここから戻せます
+          (番組名や番組の背景などの<strong>設定も一緒に戻ります</strong>)。
         </p>
         <label className="restore-pick">
           <input
@@ -177,6 +198,7 @@ export default function HistoryPanel({
     }, 50);
   };
 
+  const pendingBackup = unsavedSince(records, backedUpAt);
   const audioBytes = totalAudioBytes(records);
   const withAudio = records.filter((r) => r.audio).length;
 
@@ -232,9 +254,20 @@ export default function HistoryPanel({
           履歴はこの端末の中だけにあります。端末を替えたり、閲覧履歴を消したりすると
           <strong>全部消えます</strong>。書き出しておけば、別の端末でも戻せます。
           <br />
-          入るのはタイトル・説明文・チャプター・書き起こし・出演者など
-          <strong>作り直せないもの</strong>です。音声は入りません(元の録音から作り直せるうえ、
-          数百MBになるため)。
+          入るのはタイトル・説明文・チャプター・書き起こし・出演者と、
+          <strong>番組の設定</strong>(番組名・番組の背景・想定している聴き手・よく出る言葉・
+          トーンなど)です。どれも<strong>作り直せないもの</strong>です。
+          <br />
+          音声は入りません(元の録音から作り直せるうえ、数百MBになるため)。
+          <strong>APIキーも入りません</strong>(控えを人に渡しても鍵は渡りません)。
+        </p>
+        {/* 控えは「取っていなければ意味が無い」もの。覚えている前提にしない */}
+        <p className={pendingBackup > 0 ? "backup-due" : "muted"}>
+          {backedUpAt === null
+            ? `まだ一度も書き出していません(${records.length}件が この端末にしかありません)`
+            : pendingBackup > 0
+              ? `前回の控え(${formatDate(backedUpAt)})のあと、${pendingBackup}件ぶん増減しています`
+              : `前回の控え: ${formatDate(backedUpAt)}(そのあとの変更はありません)`}
         </p>
         <div className="row-buttons">
           <button onClick={exportBackup} disabled={records.length === 0}>

@@ -11,6 +11,9 @@ import { decodeWav, parseWavHeader, decodeBlock } from "../src/lib/audio/wav";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 import { buildPrompt, DEFAULT_PROMPT_CONFIG } from "../src/lib/prompt";
 import { buildCoverPrompt, colorName, COVER_STYLE_LABELS, type CoverStyle } from "../src/lib/coverPrompt";
+import { parseBackup, unsavedSince } from "../src/lib/backup";
+import { buildId3Tag, readId3Summary } from "../src/lib/id3";
+import { DEFAULT_SETTINGS, loadSettings, portableSettings, saveSettings } from "../src/lib/settings";
 import {
   __testAnswerFrom,
   __testIsDailyQuota,
@@ -1528,8 +1531,13 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
       { ...ep("a", 100, "ひとつめ"), audio: new Blob(["x"]) } as never,
       ep("b", 200, "ふたつめ") as never,
     ]);
-    check("控えの形が分かる", backup.format === "podcast-br-backup" && backup.version === 1);
+    check("控えの形が分かる", backup.format === "podcast-br-backup" && backup.version === 2,
+      `v${backup.version}`);
     check("2件入る", backup.episodes.length === 2);
+    // 端末を替えたときに書き直しにならないよう、設定も一緒に持ち出す
+    check("設定も入る", !!backup.settings && "prompt" in backup.settings);
+    check("APIキーは入らない", !!backup.settings && !("apiKey" in backup.settings),
+      Object.keys(backup.settings ?? {}).join(","));
     // 音声は入れない。数百MBになるうえ、元の録音から作り直せる
     check("音声は入れない", !("audio" in backup.episodes[0]),
       Object.keys(backup.episodes[0]).join(","));
@@ -1930,6 +1938,113 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     check("1日の上限: 押し直しても戻らないと伝える", day.includes("戻りません"), day.slice(0, 40));
     check("1日の上限: モデルを替える道を示す", day.includes("別のモデル"));
     check("1日の上限で「1分待って」と言わない", !day.includes("1分ほど待って"));
+  }
+
+  console.log("\n[36] 控え(端末を替えても失わないように)");
+  {
+    // localStorage はブラウザのもの。ここでは同じ振る舞いの入れ物を用意する
+    const store = new Map<string, string>();
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+      clear: () => store.clear(),
+    };
+
+    // APIキーは控えに載せない。控えはメールや Drive に載せて運ぶもの
+    const withKey = { ...DEFAULT_SETTINGS, apiKey: "AIzaSECRET" };
+    check("控えにAPIキーを載せない",
+      !JSON.stringify(portableSettings(withKey)).includes("AIzaSECRET"));
+    check("控えに番組の設定は載せる",
+      JSON.stringify(portableSettings({
+        ...withKey, prompt: { ...DEFAULT_SETTINGS.prompt, showName: "ブリッジラジオ" },
+      })).includes("ブリッジラジオ"));
+
+    // savedAt は「中身が変わった時刻」。書いた時刻にすると、開くたびに
+    // 新しくなって、まっさらな端末で控えが負けてしまう
+    store.clear();
+    saveSettings(DEFAULT_SETTINGS);
+    check("既定のままなら時刻を持たない", loadSettings().savedAt === undefined,
+      String(loadSettings().savedAt));
+    saveSettings({ ...DEFAULT_SETTINGS, prompt: { ...DEFAULT_SETTINGS.prompt, showName: "R" } });
+    const first = loadSettings().savedAt;
+    check("中身を変えたら時刻が付く", typeof first === "number");
+    saveSettings(loadSettings());
+    check("中身が同じなら時刻は据え置き", loadSettings().savedAt === first);
+    saveSettings({ ...loadSettings(), apiKey: "AIzaXXXX" });
+    check("キーを入れ替えただけでは新しくしない", loadSettings().savedAt === first);
+
+    // 古い控え(v1)も読める。設定が無いだけ
+    const v1 = JSON.stringify({
+      format: "podcast-br-backup", version: 1, exportedAt: 1,
+      episodes: [{ id: "a", createdAt: 100, meta: { titles: ["t"] } }],
+    });
+    check("v1 の控えも読める", parseBackup(v1).episodes.length === 1);
+    check("v1 には設定が無い", parseBackup(v1).settings === undefined);
+
+    const v2 = JSON.stringify({
+      format: "podcast-br-backup", version: 2, exportedAt: 2,
+      episodes: [{ id: "a", createdAt: 100, updatedAt: 500, meta: { titles: ["t"] } }],
+      settings: { ...portableSettings(DEFAULT_SETTINGS), savedAt: 9 },
+    });
+    check("v2 は設定も読める", parseBackup(v2).settings?.savedAt === 9);
+
+    // 他所のファイルで履歴を虫食いにしない
+    const rejects = (text: string) => {
+      try { parseBackup(text); return ""; } catch (e) { return e instanceof Error ? e.message : "x"; }
+    };
+    check("よその JSON は弾く", rejects('{"hello":1}').includes("控えではない"));
+    check("JSON でなければ弾く", rejects("なにこれ").includes("JSON"));
+    check("新しすぎる版は弾く", rejects('{"format":"podcast-br-backup","version":99}').includes("新しい版"));
+
+    // 前回の控えからいくつ増えたか。覚えている前提にしないための数
+    const recs = [
+      { id: "a", createdAt: 100, updatedAt: 100 },
+      { id: "b", createdAt: 200, updatedAt: 900 },
+      { id: "c", createdAt: 300 },
+    ] as Parameters<typeof unsavedSince>[0];
+    check("控えを取っていなければ全部が対象", unsavedSince(recs, null) === 3);
+    check("控えのあとに触った回だけ数える", unsavedSince(recs, 250) === 2,
+      String(unsavedSince(recs, 250)));
+    check("控えのほうが新しければ0件", unsavedSince(recs, 1000) === 0);
+  }
+
+  console.log("\n[37] 書き出した MP3 を読み返す");
+  {
+    // 作ったつもりと入っている物がずれても気づけない場所だった。
+    // 実際、カバーの描画に失敗するとタグが丸ごと落ちる不具合が出ていた
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 0xff, 0xd9]);
+    const tag = buildId3Tag({
+      title: "ねぎ塩だれを作りすぎた回",
+      showName: "ブリッジラジオ",
+      description: "説明",
+      artwork: { data: jpeg, mime: "image/jpeg" },
+      chapters: [
+        { title: "オープニング", startMs: 0, endMs: 3000 },
+        { title: "本題", startMs: 3000, endMs: 9000 },
+      ],
+      durationMs: 9000,
+    });
+    const got = readId3Summary(tag);
+    check("タグが付いていると分かる", got.tagged);
+    check("題名を読み返せる", got.title === "ねぎ塩だれを作りすぎた回", got.title);
+    check("番組名を読み返せる", got.showName === "ブリッジラジオ", got.showName);
+    check("チャプター数を数えられる", got.chapterCount === 2, String(got.chapterCount));
+    check("カバーの大きさが分かる", got.artworkBytes === jpeg.length,
+      `${got.artworkBytes} / ${jpeg.length}`);
+
+    // 絵が無くても、題名とチャプターは読めること(絵だけ諦める道がある)
+    const noArt = readId3Summary(buildId3Tag({
+      title: "絵なしの回", showName: "R", description: "d",
+      chapters: [{ title: "章", startMs: 0, endMs: 1000 }], durationMs: 1000,
+    }));
+    check("絵が無くても題名は入る", noArt.title === "絵なしの回" && noArt.chapterCount === 1);
+    check("絵が無いことが分かる", noArt.artworkBytes === 0);
+
+    // タグの付いていない生の MP3
+    const bare = readId3Summary(new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0, 0, 0, 0]));
+    check("タグ無しを見分ける", !bare.tagged && bare.title === "");
+    check("短すぎても落ちない", readId3Summary(new Uint8Array([0x49])).tagged === false);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);

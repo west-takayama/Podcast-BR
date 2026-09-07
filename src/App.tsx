@@ -30,6 +30,7 @@ import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
 import { attachId3, buildId3Tag, toId3Chapters } from "./lib/id3";
 import { renderArtworkJpeg } from "./lib/image";
+import { loadArtwork } from "./lib/history";
 import { ScreenWakeLock } from "./lib/wakeLock";
 import { applyAccent } from "./lib/theme";
 import CopyButton from "./components/CopyButton";
@@ -228,26 +229,55 @@ export default function App() {
     reset();
   };
 
-  /** MP3 に ID3 タグ(タイトル・番組名・説明・アートワーク・チャプター)を付ける。 */
+  /**
+   * カバーの絵を描く。
+   *
+   * 写真は **IndexedDB の控えだけを見る**。以前は取り込んだ ImageBitmap を
+   * App 側で持ち続けていたが、写真の部品は自分が作った bitmap を画面から
+   * 外れた時点で閉じる。持ち主が2人いる状態で、閉じられたものを使って
+   * 描こうとして失敗していた(下の「タグを付け直す」で実害が出ていた)。
+   * 毎回控えから作り直せば、古い回の写真が次の回に残ることもない。
+   */
+  const renderCover = async (title: string): Promise<Uint8Array> => {
+    const saved = await loadArtwork().catch(() => null);
+    const bitmap = saved ? await createImageBitmap(saved.blob) : null;
+    try {
+      return await renderArtworkJpeg({
+        title,
+        showName: settings.prompt.showName,
+        accent: settings.accentColor,
+        background: bitmap ?? undefined,
+      });
+    } finally {
+      bitmap?.close();
+    }
+  };
+
+  /**
+   * MP3 に ID3 タグ(タイトル・番組名・説明・アートワーク・チャプター)を付ける。
+   *
+   * **絵で失敗しても、題名とチャプターは必ず入れる。** 以前はひとつの
+   * try で囲んでいたため、カバーが描けなかっただけでタグが丸ごと落ちていた。
+   * 配信側から見て、絵が単色なのと題名が空なのとでは重さが違う。
+   */
   const buildTaggedMp3 = async (
     mp3: ArrayBuffer,
     generated: EpisodeMeta,
     title: string,
     durationSec: number,
-    background?: ImageBitmap | null,
   ): Promise<Blob> => {
+    let artwork: Uint8Array | null = null;
     try {
-      const artwork = await renderArtworkJpeg({
-        title,
-        showName: settings.prompt.showName,
-        accent: settings.accentColor,
-        background: background ?? undefined,
-      });
+      artwork = await renderCover(title);
+    } catch {
+      // 絵は諦める。文字の情報だけでも入れる
+    }
+    try {
       const tag = buildId3Tag({
         title,
         showName: settings.prompt.showName,
         description: generated.description,
-        artwork: { data: artwork, mime: "image/jpeg" },
+        artwork: artwork ? { data: artwork, mime: "image/jpeg" } : undefined,
         chapters: toId3Chapters(generated.chapters, durationSec * 1000),
         durationMs: durationSec * 1000,
       });
@@ -257,15 +287,6 @@ export default function App() {
       return new Blob([mp3], { type: "audio/mpeg" });
     }
   };
-
-  /**
-   * 取り込んだ写真を、MP3 に埋め込むカバーにも反映する。
-   *
-   * タグ付けは生成直後に走るため、その時点ではまだ写真が無い。
-   * 写真を入れたのに配信側のカバーが単色のまま、という状態を避ける。
-   */
-  /** 取り込んだ写真。タグを付け直すたびに要るので持っておく。 */
-  const backgroundRef = useRef<ImageBitmap | null>(null);
 
   /**
    * いま画面に出ている内容で MP3 のタグを付け直す。
@@ -284,7 +305,6 @@ export default function App() {
         nextMeta,
         title,
         converted.durationSec,
-        backgroundRef.current,
       );
       setMp3Url((prev) => {
         if (prev) URL.revokeObjectURL(prev);
@@ -298,8 +318,13 @@ export default function App() {
     }
   };
 
-  const applyArtwork = async (bitmap: ImageBitmap | null) => {
-    backgroundRef.current = bitmap;
+  /**
+   * 写真を入れ替えたら、MP3 のカバーも入れ替える。
+   *
+   * タグ付けは生成直後に走るため、その時点ではまだ写真が無い。
+   * 写真を入れたのに配信側のカバーが単色のまま、という状態を避ける。
+   */
+  const applyArtwork = async () => {
     if (!meta) return;
     await retagMp3(meta, chosenTitle || meta.titles[0] || "", "MP3 のカバーを付け直しています…");
   };
@@ -811,6 +836,13 @@ export default function App() {
           onCastEdit={(id, next) => {
             void updateEpisode(id, { cast: next || undefined });
           }}
+          // 控えから設定を戻したら、動いているアプリにも反映する。
+          // 反映しないと、次に何か触った拍子に古い設定で上書きされる
+          onSettingsRestored={() => {
+            const restored = loadSettings();
+            setSettings(restored);
+            setCast(restored.lastCast ?? "");
+          }}
           showName={settings.prompt.showName}
           accentColor={settings.accentColor}
           promptConfig={settings.prompt}
@@ -1001,7 +1033,7 @@ export default function App() {
                 onRegenerate={regenerate}
                 onMakeTranscript={makeTranscript}
                 onEdit={editMeta}
-                onBackgroundChange={(b) => void applyArtwork(b)}
+                onBackgroundChange={() => void applyArtwork()}
                 cast={cast}
                 onCastChange={(next) => {
                   setCast(next);

@@ -222,3 +222,92 @@ export function attachId3(mp3: ArrayBuffer, tag: Uint8Array): Blob {
   out.set(new Uint8Array(mp3), tag.length);
   return new Blob([out.buffer], { type: "audio/mpeg" });
 }
+
+/**
+ * 書き出した MP3 に**実際に**何が入っているかを読み返す。
+ *
+ * ここは「作ったつもり」と「入っている物」がずれても気づけない場所だった。
+ * 実際、カバーの描画に失敗したときにタグが丸ごと落ちる不具合があり、
+ * 画面には題名もチャプターも出ているのに、配信するファイルだけが空という
+ * 状態が起きていた。作った物を読み返して見せれば、次に同じことが起きても
+ * 出す前に気づける。
+ */
+export interface Id3Summary {
+  /** ID3v2 のタグが付いているか。 */
+  tagged: boolean;
+  title: string;
+  showName: string;
+  /** カバー画像のバイト数。無ければ 0。 */
+  artworkBytes: number;
+  chapterCount: number;
+  /** タグ全体のバイト数。 */
+  tagBytes: number;
+}
+
+/** UTF-16(BOM 付き)か Latin-1 のテキストを読む。 */
+function readText(body: Uint8Array): string {
+  if (body.length === 0) return "";
+  const encoding = body[0];
+  const rest = body.subarray(1);
+  if (encoding === ENCODING_UTF16) {
+    const be = rest[0] === 0xfe && rest[1] === 0xff;
+    const start = (rest[0] === 0xff && rest[1] === 0xfe) || be ? 2 : 0;
+    let out = "";
+    for (let i = start; i + 1 < rest.length; i += 2) {
+      const code = be ? (rest[i] << 8) | rest[i + 1] : rest[i] | (rest[i + 1] << 8);
+      if (code === 0) break;
+      out += String.fromCharCode(code);
+    }
+    return out;
+  }
+  let out = "";
+  for (const b of rest) {
+    if (b === 0) break;
+    out += String.fromCharCode(b);
+  }
+  return out;
+}
+
+export function readId3Summary(bytes: Uint8Array): Id3Summary {
+  const empty: Id3Summary = {
+    tagged: false, title: "", showName: "", artworkBytes: 0, chapterCount: 0, tagBytes: 0,
+  };
+  if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return empty;
+  // タグ全体の大きさだけは同期安全整数
+  const size =
+    ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+  const end = Math.min(10 + size, bytes.length);
+
+  const out: Id3Summary = { ...empty, tagged: true, tagBytes: 10 + size };
+  let at = 10;
+  while (at + 10 <= end) {
+    const id = String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+    // 余白(0 埋め)に入ったら終わり
+    if (!/^[A-Z0-9]{4}$/.test(id)) break;
+    const len =
+      (bytes[at + 4] << 24) | (bytes[at + 5] << 16) | (bytes[at + 6] << 8) | bytes[at + 7];
+    if (len <= 0 || at + 10 + len > end) break;
+    const body = bytes.subarray(at + 10, at + 10 + len);
+    if (id === "TIT2") out.title = readText(body);
+    else if (id === "TALB") out.showName = readText(body);
+    else if (id === "CHAP") out.chapterCount++;
+    else if (id === "APIC") {
+      // 画像そのものは、MIME と説明のあとに続く
+      let p = 1;
+      while (p < body.length && body[p] !== 0) p++;
+      p += 2; // MIME の終端 + 種別
+      // 説明(UTF-16。BOM + 本体 + 終端2バイト)を読み飛ばす
+      if (body[0] === ENCODING_UTF16) {
+        p += 2;
+        while (p + 1 < body.length && !(body[p] === 0 && body[p + 1] === 0)) p += 2;
+        p += 2;
+      } else {
+        while (p < body.length && body[p] !== 0) p++;
+        p += 1;
+      }
+      out.artworkBytes = Math.max(0, body.length - p);
+    }
+    at += 10 + len;
+  }
+  return out;
+}

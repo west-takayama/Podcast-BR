@@ -613,3 +613,10 @@ video.card-preview { background: #000; }
 /* 次に話すと決めたこと。収録の直前に見えるように作成画面へ出す */
 .plan-card { border: 1px solid var(--accent); }
 .plan-title { font-weight: 700; font-size: 1.05rem; margin: 4px 0 6px; }
+
+/* 控えを取っていない件数。責めるほどでもないが、見落とさない程度に立てる */
+.backup-due {
+  color: var(--accent);
+  font-size: 0.85rem;
+  margin: 6px 0 0;
+}
