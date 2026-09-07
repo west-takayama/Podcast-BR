@@ -79,7 +79,23 @@ print(json.dumps({
   'audio_ok': m.info.length > 0, 'audio_len': round(m.info.length, 2),
 }, ensure_ascii=False))
 `;
-  const raw = execFileSync("python3", ["-c", script, path], { encoding: "utf8" });
+  // mutagen は「こちらの書き方が正しいか」を外から確かめるための第三者。
+  // 入っていないと、ここで積み上げた検証が丸ごと素通りする。
+  // 分かりにくい例外ではなく、何をすればいいかを書いて止める
+  let raw: string;
+  try {
+    raw = execFileSync("python3", ["-c", script, path], { encoding: "utf8" });
+  } catch (e) {
+    const msg = String((e as { stderr?: string })?.stderr ?? e);
+    if (msg.includes("mutagen")) {
+      console.error(
+        "\n❌ mutagen(Python)が入っていないため、MP3 タグの検証ができません。" +
+          "\n   `pip install mutagen` を実行してから、もう一度お試しください。\n",
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
   const got = JSON.parse(raw);
 
   let fail = 0;
