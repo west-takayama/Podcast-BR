@@ -39,6 +39,7 @@ import { MixedReader, dbToGain, matchGainsDb, type MixSource } from "./audio/mix
 import { SpectrumMeter, matchToneDb, toneFilters, toneLevelShiftDb, BANDS } from "./audio/tone";
 import type { ToneCurve } from "./audio/tone";
 import { Mp3Stream, decimationFactor } from "./audio/mp3";
+import { ANALYZE_SHARE } from "./progress";
 
 const BLOCK_SECONDS = 10;
 const AI_BITRATE_KBPS = 32;
@@ -324,7 +325,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
       if (floorHp) floorHp.process(channels, length);
       analyzer.push(channels, length);
       leveler?.push(channels, length);
-      post("analyze", fraction / 3);
+      post("analyze", fraction * ANALYZE_SHARE[0]);
     });
     const { noiseFloor, voiceRms } = analyzer.result();
     // SNR は「声が鳴っている区間の RMS」と比べる。全体の RMS で比べると
@@ -364,7 +365,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
         outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels,
         length,
       );
-      post("analyze", 1 / 3 + fraction / 3);
+      post("analyze", ANALYZE_SHARE[0] + fraction * ANALYZE_SHARE[1]);
     });
 
     const measuredLufs = meter.integratedLufs();
@@ -398,7 +399,7 @@ self.onmessage = async (e: MessageEvent<Request>) => {
           outChannels === 1 ? [downmix(channels, length, monoScratch)] : channels;
         applyGain(shaped, length, gain);
         trialLimiter.process(shaped, length, (limited, len) => trialMeter.push(limited, len));
-        post("analyze", 2 / 3 + fraction / 3);
+        post("analyze", ANALYZE_SHARE[0] + ANALYZE_SHARE[1] + fraction * ANALYZE_SHARE[2]);
       });
       trialLimiter.flush((limited, len) => trialMeter.push(limited, len));
 

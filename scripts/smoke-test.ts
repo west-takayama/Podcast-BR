@@ -26,7 +26,7 @@ import {
   transcriptToText,
 } from "../src/lib/gemini";
 import { PauseDetector } from "../src/lib/audio/dsp";
-import { overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
+import { ANALYZE_SHARE, overallProgress, estimateRemainingMs, formatDuration } from "../src/lib/progress";
 import { wrapJapanese } from "../src/lib/image";
 import { Diagnostics } from "../src/lib/audio/diagnostics";
 import { captionsForRange, speechRuns, splitCaption } from "../src/lib/video/clip";
@@ -2045,6 +2045,36 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const bare = readId3Summary(new Uint8Array([0xff, 0xfb, 0x90, 0x00, 0, 0, 0, 0]));
     check("タグ無しを見分ける", !bare.tagged && bare.title === "");
     check("短すぎても落ちない", readId3Summary(new Uint8Array([0x49])).tagged === false);
+  }
+
+  console.log("\n[38] 進捗バーの進み方");
+  {
+    // 解析は 2 回読む。3 回目は必要なときだけで、多くの場合は省かれる。
+    // 省かれた回に大きく跳ねないよう、3 回目のぶんは小さく取ってある
+    check("解析の割り当ての合計が 1", Math.abs(ANALYZE_SHARE.reduce((a, b) => a + b, 0) - 1) < 1e-9);
+    check("3回目のぶんは小さい", ANALYZE_SHARE[2] <= 0.15, String(ANALYZE_SHARE[2]));
+
+    const twoPassEnd = overallProgress("analyze", ANALYZE_SHARE[0] + ANALYZE_SHARE[1]);
+    const analyzeEnd = overallProgress("process", 0);
+    const gap = analyzeEnd - twoPassEnd;
+    check("3回目が省かれても跳ねが小さい", gap < 0.03,
+      `${(twoPassEnd * 100).toFixed(1)}% → ${(analyzeEnd * 100).toFixed(1)}%(跳ね ${(gap * 100).toFixed(1)}ポイント)`);
+
+    // 逆戻りしないこと。戻ると「やり直している」ように見える
+    let prev = -1;
+    let monotonic = true;
+    for (const [stage, f] of [
+      ["analyze", 0], ["analyze", 0.45], ["analyze", 0.9], ["analyze", 1],
+      ["process", 0], ["process", 0.5], ["process", 1],
+      ["upload", 0], ["upload", 1], ["generate", 0], ["generate", 1],
+    ] as [ "analyze" | "process" | "upload" | "generate", number][]) {
+      const p = overallProgress(stage, f);
+      if (p < prev) monotonic = false;
+      prev = p;
+    }
+    check("進捗が逆戻りしない", monotonic);
+    check("100%を超えない", overallProgress("generate", 2) <= 1);
+    check("負の値でも 0 未満にならない", overallProgress("analyze", -1) >= 0);
   }
 
   console.log(failures === 0 ? "\n✅ ALL OK\n" : `\n❌ ${failures} 件失敗\n`);
