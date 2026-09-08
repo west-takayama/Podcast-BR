@@ -1138,26 +1138,134 @@ async function callTopics(
 }
 
 /** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */
-function extractJson(text: string, what = "お題", finishReason = ""): Record<string, unknown> {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
-  const candidates = [fenced?.[1], text];
-  for (const c of candidates) {
-    if (!c) continue;
-    const start = c.indexOf("{");
-    const end = c.lastIndexOf("}");
-    if (start < 0 || end <= start) continue;
-    try {
-      return JSON.parse(c.slice(start, end + 1)) as Record<string, unknown>;
-    } catch {
-      // 次の候補を試す
+/**
+ * 文字列の中の括弧は数えない。エスケープも見る。
+ * ここを雑にすると、説明文の中の「{」で構造を読み違える。
+ */
+function scanJson(text: string, start: number): {
+  /** 対応が取れて閉じた位置。閉じきっていなければ -1。 */
+  end: number;
+  /** 途中で切れたとき、そこまでで**値が完成していた**最後の位置。 */
+  lastComplete: number;
+  /** 切れた時点で開いたままの括弧。閉じ直すのに使う。 */
+  open: string[];
+  /** 文字列の途中で切れたか。 */
+  inString: boolean;
+} {
+  const open: string[] = [];
+  let inString = false;
+  let esc = false;
+  let lastComplete = -1;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === "{" || c === "[") open.push(c === "{" ? "}" : "]");
+    else if (c === "}" || c === "]") {
+      open.pop();
+      lastComplete = i + 1;
+      if (open.length === 0) return { end: i, lastComplete, open, inString };
+    } else if (c === ",") {
+      // ここまでの値は完成している。切れたときはここへ戻れる
+      lastComplete = i;
     }
   }
-  if (finishReason === "MAX_TOKENS") {
+  return { end: -1, lastComplete, open, inString };
+}
+
+function tryParseObject(text: string): Record<string, unknown> | null {
+  try {
+    const got = JSON.parse(text);
+    return got && typeof got === "object" && !Array.isArray(got)
+      ? (got as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 途中で切れた JSON を、読めるところまで読む。
+ *
+ * 応答が長さの上限で切れることがある。全部捨てると、数分かけた変換のあとに
+ * 「読めませんでした」しか残らない。**題名と説明文は先頭にある**ので、
+ * 切れていても残っていることが多い。値が完成している最後の位置まで戻して、
+ * 開いたままの括弧を閉じれば、そこまでは使える。
+ */
+function repairTruncated(text: string, start: number): Record<string, unknown> | null {
+  let body = text.slice(start);
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const scan = scanJson(body, 0);
+    let cut = scan.lastComplete;
+    if (cut <= 0) return null;
+    // 区切りのカンマ自体は落とす
+    let head = body.slice(0, cut).replace(/,\s*$/, "");
+    // 「"key":」だけ残っていたら、その組ごと落とす
+    head = head.replace(/,?\s*"[^"]*"\s*:\s*$/, "");
+    const closed = head + scan.open.slice().reverse().join("");
+    const got = tryParseObject(closed);
+    if (got) return got;
+    // 駄目ならもう一段戻る
+    body = body.slice(0, Math.max(0, cut - 1));
+    if (body.length < 2) return null;
+  }
+  return null;
+}
+
+/**
+ * 本文から JSON を取り出す。
+ *
+ * 以前は「最初の { から最後の } まで」で切っていた。前置きの文に { が
+ * 混ざっていたり、後ろに文が付いていたりすると、そこに釣られて読めなくなる。
+ * 実際に「生成結果の形式が読めませんでした」が出ていた。
+ * 括弧の対応を見ながら、読める塊を探す。
+ */
+function extractJson(text: string, what = "お題", finishReason = ""): Record<string, unknown> {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  for (const c of [fenced?.[1], text]) {
+    if (!c) continue;
+    const first = c.indexOf("{");
+    if (first < 0) continue;
+
+    // 先頭の { が閉じていなければ、その塊は途中で切れている。
+    // この状態で「対応が取れる塊」を探すと、**中の小さな塊**(チャプター1件など)を
+    // 拾ってしまい、題名も説明文も失う。先に外側から読めるところまで拾う
+    if (scanJson(c, first).end < 0) {
+      const repaired = repairTruncated(c, first);
+      if (repaired) return repaired;
+    }
+
+    // { のたびに、そこから括弧の対応が取れるかを見る。
+    // いちばん大きく取れたものを採る
+    let best: Record<string, unknown> | null = null;
+    let bestLen = 0;
+    for (let i = first; i >= 0; i = c.indexOf("{", i + 1)) {
+      const { end } = scanJson(c, i);
+      if (end < 0) continue;
+      const got = tryParseObject(c.slice(i, end + 1));
+      if (got && end - i > bestLen) {
+        best = got;
+        bestLen = end - i;
+      }
+    }
+    if (best) return best;
+  }
+
+  const start = text.indexOf("{");
+
+  const excerpt = text.replace(/\s+/g, " ").trim().slice(0, 80);
+  const tail = excerpt ? `(返ってきたもの: ${excerpt}…)` : "(何も返ってきていません)";
+  if (finishReason === "MAX_TOKENS" || (start >= 0 && scanJson(text, start).end < 0)) {
     throw new Error(
-      `${what}が長すぎて途中で切れました。設定でモデルを替えるか、もう一度お試しください。`,
+      `${what}が長すぎて途中で切れました。設定でモデルを替えるか、もう一度お試しください。${tail}`,
     );
   }
-  throw new Error(`${what}の形式が読めませんでした。もう一度お試しください。`);
+  throw new Error(`${what}の形式が読めませんでした。もう一度お試しください。${tail}`);
 }
 
 /** 応答に付いてくる出典を取り出す。 */
