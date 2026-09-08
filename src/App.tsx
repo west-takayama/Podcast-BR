@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import {
   generateEpisodeMeta,
   generateTranscript,
@@ -34,13 +34,24 @@ import { loadArtwork } from "./lib/history";
 import { ScreenWakeLock } from "./lib/wakeLock";
 import { applyAccent } from "./lib/theme";
 import CopyButton from "./components/CopyButton";
-import SettingsPanel from "./components/SettingsPanel";
-import ResultView from "./components/ResultView";
-import HistoryPanel from "./components/HistoryPanel";
-import InsightsPanel from "./components/InsightsPanel";
 import ProgressPanel from "./components/ProgressPanel";
-import ShortsPanel from "./components/ShortsPanel";
-import TrackPicker from "./components/TrackPicker";
+
+// 画面ごとに分けて、開いたときに読む。
+//
+// 起動時に全部読むと、その解析と実行のぶんだけ最初の描画が遅れる。
+// キャッシュから出しているときでも、この時間は毎回かかる。
+// 最初に要るのは「音声を選ぶ」ところだけで、残りは押されてからで間に合う。
+const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
+const ResultView = lazy(() => import("./components/ResultView"));
+const HistoryPanel = lazy(() => import("./components/HistoryPanel"));
+const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
+const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
+const TrackPicker = lazy(() => import("./components/TrackPicker"));
+
+/** 読み込み中の置き場所。一瞬で終わるので、飛び跳ねない高さだけ確保する。 */
+function Loading() {
+  return <div className="card muted">読み込み中…</div>;
+}
 
 type Tab = "create" | "shorts" | "next" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
@@ -807,6 +818,7 @@ export default function App() {
         </div>
       )}
 
+      <Suspense fallback={<Loading />}>
       {tab === "settings" && (
         <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setTab("create")} />
       )}
@@ -1048,6 +1060,7 @@ export default function App() {
           )}
         </>
       )}
+      </Suspense>
     </>
   );
 }

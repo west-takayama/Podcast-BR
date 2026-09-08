@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "tsx scripts/smoke-test.ts && tsx scripts/lufs-check.ts && tsx scripts/id3-check.ts && tsx scripts/seam-check.ts",
+    "test": "tsx scripts/smoke-test.ts && tsx scripts/lufs-check.ts && tsx scripts/id3-check.ts && tsx scripts/seam-check.ts && tsx scripts/json-check.ts",
     "bench": "tsx scripts/bench.ts",
     "test:audio": "tsx scripts/lufs-check.ts",
     "test:id3": "tsx scripts/id3-check.ts"

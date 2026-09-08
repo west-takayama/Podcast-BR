@@ -29,19 +29,34 @@ export function serviceWorker(): Plugin {
       const precache = ["./", ...assets, ...STATIC_FILES].sort();
       const version = createHash("sha256").update(precache.join("\n")).digest("hex").slice(0, 12);
 
+      // 先に取るものと、後回しにするものを分ける。
+      //
+      // 初めて開いた端末では、裏で 1.9MB ほど先読みしている。回線を分け合うので、
+      // 画面が出るまでの時間に響く。整音や切り抜きの重い部品(合わせて 1.5MB)は
+      // 押されるまで要らないので、画面まわりを取り終えてから取る。
+      const HEAVY = /(encoder\.worker|clip-|mp3-)/;
+      const first = precache.filter((f) => !HEAVY.test(f));
+      const later = precache.filter((f) => HEAVY.test(f));
+
       this.emitFile({
         type: "asset",
         fileName: "sw.js",
-        source: renderSw(version, precache),
+        source: renderSw(version, first, later),
       });
     },
   };
 }
 
-function renderSw(version: string, precache: string[]): string {
+function renderSw(version: string, precache: string[], deferred: string[]): string {
   return `// 自動生成。sw-plugin.ts が出力しています。編集しても次のビルドで消えます。
 const CACHE = "podcast-br-${version}";
 const PRECACHE = ${JSON.stringify(precache, null, 2)};
+/**
+ * 後回しにするもの。整音と切り抜きの部品で、合わせて 1.5MB ほどある。
+ * 押されるまで要らないので、画面まわりを取り終えてから取る。
+ * (取れていなくても、使うときに取りに行って、そのとき控える)
+ */
+const DEFERRED = ${JSON.stringify(deferred, null, 2)};
 
 // ハッシュ付きのファイル名は中身が変われば名前も変わるため、
 // 一度キャッシュしたら再取得の必要がない。
@@ -54,6 +69,10 @@ self.addEventListener("install", (event) => {
       // 一つ失敗しても残りは入れる(addAll は全滅するため個別に扱う)
       await Promise.all(
         PRECACHE.map((url) => cache.add(new Request(url, { cache: "reload" })).catch(() => {})),
+      );
+      // 画面まわりが揃ってから、重いものを取る
+      await Promise.all(
+        DEFERRED.map((url) => cache.add(new Request(url, { cache: "reload" })).catch(() => {})),
       );
       // ここで skipWaiting はしない。動いているページの資材を奪わないため
     })(),
