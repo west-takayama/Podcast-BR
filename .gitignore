@@ -3,3 +3,9 @@ dist
 *.local
 .DS_Store
 tsconfig.tsbuildinfo
+
+# 検証で作る音声のもと。大きいので、走らせるたびに作り直す
+e2e/*.wav
+e2e/*.png
+e2e/*.json
+e2e/*.mp3
