@@ -408,7 +408,10 @@ function normalizeMeta(raw: unknown): EpisodeMeta {
   const titles = strArray(o.titles);
   const description = typeof o.description === "string" ? o.description : "";
   if (titles.length === 0 || !description) {
-    throw new Error("生成結果にタイトルまたは説明文が含まれていませんでした。再試行してください。");
+    throw new Error(
+      `生成結果に${titles.length === 0 ? "タイトル" : "説明文"}が含まれていませんでした` +
+        "(返答が途中で切れた可能性があります)。再試行してください。",
+    );
   }
 
   const chapters = Array.isArray(o.chapters)
@@ -921,6 +924,22 @@ function throwForStatus(status: number, body: string, what: string): never {
   throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
 }
 
+/**
+ * 「頼みすぎて返しきれなかった」たぐいの失敗か。
+ *
+ * 通信も上限も関係なく、**返ってきた中身が使えなかった**場合だけを拾う。
+ * 混雑や上限で失敗したものをここで拾うと、無駄に投げ直すことになる。
+ */
+function isShortfall(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (
+    err.message.includes("途中で切れました") ||
+    err.message.includes("形式が読めませんでした") ||
+    err.message.includes("含まれていませんでした") ||
+    err.message.includes("が返りませんでした")
+  );
+}
+
 export async function generateEpisodeMeta(opts: GenerateOptions): Promise<EpisodeMeta> {
   try {
     return await generateEpisodeMetaInner(opts);
@@ -930,6 +949,33 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
       throw new Error(
         "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
       );
+    }
+
+    // 頼んだ量が多すぎて返しきれなかったなら、**項目を減らしてもう一度だけ**試す。
+    //
+    // 一度に9項目(切り抜き候補3つ・SNS告知文3種を含む)を頼んでいる。返す量が
+    // 多いほど途中で切れやすい。ここで諦めると、数分かけた変換のあとに
+    // エラーだけが残る。題名・説明文・チャプターが手に入れば投稿はできる。
+    //
+    // 音声は送信済みなので、かかるのは呼び出し1回ぶんだけ。
+    if (isShortfall(err) && !opts.context?.slim) {
+      opts.onStatus("返しきれなかったようです。項目を減らしてもう一度試します…");
+      try {
+        return await generateEpisodeMetaInner({
+          ...opts,
+          context: { ...(opts.context ?? {}), slim: true },
+        });
+      } catch (retryErr) {
+        if (retryErr instanceof DOMException && retryErr.name === "AbortError") throw retryErr;
+        // 二度目も駄目なら、**最初の理由**を伝える。二度目の事情を出すと
+        // 何が起きたのか分からなくなる。
+        // ただし「もう自動で2回試したこと」は添える。押し直すかどうかの判断が変わる
+        const first = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `${first} (項目を減らして自動でもう一度試しましたが、同じでした。` +
+            `変換済みMP3はそのまま使えます)`,
+        );
+      }
     }
     throw err;
   }

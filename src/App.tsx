@@ -25,6 +25,7 @@ import {
 import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress";
 import { castLine } from "./lib/cast";
 import { clearPlan, loadPlan, planAsText, type Plan } from "./lib/plan";
+import { noteError } from "./lib/errorLog";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
@@ -35,13 +36,15 @@ import { ScreenWakeLock } from "./lib/wakeLock";
 import { applyAccent } from "./lib/theme";
 import CopyButton from "./components/CopyButton";
 import ProgressPanel from "./components/ProgressPanel";
+// 設定は、キーを入れていない人が**最初に見る画面**。ここだけは遅延させない。
+// 分けると「読み込み中…」が一瞬挟まる。大きさも 3.6kB(gzip)しかない
+import SettingsPanel from "./components/SettingsPanel";
 
 // 画面ごとに分けて、開いたときに読む。
 //
 // 起動時に全部読むと、その解析と実行のぶんだけ最初の描画が遅れる。
 // キャッシュから出しているときでも、この時間は毎回かかる。
 // 最初に要るのは「音声を選ぶ」ところだけで、残りは押されてからで間に合う。
-const SettingsPanel = lazy(() => import("./components/SettingsPanel"));
 const ResultView = lazy(() => import("./components/ResultView"));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel"));
 const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
@@ -376,7 +379,7 @@ export default function App() {
       window.scrollTo({ top: 0 });
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(noteError("文章の作り直し", err, settings.model));
       }
     } finally {
       setBusyText("");
@@ -405,7 +408,7 @@ export default function App() {
       if (episodeId) updateEpisode(episodeId, { transcript: segments });
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(noteError("書き起こし", err, settings.model));
       }
     } finally {
       setBusyText("");
@@ -565,7 +568,7 @@ export default function App() {
     } catch (err) {
       void wakeLockRef.current.stop();
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
+      setError(noteError("変換と生成", err, settings.model));
       setPhase("idle");
     }
   };
@@ -695,7 +698,7 @@ export default function App() {
       await runGeneration();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
+      setError(noteError("生成のやり直し", err, settings.model));
       setPhase("idle");
     }
   };
@@ -739,7 +742,7 @@ export default function App() {
       await runGeneration(saved.uploaded ?? null);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : String(err));
+      setError(noteError("中断からの復帰", err, settings.model));
       setPhase("idle");
     }
   };

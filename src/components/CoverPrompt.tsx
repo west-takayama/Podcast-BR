@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { noteError } from "../lib/errorLog";
 import CopyButton from "./CopyButton";
 import {
   COVER_STYLE_LABELS,
@@ -88,7 +89,7 @@ export default function CoverPrompt({
       setIdeas(got);
       setChosen(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("絵柄の提案", e, model));
     } finally {
       setBusy("");
     }

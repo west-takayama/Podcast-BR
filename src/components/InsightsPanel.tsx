@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { noteError } from "../lib/errorLog";
 import { suggestTopics, type TopicSuggestions } from "../lib/gemini";
 import { loadPlan, savePlan, type Plan } from "../lib/plan";
 import {
@@ -64,7 +65,7 @@ export default function InsightsPanel({ settings, onModelChanged }: Props) {
       });
       setSuggestions(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("お題の提案", e, settings.model));
     } finally {
       setBusy(false);
       setStatus("");

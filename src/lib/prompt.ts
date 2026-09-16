@@ -63,7 +63,18 @@ export const DEFAULT_PROMPT_CONFIG: PromptConfig = {
 };
 
 /** JSON スキーマを文章で示すより、実際の型定義を見せた方が構造が安定する。 */
-function schemaBlock(generateSocial: boolean): string {
+function schemaBlock(generateSocial: boolean, slim = false): string {
+  // 一度で全部を頼んで失敗したときの、二度目。
+  // 返す量が多いほど途中で切れやすく、時間もかかる。投稿に要るものだけに絞る
+  if (slim) {
+    return `{
+  "titles": string[],     // タイトル案3つ
+  "description": string,  // エピソード説明文
+  "chapters": [{ "time": string, "label": string }],  // time は "MM:SS"
+  "hashtags": string[],   // "#"付きのハッシュタグ5つ
+  "keywords": string[]    // 検索されうるキーワード5〜8語(#なし)
+}`;
+  }
   const social = generateSocial
     ? `,
   "social": {
@@ -100,6 +111,14 @@ export interface PromptContext {
   previousTitles?: string[];
   /** 今回の出演者。回ごとに変わるので、設定の話者とは別に渡す。 */
   cast?: string;
+  /**
+   * 頼む項目を絞る。
+   *
+   * 一度で全部を頼んで、途中で切れたり形が崩れたりしたときの二度目に使う。
+   * ショーノート・切り抜き候補・SNS告知文を外すと、返す量が半分以下になり、
+   * 通りやすくなる。**投稿に要るもの(題名・説明文・チャプター)は残す。**
+   */
+  slim?: boolean;
 }
 
 export function buildPrompt(config: PromptConfig, context: PromptContext = {}): string {
@@ -158,9 +177,14 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
 - 続けて聴きどころを2〜3点、具体的に挙げる。
 - ${config.descriptionLength}文字程度。
 
-## showNotes
+${
+    context.slim
+      ? ""
+      : `## showNotes
 - 話題の流れを時系列で追える箇条書き(Markdown)。
 - 各項目は体言止めではなく、何が語られたかがわかる一文にする。
+`
+  }
 
 ## chapters
 - 話題が実際に切り替わった箇所のみ。無理に細分化しない。
@@ -177,7 +201,10 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
   候補: ${context.pauses.map(formatTimecode).join(", ")}`
       : ""
   }
-
+${
+    context.slim
+      ? ""
+      : `
 ## clips(切り抜き候補)
 - 縦型ショート動画(TikTok / Reels / YouTube Shorts)にする箇所を3つ選ぶ。
 - 音声を実際に聴いて、**それ単体で完結して面白い**区間を選ぶこと。前後の文脈が
@@ -192,12 +219,13 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
 - hook は縦動画の1行目に大きく出す見出し。20文字以内。続きを聴きたくなる言葉にする。
   ネタバレで完結させず、答えは音声の中に残す。
 - why は「なぜここが伸びると思うか」を20文字程度で。選び直す判断に使う。
-
+`
+  }
 ## hashtags / keywords
 - hashtags は日本語圏のリスナーが実際に使う語を選ぶ。
 - keywords は検索意図に近い語(#なし、単語または短い句)。`);
 
-  if (config.generateSocial) {
+  if (config.generateSocial && !context.slim) {
     sections.push(`## social
 - x: 140文字以内。エピソードの引きを一言で。ハッシュタグを2つまで含める。
 - instagram: 改行で読みやすく整形。冒頭に興味を引く一文、末尾にハッシュタグ。
@@ -225,7 +253,7 @@ ${context.previousTitles.map((t) => `- ${t}`).join("\n")}
 
   sections.push(`# 出力形式
 次の構造の JSON のみを出力する(コードブロックや前置きの文章は不要):
-${schemaBlock(config.generateSocial)}`);
+${schemaBlock(config.generateSocial, context.slim)}`);
 
   return sections.join("\n\n");
 }
