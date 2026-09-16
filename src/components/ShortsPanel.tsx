@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { noteError } from "../lib/errorLog";
 import {
   findClips,
   transcribeRange,
@@ -247,7 +248,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       setStatus("");
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("ショート", e, settings.model));
       setPhase(clips.length > 0 ? "ready" : "idle");
     } finally {
       abortRef.current = null;
@@ -298,7 +299,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       await buildCaptions(selected, controller.signal);
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(noteError("ショート", e, settings.model));
       }
     } finally {
       setPhase("ready");
@@ -374,7 +375,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       }
     } catch (e) {
       if (!(e instanceof DOMException && e.name === "AbortError")) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(noteError("ショート", e, settings.model));
       }
     } finally {
       setPhase("ready");
@@ -401,7 +402,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       if (found.length === 0) setError("この動画からはコマを取り出せませんでした");
       setFrames((prev) => ({ ...prev, [selected]: found }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("ショート", e, settings.model));
     } finally {
       setPhase("ready");
       setStatus("");
@@ -435,7 +436,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         return { ...prev, [selected]: { atSec, blob, url } };
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("ショート", e, settings.model));
     } finally {
       setPhase("ready");
       setStatus("");

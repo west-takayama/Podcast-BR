@@ -1,4 +1,62 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import CopyButton from "./CopyButton";
+import { clearErrors, errorsAsText, loadErrors, summarize } from "../lib/errorLog";
+
+/**
+ * 起きた失敗の控え。
+ *
+ * 「エラーが多い」と感じても、**どの種類がどれだけ出ているか**は分からない。
+ * 混雑なのか、無料枠の上限なのか、返ってきた中身が読めなかったのか。
+ * 原因ごとに打つ手が違うのに、画面に出るのは最後の1件だけで、閉じれば消える。
+ * ここに残しておけば、種類と回数が見える。端末の中だけに残る。
+ */
+function ErrorLog() {
+  const [list, setList] = useState(() => loadErrors());
+  if (list.length === 0) {
+    return (
+      <details className="fold section-fold">
+        <summary>うまくいかなかった記録(0件)</summary>
+        <p className="muted">記録はありません。</p>
+      </details>
+    );
+  }
+  const counts = summarize(list);
+  const fmt = (ts: number) => {
+    const d = new Date(ts);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  return (
+    <details className="fold section-fold">
+      <summary>うまくいかなかった記録({list.length}件)</summary>
+      <p className="muted">
+        {counts.map((c) => `${c.kind} ${c.count}件`).join(" / ")}
+        <br />
+        端末の中だけに残ります。外へは送りません。
+      </p>
+      <div className="result-body" style={{ maxHeight: 260, overflowY: "auto", fontSize: "0.8rem" }}>
+        {list.slice(0, 12).map((e, i) => (
+          <div key={i} style={{ marginBottom: 8 }}>
+            <span className="muted">{fmt(e.at)} ・ {e.what}</span>
+            <br />
+            {e.message}
+          </div>
+        ))}
+      </div>
+      <div className="row-buttons">
+        <CopyButton text={errorsAsText(list)} label="記録をコピー" />
+        <button
+          onClick={() => {
+            clearErrors();
+            setList([]);
+          }}
+        >
+          記録を消す
+        </button>
+      </div>
+    </details>
+  );
+}
 import type { Settings } from "../lib/settings";
 import { TONE_LABELS, TITLE_STYLE_LABELS, type Tone, type TitleStyle } from "../lib/prompt";
 import { listModels, pickDefaultModel, type ModelInfo } from "../lib/gemini";
@@ -349,6 +407,8 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         音量の正規化は常に適用されます。処理はすべて端末内で行われ、音声がサーバーに送られることはありません(生成時のみ Gemini に送信)。
       </p>
       </details>
+
+      <ErrorLog />
 
       <button className="primary" onClick={onClose}>
         保存して閉じる

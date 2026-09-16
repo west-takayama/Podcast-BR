@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { noteError } from "../lib/errorLog";
 import type { Clip, TranscriptSegment } from "../lib/gemini";
 import { parseTimestamp } from "../lib/id3";
 import type { ClipCapability } from "../lib/video/clip";
@@ -144,7 +145,7 @@ export default function ClipStudio({
       });
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(noteError("切り抜き", e));
     } finally {
       setProgress(null);
       abortRef.current = null;
