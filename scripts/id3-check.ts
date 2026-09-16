@@ -1,8 +1,10 @@
 // 自作の ID3 タグが第三者の実装で読めるかを検証する。
 // mutagen(Python の標準的な ID3 ライブラリ)に読ませて突き合わせる。
 // 実行: npx tsx scripts/id3-check.ts
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildId3Tag, toId3Chapters, parseTimestamp } from "../src/lib/id3";
 import { encodeMp3 } from "../src/lib/audio/mp3";
 
@@ -43,7 +45,11 @@ const DESC = "生成AIを一週間、実際の業務で使ってみた記録で�
   const out = new Uint8Array(tag.length + mp3.byteLength);
   out.set(tag, 0);
   out.set(new Uint8Array(mp3), tag.length);
-  const path = "/tmp/claude-0/-home-user-Podcast-BR/3f859293-4465-5bd5-9206-d0b1525b93e2/scratchpad/tagged.mp3";
+  // 置き場所は毎回その場で作る。決め打ちの絶対パスにすると、
+  // **書いた本人の端末でしか動かない**試験になる(実際にそうなっていて、
+  // CI に載せた瞬間に落ちた)
+  const dir = mkdtempSync(join(tmpdir(), "podcast-br-id3-"));
+  const path = join(dir, "tagged.mp3");
   writeFileSync(path, out);
 
   const script = `
@@ -132,6 +138,7 @@ print(json.dumps({
   check("60分超の分表記", parseTimestamp("72:30") === 4350000);
   check("不正な値は null", parseTimestamp("あ:い") === null && parseTimestamp("") === null);
 
+  rmSync(dir, { recursive: true, force: true });
   console.log(fail === 0 ? "\n✅ ALL OK\n" : `\n❌ ${fail} 件失敗\n`);
   process.exit(fail === 0 ? 0 : 1);
 })();
