@@ -309,7 +309,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         入力を見ることになる。畳んでおいて、必要なときだけ開く。
       */}
       <details className="fold section-fold">
-        <summary>見た目・書き出し・音声処理(一度決めたら触らなくて大丈夫)</summary>
+        <summary>見た目・従来の複数トラック合成設定</summary>
 
       <h3>見た目</h3>
       <label>
@@ -325,6 +325,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         並んだときに番組として見分けやすくなります。
       </p>
 
+      <p className="muted">以下は任意の複数トラック合成専用です。通常制作は元音声を保持し、AI用軽量化だけを行います。</p>
       <h3>書き出し</h3>
       <label className="check">
         <input
@@ -404,7 +405,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
         無音カット(1秒を超える沈黙を詰める)
       </label>
       <p className="muted">
-        音量の正規化は常に適用されます。処理はすべて端末内で行われ、音声がサーバーに送られることはありません(生成時のみ Gemini に送信)。
+        複数トラック合成では音量の正規化を適用します。処理はすべて端末内で行われ、音声がサーバーに送られることはありません(生成時のみ Gemini に送信)。
       </p>
       </details>
 
