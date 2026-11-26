@@ -1,3 +1,4 @@
+import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import {
@@ -560,6 +561,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
                   {fmt(r.startSec)}〜{fmt(r.endSec)}({Math.round(r.endSec - r.startSec)}秒)
                   {c.why ? ` ・ ${c.why}` : ""}
                 </div>
+                <ClipDetails clip={c} />
               </div>
             );
           })}

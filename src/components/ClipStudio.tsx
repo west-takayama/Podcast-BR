@@ -1,3 +1,4 @@
+import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import type { Clip, TranscriptSegment } from "../lib/gemini";
@@ -200,6 +201,7 @@ export default function ClipStudio({
             <div className="muted" style={{ marginTop: 4 }}>
               {fmt(s)}〜{fmt(e)}({Math.round(e - s)}秒){c.why ? ` ・ ${c.why}` : ""}
             </div>
+            <ClipDetails clip={c} />
           </div>
         );
       })}
