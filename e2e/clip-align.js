@@ -133,6 +133,10 @@ async function countBeeps(url) {
     } else {
       const src = await page.locator("video.card-preview").first().getAttribute("src");
       const got = await page.evaluate(countBeeps, src);
+      await page.waitForFunction(() => document.querySelector("video.card-preview")?.videoWidth > 0);
+      const dimensions = await page.locator("video.card-preview").first().evaluate(video => [video.videoWidth, video.videoHeight]);
+      if (dimensions[0] !== 1080 || dimensions[1] !== 1920) fails.push(`縦型寸法が違う(${dimensions.join("x")})`);
+      console.log("  縦型寸法:", dimensions.join("x"));
       console.log("  切り抜きの長さ:", got.seconds.toFixed(1), "秒(頼んだのは 12秒)");
       console.log("  中に入っていた目印:", got.groups.slice(0, 8).map((g) => `${g.n}個`).join(" "));
       const first = got.groups[0];

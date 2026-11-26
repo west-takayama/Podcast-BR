@@ -26,6 +26,8 @@ import {
   getFirstEncodableAudioCodec,
   getFirstEncodableVideoCodec,
 } from "mediabunny";
+import { chooseClipCapability, type ClipCapability } from "./capability";
+export type { ClipCapability } from "./capability";
 import type { TranscriptSegment } from "../gemini";
 import { parseTimestamp } from "../id3";
 import { wrapJapanese } from "../image";
@@ -72,30 +74,13 @@ export interface ClipOptions {
  * 落とす。WebM は YouTube には上げられるので、出せないよりはるかにましで、
  * 「この端末では無理です」とだけ言って終わるのは避けたい。
  */
-export interface ClipCapability {
-  videoCodec: "avc" | "vp9" | "vp8";
-  audioCodec: "aac" | "opus";
-  container: "mp4" | "webm";
-  /** MP4 でないと投稿できない先があるため、UI で伝えるために持つ。 */
-  mp4: boolean;
-}
-
 export async function detectCapability(): Promise<ClipCapability | null> {
   if (typeof VideoEncoder === "undefined" || typeof AudioEncoder === "undefined") return null;
   try {
-    const video = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"], {
-      width: CLIP_WIDTH,
-      height: CLIP_HEIGHT,
-    });
-    const audio = await getFirstEncodableAudioCodec(["aac", "opus"]);
-    if (!video || !audio) return null;
-    const mp4 = video === "avc" && audio === "aac";
-    return {
-      videoCodec: video as ClipCapability["videoCodec"],
-      audioCodec: audio as ClipCapability["audioCodec"],
-      container: mp4 ? "mp4" : "webm",
-      mp4,
-    };
+    return await chooseClipCapability(
+      codecs => getFirstEncodableVideoCodec(codecs, { width: CLIP_WIDTH, height: CLIP_HEIGHT }),
+      codecs => getFirstEncodableAudioCodec(codecs),
+    );
   } catch {
     return null;
   }

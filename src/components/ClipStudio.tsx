@@ -259,7 +259,7 @@ export default function ClipStudio({
         </div>
       )}
 
-      {error && <p className="muted">⚠️ {error}</p>}
+      {error && <p role="alert" className="error">⚠️ {error}</p>}
 
       {progress !== null ? (
         <>
