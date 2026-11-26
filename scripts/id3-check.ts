@@ -1,7 +1,9 @@
 // 自作の ID3 タグが第三者の実装で読めるかを検証する。
 // mutagen(Python の標準的な ID3 ライブラリ)に読ませて突き合わせる。
 // 実行: npx tsx scripts/id3-check.ts
-import { writeFileSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { buildId3Tag, toId3Chapters, parseTimestamp } from "../src/lib/id3";
 import { encodeMp3 } from "../src/lib/audio/mp3";
@@ -43,7 +45,9 @@ const DESC = "生成AIを一週間、実際の業務で使ってみた記録で�
   const out = new Uint8Array(tag.length + mp3.byteLength);
   out.set(tag, 0);
   out.set(new Uint8Array(mp3), tag.length);
-  const path = "/tmp/claude-0/-home-user-Podcast-BR/3f859293-4465-5bd5-9206-d0b1525b93e2/scratchpad/tagged.mp3";
+  const temp = mkdtempSync(join(tmpdir(), "podcast-id3-"));
+  process.on("exit", () => rmSync(temp, { recursive: true, force: true }));
+  const path = join(temp, "tagged.mp3");
   writeFileSync(path, out);
 
   const script = `

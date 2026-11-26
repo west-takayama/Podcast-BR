@@ -10,8 +10,8 @@
 ## 走らせ方
 
 ```bash
-npm i -D playwright            # 1回だけ
-npx playwright install chromium # 1回だけ
+npm ci                         # Playwright を含む依存関係
+npx playwright install chromium # システム Chromium がない場合
 npm run build
 node e2e/run.js                # 全部(10〜20分)
 node e2e/run.js patrol-ui      # 1つだけ
@@ -43,3 +43,10 @@ node e2e/run.js patrol-ui      # 1つだけ
   デコードした波形、MP3 のバイト列、画素の色、クリップボードの中身
 - 直す前に**まず再現させる**。直したあとに、直す前の版でそのテストが
   落ちることを確かめる(`git stash` して `npm run build`)
+
+## AI STUDIO 2.0 の検証
+
+- `ai-studio`: AI専用変換、生成失敗後の再読み込み・再開、送信済み音声の再利用、元音声の SHA-256 とファイル名、履歴保存を検証します。
+- `photo-leak`: 通常制作では写真・タイトルの変更が元音声を書き換えず、次の回へ写真を持ち越さないことを検証します。従来の ID3 処理は `npm test` 内で検証します。
+- `E2E_CHROMIUM=/path/to/chromium npm run e2e` でブラウザを指定できます。未指定ならシステム Chromium、なければ Playwright 管理の Chromium を使います。
+- Worker の比較は Vite 開発サーバーを起動して `node e2e/worker-bench.js PORT`。36秒の合成 WAV を同じブラウザで従来処理・AI専用処理の順に3回ずつ実行します。実音声・実APIは使用しません。API待ち時間や実機の性能を代表する測定ではありません。

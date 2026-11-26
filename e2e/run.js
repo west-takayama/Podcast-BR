@@ -15,6 +15,7 @@ const PORT = process.env.E2E_PORT || "4218";
 
 /** 速い順に並べる。落ちたときに早く分かるように。 */
 const ALL = [
+  "ai-studio",    // AI専用変換・元音声保持・再開
   "load",         // 起動の速さ
   "polish",       // 画面の寸法(はみ出し・押せる大きさ)
   "heights",      // 画面の長さと、消すときの確認

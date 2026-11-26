@@ -38,7 +38,7 @@ const perDay = JSON.stringify({
 });
 
 (async () => {
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const browser = await chromium.launch(require("./browser-options"));
   const ctx = await browser.newContext({ viewport: { width: 390, height: 900 } });
   const fails = [];
 

@@ -9,7 +9,7 @@ const META = {
 };
 const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMethods: ["generateContent"] }] };
 (async () => {
-  const b = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const b = await chromium.launch(require("./browser-options"));
   const page = await (await b.newContext({ viewport: { width: 390, height: 844 } })).newPage();
   const fails = [];
   await page.route("**/generativelanguage.googleapis.com/**", (r) => {

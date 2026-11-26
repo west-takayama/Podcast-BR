@@ -3,7 +3,7 @@ const { chromium } = require("playwright");
 const PORT = process.argv[2] || "4218";
 const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMethods: ["generateContent"] }] };
 (async () => {
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const browser = await chromium.launch(require("./browser-options"));
   for (const [label, net] of [
     ["速い回線", null],
     ["4G相当(9Mbps/170ms)", { downloadThroughput: 9 * 1024 * 1024 / 8, uploadThroughput: 750 * 1024 / 8, latency: 170 }],
