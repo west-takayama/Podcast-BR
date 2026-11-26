@@ -4,6 +4,7 @@
 
 import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
 import { parseTimestamp } from "./id3";
+import { measureStage } from "./timing";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
@@ -150,15 +151,19 @@ export interface SocialPosts {
   newsletter: string;
 }
 
-/** 縦型ショート動画にする候補。バズの入り口はここ。 */
+/** 縦型ショート動画にする候補。評価は編集支援用。 */
 export interface Clip {
   /** "MM:SS" */
   start: string;
   end: string;
   /** 動画の1行目に大きく出す見出し。 */
   hook: string;
-  /** なぜ伸びると思うか。選び直しの判断に使う。 */
+  /** 選定理由。再生数の予測ではない。 */
   why: string;
+  scores?: { interest: number; insight: number; hook: number; empathy: number; completeness: number };
+  socialPost?: string;
+  hashtags?: string[];
+  needsReview?: boolean;
 }
 
 export interface EpisodeMeta {
@@ -178,6 +183,7 @@ export interface TranscriptSegment {
   time: string;
   speaker: string;
   text: string;
+  emphasis?: string[];
 }
 
 /**
@@ -281,17 +287,17 @@ async function uploadFile(
   for (let i = 0; i < RETRY_WAIT_MS.length && TRANSIENT_STATUS.includes(status); i++) {
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
     onStatus?.(`Gemini が混雑しています。${sec}秒待って送信し直します(${i + 1}/${RETRY_WAIT_MS.length})…`);
-    await sleep(RETRY_WAIT_MS[i], signal);
+    await measureStage("retry-wait", () => sleep(RETRY_WAIT_MS[i], signal));
     ({ status, text } = await send());
   }
 
   // 送信も1分あたりの上限に当たることがある。数十MB を上限ひとつで捨てない
   if (status === 429 && !isDailyQuota(text)) {
-    await countdown(
+    await measureStage("retry-wait", () => countdown(
       retryDelayMs(text),
       (left) => onStatus?.(`無料枠の1分あたりの上限です。${left}秒待って送信し直します…`),
       signal,
-    );
+    ));
     ({ status, text } = await send());
   }
 
@@ -331,7 +337,7 @@ async function waitUntilActive(
     const info = await res.json();
     if (info.state === "ACTIVE") return info.uri as string;
     if (info.state === "FAILED") throw new Error("Gemini側での音声処理に失敗しました");
-    await new Promise((r) => setTimeout(r, 2000));
+    await sleep(2000, signal);
   }
   throw new Error("音声処理がタイムアウトしました");
 }
@@ -370,6 +376,7 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
     if (!c) continue;
     let start = toSeconds(c.start);
     let end = toSeconds(c.end);
+    const originalStart = start, originalEnd = end;
     if (start === null) continue;
     // 終了が無い・逆転している場合は、長さから決め直す
     if (end === null || end <= start) end = start + 45;
@@ -379,7 +386,17 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
     if (end - start > MAX_CLIP_SEC) end = start + MAX_CLIP_SEC;
     if (end - start < MIN_CLIP_SEC) continue;
 
+    if (out.some(item => item.start === formatTimecode(start) && item.end === formatTimecode(end))) continue;
+    const scores = c.scores as Clip['scores'];
+    const validScores = scores && typeof scores === 'object' &&
+      Object.entries({ interest: 25, insight: 25, hook: 20, empathy: 15, completeness: 15 })
+        .every(([key, max]) => Number.isFinite(scores[key as keyof typeof scores]) &&
+          scores[key as keyof typeof scores] >= 0 && scores[key as keyof typeof scores] <= max);
     out.push({
+      ...(validScores ? { scores: { interest: scores.interest, insight: scores.insight, hook: scores.hook, empathy: scores.empathy, completeness: scores.completeness } } : {}),
+      ...(typeof c.socialPost === 'string' ? { socialPost: c.socialPost.trim() } : {}),
+      ...(Array.isArray(c.hashtags) ? { hashtags: [...new Set(c.hashtags.filter((h): h is string => typeof h === 'string').map(h => '#' + h.replace(/^#+/, '').replace(/\s+/g, '')).filter(h => h.length > 1))].slice(0, 5) } : {}),
+      ...(start !== originalStart || end !== originalEnd ? { needsReview: true } : {}),
       start: formatTimecode(start),
       end: formatTimecode(end),
       hook: typeof c.hook === "string" ? c.hook : "",
@@ -494,12 +511,12 @@ export async function uploadEpisodeAudio(
   signal?: AbortSignal,
 ): Promise<UploadedAudio> {
   onStatus("音声をアップロード中…");
-  const file = await uploadFile(apiKey, mp3, onProgress, signal, onStatus);
+  const file = await measureStage("upload", () => uploadFile(apiKey, mp3, onProgress, signal, onStatus));
 
   let uri = file.uri;
   if (file.state !== "ACTIVE") {
     onStatus("音声を解析待ち…");
-    uri = await waitUntilActive(apiKey, file.name, signal);
+    uri = await measureStage("activation", () => waitUntilActive(apiKey, file.name, signal));
   }
   // Files API の保持期間は48時間。この間は送り直さずに作り直せる
   return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: mp3.byteLength };
@@ -571,9 +588,10 @@ ${lengthRule}
 - hook は動画の1行目に大きく出す見出し。20文字以内。続きを見たくなる言葉にし、
   答えは動画の中に残す。
 - why は選定理由を具体的に20文字程度で。再生数や拡散を予測しない。
+- scores は上記5基準の配点内で採点する。socialPost は実際の会話に基づくSNS投稿文を80文字程度、hashtags は関連するものを3個以内。
 
 次の構造の JSON のみを出力する:
-{"clips": [{"start": "MM:SS", "end": "MM:SS", "hook": string, "why": string}]}`;
+{"clips": [{"start": "MM:SS", "end": "MM:SS", "hook": string, "why": string, "scores": {"interest": number, "insight": number, "hook": number, "empathy": number, "completeness": number}, "socialPost": string, "hashtags": string[]}]}`;
 
   const res = await callWithModelFallback(
     apiKey,
@@ -663,11 +681,12 @@ export async function transcribeRange(opts: {
 - 数字・固有名詞は聞こえたとおりに漢字/カタカナで書く(「にせんにじゅうご年」ではなく「2025年」)。
 - 句読点を入れる。読点は息継ぎの位置に置く。
 - 聞き取れない箇所は推測で埋めず「(聞き取り不明)」とする。
+- emphasis は各行の中に実在する重要語を最大2個。話者が不明なら「不明」とし、人物を推測しない。
 ${speakers.trim() ? `- 話者は次の呼び名を使う: ${speakers}` : "- 話者は A / B のように区別する。"}
-${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、似た音に聞こえてもこちらを優先する: ${glossary.trim()}` : ""}
+${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、音声と一致するときだけ使用し、聞こえない語を補わない: ${glossary.trim()}` : ""}
 
 次の構造の JSON のみを出力する:
-{"segments": [{"time": string, "speaker": string, "text": string}]}`;
+{"segments": [{"time": string, "speaker": string, "text": string, "emphasis": string[]}]}`;
 
   const res = await callWithModelFallback(
     apiKey,
@@ -695,13 +714,19 @@ ${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組
   if (!text.trim()) return [];
   try {
     const parsed = extractJson(text, "字幕") as { segments?: Record<string, unknown>[] };
-    return (parsed.segments ?? [])
-      .filter((s) => s && typeof s.text === "string" && (s.text as string).trim())
+    if (!Array.isArray(parsed.segments)) return [];
+    return parsed.segments
+      .filter((s) => s && typeof s.text === "string" && s.text.trim() &&
+        typeof s.time === 'string' && toSeconds(s.time) !== null &&
+        toSeconds(s.time)! >= startSec && toSeconds(s.time)! < endSec)
       .map((s) => ({
-        time: typeof s.time === "string" ? s.time : "",
-        speaker: typeof s.speaker === "string" ? s.speaker : "",
+        time: s.time as string,
+        speaker: typeof s.speaker === "string" ? s.speaker : "不明",
         text: (s.text as string).trim(),
-      }));
+        emphasis: Array.isArray(s.emphasis) ? [...new Set(s.emphasis.filter((word): word is string =>
+          typeof word === 'string' && word.length > 0 && (s.text as string).includes(word)))].slice(0, 2) : [],
+      })).sort((a, b) => toSeconds(a.time)! - toSeconds(b.time)!);
+
   } catch {
     return [];
   }
@@ -723,13 +748,14 @@ async function callWithModelFallback(
   onModelChanged?: (model: string) => void,
   signal?: AbortSignal,
 ): Promise<Response> {
+  let attempt = 0;
   const call = (id: string) =>
-    fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
+    measureStage("generation-request", () => fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }), ++attempt);
 
   // 混雑は**モデルごとに**起きる。同じモデルを待ち続けるより、空いている
   // モデルへ移るほうが早い(試験版なら特に。割り当てが細く、混雑と
@@ -771,7 +797,7 @@ async function callWithModelFallback(
     }
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
     onStatus(`Gemini が混雑しています。${sec}秒待って自動で再試行します(${i + 1}/${RETRY_WAIT_MS.length})…`);
-    await sleep(RETRY_WAIT_MS[i], signal);
+    await measureStage("retry-wait", () => sleep(RETRY_WAIT_MS[i], signal));
     onStatus("再試行中…");
     res = await call(model);
   }
@@ -794,11 +820,11 @@ async function callWithModelFallback(
     if (!isDailyQuota(body)) {
       const moved = await tryAlternatives("上限に達したため");
       if (moved) return moved;
-      await countdown(
+      await measureStage("retry-wait", () => countdown(
         retryDelayMs(body),
         (left) => onStatus(`無料枠の1分あたりの上限です。${left}秒待って自動で試し直します…`),
         signal,
-      );
+      ));
       onStatus("再試行中…");
       res = await call(model);
     }
@@ -943,6 +969,21 @@ function isShortfall(err: unknown): boolean {
 }
 
 export async function generateEpisodeMeta(opts: GenerateOptions): Promise<EpisodeMeta> {
+  return measureStage("metadata-total", () => generateEpisodeMetaWithRetry(opts));
+}
+
+async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<EpisodeMeta> {
+  const opts: GenerateOptions = {
+    ...options,
+    onModelChanged: (model) => {
+      opts.model = model;
+      options.onModelChanged?.(model);
+    },
+    onUploaded: (audio) => {
+      opts.audio = audio;
+      options.onUploaded?.(audio);
+    },
+  };
   try {
     return await generateEpisodeMetaInner(opts);
   } catch (err) {
