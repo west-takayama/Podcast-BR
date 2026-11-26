@@ -60,7 +60,7 @@
 
 ### ローカル処理の比較（2026-11-26 UTC）
 
-合成WAV 36秒・約3MB、Cloud Linux / システムChromium、Vite開発サーバー、同一Workerの旧publish経路とAI専用経路を交互に各3回。旧経路は96kbpsモノラル配信用MP3と32kbps AI音声を生成、新経路はAI音声だけ。旧経路は既定の整音設定、双方とも無音カットなし。Worker開始から完了メッセージまで（Worker起動・ファイル準備を含む）。他のテスト終了後に単独実行。
+合成WAV 36秒・約3MB、Cloud Linux / Chromium 156.0.8078.79 / Node 24.22.3、Vite開発サーバー、同一Workerの旧publish経路とAI専用経路を交互に各3回。旧経路は96kbpsモノラル配信用MP3と32kbps AI音声を生成、新経路はAI音声だけ。旧経路は既定の整音設定、双方とも無音カットなし。Worker開始から完了メッセージまで（Worker起動・ファイル準備を含む）。他のテスト終了後に単独実行。
 
 | 項目 | 旧通常経路 | 新通常経路 |
 | --- | ---: | ---: |
@@ -73,7 +73,7 @@
 
 この合成素材・環境の音声準備時間は中央値で590ms短縮。アップロード量の1回あたりの削減を示す測定ではない。通信量削減は再試行時の重複送信防止による。実Gemini通信・長時間素材・iPhone・総制作時間にはこの比率を外挿しない。
 
-再実行: `npm run dev -- --port 4220 --strictPort` の起動後、`node e2e/worker-bench.js 4220`。素材は `node e2e/make-fixtures.js` で生成可能。
+再実行: `npm run dev -- --port 4220 --strictPort` の起動後、`node e2e/worker-bench.js 4220`。素材は `e2e` ディレクトリで `node make-fixtures.js` を実行して生成可能（同じ生成ファイルを比較に使用）。
 
 ## 変更ファイル
 
