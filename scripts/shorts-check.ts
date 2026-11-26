@@ -21,3 +21,35 @@ try {
  assert.deepEqual(lines[0].emphasis,['価値']);
 } finally { globalThis.fetch=original; }
 console.log('shorts-check: OK (deduplication, rubric, captions, range bounds, emphasis)');
+
+// A failed generation consumes no additional extraction/upload on retry.
+const { ShortsAudioCache } = await import('../src/lib/shortsCache');
+const cache = new ShortsAudioCache();
+let extracts = 0, uploads = 0;
+const extract = async () => { extracts++; return new ArrayBuffer(8); };
+const upload = async () => { uploads++; return { uri: 'cached', name: 'cached', bytes: 8, expiresAt: Date.now() + 10000 }; };
+const first = await cache.get('[0,30]', 'key-a', extract, upload);
+assert.equal(await cache.get('[0,30]', 'key-a', extract, upload), first);
+assert.deepEqual([extracts, uploads], [1, 1]);
+await cache.get('[0,30]', 'key-b', extract, upload);
+assert.deepEqual([extracts, uploads], [1, 2], 'changed credentials upload again without re-extraction');
+await cache.get('[0,31]', 'key-b', extract, upload);
+assert.deepEqual([extracts, uploads], [2, 3], 'changed boundaries cannot reuse different audio');
+cache.clear();
+await assert.rejects(cache.get('[0,30]', 'key-a', extract, async () => { uploads++; throw new Error('offline'); }));
+await cache.get('[0,30]', 'key-a', extract, upload);
+assert.deepEqual([extracts, uploads], [3, 5], 'upload failure retains extracted audio');
+cache.clear();
+await cache.get('[0,30]', 'key-a', extract, async () => { uploads++; return { ...first, expiresAt: 0 }; });
+await cache.get('[0,30]', 'key-a', extract, upload);
+assert.deepEqual([extracts, uploads], [4, 7], 'expired remote reference reuploads cached bytes');
+console.log('shorts-cache: OK (retry, expiry, credentials, ranges, source reset)');
+// A source reset while extraction is pending must never upload the old source.
+let release!: (bytes: ArrayBuffer) => void;
+let staleUploads = 0;
+const pending = cache.get('race', 'key-a', () => new Promise<ArrayBuffer>(resolve => { release = resolve; }), async () => { staleUploads++; return first; });
+cache.clear();
+release(new ArrayBuffer(8));
+await assert.rejects(pending, { name: 'AbortError' });
+assert.equal(staleUploads, 0);
+console.log('shorts-cache: source-reset race OK');

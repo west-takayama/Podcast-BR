@@ -155,7 +155,7 @@ export default function ClipStudio({
 
   const ext = cap?.mp4 === false ? "webm" : "mp4";
   const mime = ext === "mp4" ? "video/mp4" : "video/webm";
-  const clipName = `${fileName.replace(/\.mp3$/i, "")}-clip${selected + 1}.${ext}`;
+  const clipName = `${fileName.replace(/\.[^.]+$/, "")}-clip${selected + 1}.${ext}`;
   const canShare =
     typeof navigator !== "undefined" &&
     !!navigator.canShare &&
