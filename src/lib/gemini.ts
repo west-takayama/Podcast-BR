@@ -989,6 +989,7 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onUploadProgress, onModelChanged, onUploaded, signal,
   } = opts;
 
+  const startedAt = performance.now();
   let source = audio;
   if (!isAudioUsable(source)) {
     if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
@@ -996,6 +997,8 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onUploaded?.(source);
   }
 
+  const uploadMs = performance.now() - startedAt;
+  const generationStartedAt = performance.now();
   onStatus("タイトル・説明文を生成中…");
   const res = await callWithModelFallback(
     apiKey,
@@ -1021,7 +1024,14 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "生成結果");
   const parsed: unknown = extractJson(text, "生成結果", finishReason);
-  return normalizeMeta(parsed);
+  const result = normalizeMeta(parsed);
+  // Local diagnostics only: never log audio, API keys, or generated text.
+  console.info("[AI STUDIO] metadata timing", {
+    uploadAndActivationMs: Math.round(uploadMs),
+    generationAndParsingMs: Math.round(performance.now() - generationStartedAt),
+    totalMs: Math.round(performance.now() - startedAt),
+  });
+  return result;
 }
 
 export interface TranscriptOptions {
