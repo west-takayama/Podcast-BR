@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { generateEpisodeMeta, type UploadedAudio } from '../src/lib/gemini';
+import { generateEpisodeMeta, reasonFrom, __testThrowForStatus, type UploadedAudio } from '../src/lib/gemini';
 import { DEFAULT_PROMPT_CONFIG } from '../src/lib/prompt';
 
 const originalFetch = globalThis.fetch;
@@ -46,6 +46,10 @@ try {
   globalThis.fetch = async () => new Response('invalid', {status:400});
   await assert.rejects(generateEpisodeMeta({apiKey:'private-key', model:'test', audio:source, config:DEFAULT_PROMPT_CONFIG, onStatus() {}}));
   assert.ok(logs.some(args => (args[1] as {stage?:string;success?:boolean})?.stage === 'metadata-total' && (args[1] as {success?:boolean}).success === false), 'failed workflows are timed');
+  globalThis.fetch = async () => new Response(JSON.stringify({error:{message:'Rejected URL ?key=private-key and credential private-key'}}), {status:400});
+  await assert.rejects(generateEpisodeMeta({apiKey:'private-key', model:'test', audio:source, config:DEFAULT_PROMPT_CONFIG, onStatus() {}}), (error: Error) => !error.message.includes('private-key') && error.message.includes('[redacted]'));
+  assert.ok(!reasonFrom('https://example.invalid/?key=secret-value&x=1').includes('secret-value'));
+  assert.throws(() => __testThrowForStatus(403, 'File files/missing', '生成'), /元の音声を選び直して/);
   assert.ok(!JSON.stringify(logs).includes('private-'), 'diagnostics must not expose credentials or file references');
   console.log('PASS: 3 fresh-upload retry runs: 1 upload / 2 generations each; cached run: 0 uploads / 2 generations; no private diagnostics');
 } finally {

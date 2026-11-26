@@ -236,7 +236,7 @@ function xhrUpload(
     xhr.onerror = () =>
       reject(
         new Error(
-          "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
+          "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。準備済みの音声は保持しています。",
         ),
       );
     xhr.ontimeout = () => reject(new Error("アップロードがタイムアウトしました"));
@@ -307,7 +307,7 @@ async function uploadFile(
     }
     if (status === 413) {
       throw new Error(
-        "音声ファイルが大きすぎてアップロードできませんでした。設定で無音カットを有効にするか、エピソードを分割してください。",
+        "音声ファイルが大きすぎてアップロードできませんでした。エピソードを短い音声に分割して選び直してください。",
       );
     }
     if (TRANSIENT_STATUS.includes(status)) {
@@ -316,7 +316,7 @@ async function uploadFile(
           "数分待ってから「生成だけやり直す」を押してください。",
       );
     }
-    throw new Error(`音声のアップロードに失敗しました (${status}): ${text.slice(0, 200)}`);
+    throw new Error(`音声のアップロードに失敗しました (${status}): ${reasonFrom(redactApiError(text, apiKey))}`);
   }
   const info = JSON.parse(text);
   const file = info.file as UploadedFile | undefined;
@@ -611,7 +611,7 @@ ${lengthRule}
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "切り抜きの候補");
@@ -706,7 +706,7 @@ ${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成", apiKey);
 
   const data = await res.json();
   // 字幕は空でも先に進める。無音の範囲を選んだだけということがある
@@ -889,8 +889,18 @@ function answerFrom(
   );
 }
 
+/** Error text may echo request URLs or credentials. Redact before display, storage or truncation. */
+function redactApiError(body: string, apiKey?: string): string {
+  const exact = apiKey ? body.split(apiKey).join("[redacted]") : body;
+  return exact
+    .replace(/AIza[\w-]{20,}/g, "[redacted]")
+    .replace(/([?&](?:key|api_key)=)[^&\s"<>]+/gi, "$1[redacted]")
+    .replace(/((?:x-goog-api-key|api[_ -]?key)["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, "$1[redacted]");
+}
+
 /** 応答から Google 自身の説明だけを取り出す。JSON でないこともある。 */
 export function reasonFrom(body: string): string {
+  body = redactApiError(body);
   try {
     const parsed = JSON.parse(body) as { error?: { message?: unknown } };
     const message = parsed?.error?.message;
@@ -901,7 +911,8 @@ export function reasonFrom(body: string): string {
   return body.trim().slice(0, 200);
 }
 
-function throwForStatus(status: number, body: string, what: string): never {
+function throwForStatus(status: number, body: string, what: string, apiKey?: string): never {
+  body = redactApiError(body, apiKey);
   if (status === 400 && body.includes("API_KEY_INVALID")) {
     throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
   }
@@ -914,9 +925,9 @@ function throwForStatus(status: number, body: string, what: string): never {
       daily
         ? "無料枠の1日あたりの上限に達しました。しばらく押し直しても戻りません。" +
           "設定画面で別のモデルに替えると、そのモデルぶんの枠を使えます。" +
-          `変換済みMP3はそのまま使えます。(${reasonFrom(body)})`
+          `準備済みの音声はそのまま使えます。(${reasonFrom(body)})`
         : "無料枠の1分あたりの上限に達しました。別のモデルを試し、1分ほど待って自動で投げ直しましたが、" +
-          "まだ上限のままでした。少し間を置いてからお試しください。変換済みMP3はそのまま使えます。",
+          "まだ上限のままでした。少し間を置いてからお試しください。準備済みの音声はそのまま使えます。",
     );
   }
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
@@ -927,7 +938,7 @@ function throwForStatus(status: number, body: string, what: string): never {
     throw new Error(
       aboutFile
         ? "送った音声にアクセスできませんでした。保持期限(48時間)が切れている可能性があります。" +
-          "「生成だけやり直す」を押すと送り直します。"
+          "元の音声を選び直して送信してください。"
         : `APIキーが許可されていません (${status})。キーに制限(HTTPリファラーやIPアドレスの指定)が` +
           "掛かっていないか、Google AI Studio で確認してください。作り直すのが早いこともあります。" +
           `Google の説明: ${reasonFrom(body)}`,
@@ -946,10 +957,10 @@ function throwForStatus(status: number, body: string, what: string): never {
           `数分待ってから「生成だけやり直す」を押してください。`
         : `Gemini 側で処理できませんでした(${status})。待ち直しと別のモデルを試しても同じでした。` +
           `設定画面でモデルを替えるか、しばらく置いてからお試しください。`) +
-        "変換済みMP3はそのまま使えます(音声の送り直しも不要です)。",
+        "準備済みの音声はそのまま使えます(有効期限内なら音声の送り直しも不要です)。",
     );
   }
-  throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
+  throw new Error(`${what}に失敗しました (${status}): ${reasonFrom(body)}`);
 }
 
 /**
@@ -990,7 +1001,7 @@ async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<E
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     if (err instanceof TypeError && /fetch/i.test(err.message)) {
       throw new Error(
-        "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
+        "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。準備済みの音声は保持しています。",
       );
     }
 
@@ -1016,7 +1027,7 @@ async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<E
         const first = err instanceof Error ? err.message : String(err);
         throw new Error(
           `${first} (項目を減らして自動でもう一度試しましたが、同じでした。` +
-            `変換済みMP3はそのまま使えます)`,
+            `準備済みの音声はそのまま使えます)`,
         );
       }
     }
@@ -1060,7 +1071,7 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     signal,
   );
 
-  if (!res.ok) throwForStatus(res.status, await res.text(), "生成");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "生成", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "生成結果");
@@ -1131,7 +1142,7 @@ export async function generateTranscript(opts: TranscriptOptions): Promise<Trans
     signal,
   );
 
-  if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "書き起こし");
@@ -1481,10 +1492,10 @@ ${
         apiKey, model, build(false), false, onStatus, onModelChanged, signal,
       );
     } else {
-      throwForStatus(res.status, body, "お題の提案");
+      throwForStatus(res.status, body, "お題の提案", apiKey);
     }
   }
-  if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "お題");
@@ -1609,7 +1620,7 @@ ${material || "(材料が足りません。番組名から想像してくださ�
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "絵柄");
