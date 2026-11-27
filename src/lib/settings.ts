@@ -9,6 +9,7 @@ const KEY = "podcast-br-settings";
 export interface Settings {
   apiKey: string;
   model: string;
+  captionModel?: string;
   prompt: PromptConfig;
   dsp: DspOptions;
   /** 配信用MP3をモノラルで書き出すか。トーク番組はモノラルが標準で、処理も約1.7倍速い。 */

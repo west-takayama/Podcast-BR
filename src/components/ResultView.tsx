@@ -45,6 +45,7 @@ interface Props {
   /** 履歴・旧制作のショート動画の候補や字幕を生成する設定。 */
   apiKey?: string;
   model?: string;
+  captionModel?: string;
   onModelChanged?: (model: string) => void;
 }
 
@@ -472,6 +473,7 @@ export default function ResultView({
   promptConfig,
   apiKey,
   model,
+  captionModel,
   onModelChanged,
 }: Props) {
   // 取り込んだ写真は切り抜き動画と MP3 のカバーで共有する。
@@ -652,6 +654,7 @@ export default function ResultView({
             ...DEFAULT_SETTINGS,
             apiKey: apiKey ?? "",
             model: model ?? DEFAULT_SETTINGS.model,
+            captionModel,
             prompt: { ...(promptConfig ?? DEFAULT_SETTINGS.prompt), showName },
             accentColor,
           }}

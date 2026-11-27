@@ -14,7 +14,7 @@ assert.equal(captions[0].speaker, 'A');
 assert.deepEqual(captions[0].emphasis, ['価値']);
 assert.ok(captions.every(c => c.endSec <= 1.1 && c.endSec > c.atSec));
 const original = globalThis.fetch;
-globalThis.fetch = async () => new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{startMs:3000,text:'範囲外'},{startMs:1000,endMs:1800,speaker:'A',text:'対話の価値',emphasis:['価値','捏造'],needsReview:false}]})}]}}]}),{status:200});
+globalThis.fetch = async () => new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{startMs:null,endMs:null,speaker:'不明',text:'境界不明'},{startMs:1000,endMs:1800,speaker:'A',text:'対話の価値',emphasis:['価値','捏造'],needsReview:false}]})}]}}]}),{status:200});
 try {
  const lines = await transcribeRange({apiKey:'test',model:'gemini-test',audio:{uri:'test',name:'test',expiresAt:Date.now()+100000,bytes:1},durationMs:2000,onStatus:()=>{}});
  assert.equal(lines.length,2);

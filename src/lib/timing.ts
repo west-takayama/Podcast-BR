@@ -1,10 +1,18 @@
 /** Local-only diagnostics. Fixed stage names and numbers; never include request/response data. */
-export type TimingStage = 'upload' | 'activation' | 'generation-request' | 'retry-wait' | 'metadata-total' | 'generation-and-parsing' | 'conversion' | 'result-display' | 'caption-conversion' | 'caption-audio-decode' | 'caption-alignment' | 'video-export' | 'video-audio-decode' | 'drive-save' | 'video-audio-encode' | 'video-draw' | 'video-encode' | 'video-finalize' | 'video-blob';
+export type TimingStage = 'upload' | 'activation' | 'generation-request' | 'retry-wait' | 'metadata-total' | 'generation-and-parsing' | 'conversion' | 'result-display' | 'caption-conversion' | 'caption-audio-decode' | 'caption-alignment' | 'video-export' | 'video-audio-decode' | 'drive-save' | 'video-audio-encode' | 'video-draw' | 'video-encode' | 'video-finalize' | 'video-blob' | 'caption-response';
 export type VideoTimingProfile = {
   height: 1280 | 1920;
   video: "avc" | "vp8" | "vp9";
   audio: "aac" | "opus";
   seconds: number;
+};
+export type CaptionTiming = {
+  model: string;
+  structure: import("./captionResponse").CaptionStructure;
+  finish?: string;
+  issue?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 };
 type TimingEntry = {
   stage: TimingStage;
@@ -14,6 +22,7 @@ type TimingEntry = {
   status?: number;
   videoProfile?: VideoTimingProfile;
   errorType?: string;
+  caption?: CaptionTiming;
 };
 
 let entries: readonly TimingEntry[] = [];
@@ -31,13 +40,14 @@ export function clearTimings() {
   listeners.forEach(listener => listener());
 }
 
-export function recordTiming(stage: TimingStage, elapsedMs: number, success: boolean, attempt?: number, status?: number, videoProfile?: VideoTimingProfile, errorType?: string) {
+export function recordTiming(stage: TimingStage, elapsedMs: number, success: boolean, attempt?: number, status?: number, videoProfile?: VideoTimingProfile, errorType?: string, caption?: CaptionTiming) {
   const entry: TimingEntry = {
     stage, durationMs: Math.round(elapsedMs), success,
     ...(attempt === undefined ? {} : { attempt }),
     ...(status === undefined ? {} : { status }),
     ...(videoProfile === undefined ? {} : { videoProfile }),
     ...(errorType === undefined ? {} : { errorType }),
+    ...(caption === undefined ? {} : { caption: { ...caption } }),
   };
   entries = [...entries.slice(-59), entry];
   console.info('[AI STUDIO] stage timing', entry);

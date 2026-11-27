@@ -2,6 +2,7 @@ import { useState, useSyncExternalStore } from "react";
 import { clearTimings, getTimings, subscribeToTimings, type TimingStage } from "../lib/timing";
 
 const labels: Record<TimingStage, string> = {
+  "caption-response": "字幕応答",
   "caption-conversion": "字幕用音声の準備",
   "caption-audio-decode": "字幕照合用の音声デコード",
   "caption-alignment": "字幕タイミング補正",
@@ -51,12 +52,15 @@ export default function TimingDiagnostics() {
       `H.264 1080p: ${standard} / ハードウェア優先: ${standardHardware}\n` +
       `H.264 720p: ${light} / ハードウェア優先: ${lightHardware}`);
   };
-  const report = ["AI STUDIO 2.4 処理時間", ...timings.map(entry => {
+  const report = ["AI STUDIO 2.4.1 処理時間", ...timings.map(entry => {
     const details = [
       entry.success ? "完了" : "未完了",
       entry.attempt === undefined ? "" : `試行 ${entry.attempt}`,
       entry.status === undefined ? "" : `HTTP ${entry.status}`,
       entry.errorType ?? "",
+      entry.caption ? [entry.caption.model, entry.caption.structure, entry.caption.issue, entry.caption.finish,
+        entry.caption.inputTokens === undefined ? "" : `入力トークン ${entry.caption.inputTokens}`,
+        entry.caption.outputTokens === undefined ? "" : `出力トークン ${entry.caption.outputTokens}`].filter(Boolean).join(" · ") : "",
       entry.videoProfile ? `${entry.videoProfile.height}px縦・${entry.videoProfile.video}/${entry.videoProfile.audio}・${entry.videoProfile.seconds}秒` : "",
     ].filter(Boolean).join(" / ");
     return `${labels[entry.stage]} (${entry.stage})  ${entry.durationMs} ms  ${details}`;

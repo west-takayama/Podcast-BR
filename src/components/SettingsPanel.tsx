@@ -174,6 +174,18 @@ export default function SettingsPanel({ settings, onChange, onClose, checkModels
             ))}
         </select>
       </label>
+      <label>
+        ショート字幕モデル
+        <select value={settings.captionModel ?? ""} onChange={event =>
+          onChange(prev => ({ ...prev, captionModel: event.target.value || undefined }))}>
+          <option value="">制作モデルと同じ</option>
+          {settings.captionModel && !models?.some(model => model.id === settings.captionModel) &&
+            <option value={settings.captionModel}>{settings.captionModel}</option>}
+          {models?.filter(model => /^gemini-\d+(?:\.\d+)?-flash(?:-lite)?(?:-preview(?:-[a-z0-9-]+)?)?$/.test(model.id))
+            .map(model => <option key={model.id} value={model.id}>{model.displayName}</option>)}
+        </select>
+      </label>
+
       {modelError ? (
         <p className="muted">⚠️ {modelError}</p>
       ) : (

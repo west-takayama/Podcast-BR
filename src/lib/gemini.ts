@@ -1,3 +1,4 @@
+import { captionSchema, CaptionResponseError, parseCaptionResponse, splitCaptionWav, type SplitCaptionDraft } from "./captionResponse";
 import type { CaptionCue } from "./video/captionAlignment";
 // Gemini API(無料枠)との連携。
 // Files API に MP3 をアップロードし、文字起こしとメタデータ生成を1回の呼び出しで行う。
@@ -5,7 +6,7 @@ import type { CaptionCue } from "./video/captionAlignment";
 
 import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
 import { parseTimestamp } from "./id3";
-import { measureStage, recordTiming } from "./timing";
+import { measureStage, recordTiming, type CaptionTiming } from "./timing";
 import { withDeadline } from "./deadline";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
@@ -713,116 +714,153 @@ export async function transcribeRange(opts: {
   durationMs: number;
   glossary?: string;
   onStatus: (status: string) => void;
-  onModelChanged?: (model: string) => void;
   signal?: AbortSignal;
+  getWav?: () => Promise<ArrayBuffer>;
+  splitDrafts?: SplitCaptionDraft;
 }): Promise<CaptionCue[]> {
-  const { apiKey, model, audio, durationMs, glossary, onStatus, onModelChanged, signal } = opts;
+  const { apiKey, model, audio, durationMs, glossary, onStatus, signal, getWav, splitDrafts } = opts;
+  return withDeadline(signal, 75_000, async deadline => {
+    let activeModel = splitDrafts?.model ?? model;
+    let structured = splitDrafts?.structured ?? true;
+    let attempt = 0;
+    const partFor = (source: typeof audio) => "wav" in source
+      ? { inline_data: { mime_type: "audio/wav", data: encodeCaptionAudio(source.wav) } }
+      : { file_data: { mime_type: source.mimeType ?? "audio/mpeg", file_uri: source.uri } };
 
-  const prompt = `添付の区間音声を日本語で忠実に文字起こしし、字幕用の発話単位と時刻を返してください。
-- 添付音声の先頭は必ず0ミリ秒。対象範囲は 0〜${durationMs} ミリ秒。元の動画全体の時刻や秒単位を使わない。
-- startMs と endMs は実際に声が始まる・終わる位置を聞いて、整数ミリ秒で返す。文字数で時間を割り振らない。不確かな境界は null、needsReview は true にする。
-- 要約、言い換え、省略、補完をしない。相づち、つなぎ言葉、言い直しも聞こえた通りに残す。聞き取れない箇所は「（聞き取り不明）」。無音だけの行を作らない。
-- 話者交代で分け、同一話者はこのファイル内で一貫した A、B、C などの識別子を使う。個人名を推測しない。不明なら「不明」。重複発話は別の行で実際の時刻を返す。
-- 長い発話は境界が聞き取れる短い発話へ分ける。判断できない箇所を文字数だけで切らない。emphasis は本文に実在する語を2個以内。
-${glossary?.trim() ? `音声と一致するときだけ使う用語の表記: ${glossary.trim()}` : ""}
-JSON のみを返す:
-{"segments":[{"startMs":整数またはnull,"endMs":整数またはnull,"speaker":"A","text":"実際の発話","emphasis":[],"needsReview":false}]}`;
-  const body = JSON.stringify({
-    contents: [{ parts: [
-      "wav" in audio
-        ? { inline_data: { mime_type: "audio/wav", data: encodeCaptionAudio(audio.wav) } }
-        : { file_data: { mime_type: audio.mimeType ?? "audio/mpeg", file_uri: audio.uri } },
-      { text: prompt },
-    ] }],
-    generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
-  });
-  const res = await withDeadline(signal, 75_000, async deadline => {
-    let activeModel = model;
-    for (let attempt = 1; ; attempt++) {
-      onStatus(`Geminiの字幕応答を待っています（${attempt}回目）…`);
-      let retryMs = 1500;
-      let reason = "通信が切断されました";
+    const generate = async (part: ReturnType<typeof partFor>, length: number): Promise<CaptionCue[]> => {
+      const request = ++attempt;
+      if (request > 4) throw new CaptionResponseError("truncated");
+      onStatus(`Geminiの字幕応答を待っています（${request}回目）…`);
+      const diagnostic: CaptionTiming = {
+        model: /^gemini-\d[\w.-]{0,63}$/.test(activeModel) ? activeModel : "other",
+        structure: "unknown",
+      };
+      const started = performance.now();
+      let status: number | undefined;
+      let success = false;
       try {
-        const result = await measureStage("generation-request", async () => {
-          const response = await fetch(`${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
-            method: "POST", signal: deadline,
-            headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-            body,
-          });
-          return new Response(response.status === 204 ? null : await response.text(), { status: response.status });
-        }, attempt);
-        if (result.ok) {
-          if (activeModel !== model) onModelChanged?.(activeModel);
-          return result;
-        }
-        if (attempt === 1 && result.status === 404) {
-          const replacement = pickDefaultModel(await listModels(apiKey, deadline));
-          if (replacement && replacement !== activeModel) {
-            activeModel = replacement;
-            continue;
+        const res = await fetch(`${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
+          method: "POST", signal: deadline,
+          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+          body: JSON.stringify({
+            contents: [{ parts: [part, { text: `日本語の発話を要約・省略せずに文字起こしし、{"segments":[]}で返す。
+各行: startMs, endMs, speaker, text, emphasis, needsReview。
+音声の先頭を0として0〜${length}の整数ミリ秒。実際に聞こえた発話の境界を使い、不確かならnull。等分しない。
+相づち・言い直しも残す。聞き取れない発話は「（聞き取り不明）」。無音の行は作らない。
+話者が変われば分け、同じ話者は同じA、B、C等。不明なら「不明」。重複発話も別行にする。
+emphasisは本文にある語を2個以内。不確かな行はneedsReviewをtrue。
+${glossary?.trim() ? `音声と一致するときだけ使う表記: ${glossary.trim()}` : ""}` }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: length > 40_000 ? 8192 : 6144,
+              ...(structured ? { responseMimeType: "application/json", responseJsonSchema: captionSchema } : {}),
+            },
+          }),
+        });
+        status = res.status;
+        const body = await res.text();
+        if (!res.ok) {
+          const unsupported = res.status === 400 && /response[_ ]?(?:json[_ ]?schema|mime[_ ]?type)|structured output/i.test(body)
+            && /not supported|unsupported|unknown (?:name|field)/i.test(body);
+          if (unsupported) throw new CaptionRequestError("unsupported", "選んだモデルは字幕の構造化出力に対応していません。");
+          if (res.status === 429) {
+            if (isDailyQuota(body)) throw new CaptionRequestError("daily-quota", "Geminiの1日あたりの利用上限です（429）。枠が戻ってから再試行してください。");
+            throw new CaptionRequestError("quota", "Geminiの短時間の利用上限です（429）。少し間を置いて再試行してください。", retryDelayMs(body));
           }
+          if (TRANSIENT_STATUS.includes(res.status)) throw new CaptionRequestError("server", `Geminiの字幕生成でサーバーエラーが続いています（${res.status}）。`, 1500);
+          if (res.status === 404) throw new CaptionRequestError("model", "字幕モデルまたは音声を取得できませんでした（404）。設定を確認してください。");
+          if (res.status === 401 || res.status === 403 || body.includes("API_KEY_INVALID")) {
+            throw new CaptionRequestError("auth", `Geminiの認証または利用権限を確認してください（${res.status}）。`);
+          }
+          throw new CaptionRequestError("http", `Geminiの字幕生成に失敗しました（${res.status}）。APIキーと利用権限を確認してください。`);
         }
-        if (attempt !== 1) return result;
-        if (TRANSIENT_STATUS.includes(result.status)) {
-          reason = `Geminiが混雑しています（${result.status}）`;
-        } else if (result.status === 429) {
-          const details = await result.clone().text();
-          retryMs = retryDelayMs(details);
-          if (isDailyQuota(details) || retryMs > 15_000) return result;
-          reason = "Geminiの短時間の利用上限に達しました";
-        } else {
-          return result;
-        }
+        const cues = parseCaptionResponse(body, length, diagnostic);
+        success = true;
+        return cues;
       } catch (error) {
-        deadline.throwIfAborted();
-        if (!(error instanceof TypeError) || attempt !== 1) {
-          if (error instanceof TypeError) throw new Error("Geminiとの通信が切断されました。接続を確認して再試行してください。");
+        if (deadline.aborted) {
+          diagnostic.issue = deadline.reason?.name === "TimeoutError" ? "timeout" : "cancelled";
+          deadline.throwIfAborted();
+        }
+        if (error instanceof CaptionResponseError || error instanceof CaptionRequestError) {
+          diagnostic.issue = error.issue;
           throw error;
         }
+        if (error instanceof TypeError) {
+          diagnostic.issue = "network";
+          throw new CaptionRequestError("network", "Geminiとの通信が切断されました。接続を確認してください。", 1500);
+        }
+        diagnostic.issue = "unknown";
+        throw new CaptionRequestError("unknown", "字幕処理を完了できませんでした。再試行してください。");
+      } finally {
+        recordTiming("caption-response", performance.now() - started, success, request, status, undefined, undefined, diagnostic);
       }
-      await measureStage("retry-wait", () => countdown(retryMs,
-        left => onStatus(`${reason}。${left}秒後に再試行します…`), deadline));
+    };
+
+    const split = async () => {
+      if (durationMs < 20_000 || durationMs > 90_000 || (!("wav" in audio) && !getWav)) {
+        throw new CaptionResponseError("truncated");
+      }
+      onStatus("出力が途中で終わったため、区間を2つに分けて字幕を作ります…");
+      const wav = "wav" in audio ? audio.wav : await getWav!();
+      deadline.throwIfAborted();
+      const halves = splitCaptionWav(wav, durationMs);
+      const combined: CaptionCue[] = [];
+      if (splitDrafts) {
+        splitDrafts.model = activeModel;
+        splitDrafts.structured = structured;
+      }
+      for (const [index, half] of halves.entries()) {
+        let cues = splitDrafts?.parts.get(index);
+        if (!cues) {
+          cues = await generate(partFor(half), half.duration);
+          splitDrafts?.parts.set(index, cues);
+        }
+        combined.push(...cues.map(cue => ({
+          ...cue,
+          startMs: cue.startMs === null ? null : cue.startMs + half.offset,
+          endMs: cue.endMs === null ? null : cue.endMs + half.offset,
+          speakerId: cue.speakerId === "不明" ? "不明" : `${index + 1}:${cue.speakerId}`,
+          needsReview: true,
+        })));
+      }
+      return combined;
+    };
+
+    if (splitDrafts?.model) return split();
+    const part = partFor(audio);
+    for (let index = 0; ; index++) {
+      try { return await generate(part, durationMs); }
+      catch (error) {
+        deadline.throwIfAborted();
+        if (error instanceof CaptionResponseError && error.issue === "truncated") return split();
+        if (index > 0) throw error;
+        if (error instanceof CaptionResponseError) {
+          if (error.issue === "safety" || error.issue === "stopped") throw error;
+          onStatus("字幕の形式を確認できなかったため、1回だけ再要求します…");
+          continue;
+        }
+        if (!(error instanceof CaptionRequestError)) throw error;
+        if (error.issue === "unsupported") {
+          structured = false;
+          continue;
+        }
+        if (error.issue === "model") {
+          const replacement = pickDefaultModel(await listModels(apiKey, deadline));
+          if (!replacement || replacement === activeModel) throw error;
+          activeModel = replacement;
+          continue;
+        }
+        if (error.wait === undefined || error.wait > 15_000) throw error;
+        await measureStage("retry-wait", () => countdown(error.wait!,
+          left => onStatus(`${error.message} ${left}秒後に再試行します…`), deadline));
+      }
     }
   });
-  if (!res.ok) {
-    const details = await res.text();
-    if (res.status === 429) throw new Error(isDailyQuota(details)
-      ? "Geminiの1日あたりの利用上限です（429）。枠が戻ってから再試行してください。"
-      : "Geminiの短時間の利用上限です（429）。少し間を置いて再試行してください。");
-    if (res.status === 401 || res.status === 403 || details.includes("API_KEY_INVALID")) {
-      throw new Error(`Geminiの認証または音声へのアクセスに失敗しました（${res.status}）。APIキーとモデルの利用権限を確認してください。`);
-    }
-    if (TRANSIENT_STATUS.includes(res.status)) {
-      throw new Error(`Geminiの字幕生成でサーバーエラーが続いています（${res.status}）。時間をおいて再試行してください。`);
-    }
-    throw new Error(`Geminiの字幕生成に失敗しました（${res.status}）。設定を確認して再試行してください。`);
-  }
-  let parsed: { segments?: unknown };
-  try {
-    const { text, finishReason } = answerFrom(await res.json(), "字幕", true);
-    if (!text.trim()) return [];
-    parsed = extractJson(text, "字幕", finishReason);
-  } catch {
-    throw new Error("Geminiの字幕形式を読み取れませんでした。再試行してください。");
-  }
-  if (!Array.isArray(parsed?.segments)) throw new Error("字幕の形式が読めませんでした。再試行してください。");
-  const boundary = (value: unknown) => typeof value === "number" && Number.isInteger(value) &&
-    value >= 0 && value <= durationMs ? value : null;
-  return parsed.segments.flatMap((value): CaptionCue[] => {
-    if (!value || typeof value.text !== "string" || !value.text.trim()) return [];
-    const transcript = value.text.trim();
-    const startMs = boundary(value.startMs);
-    const endMs = boundary(value.endMs);
-    const id = typeof value.speaker === "string" ? value.speaker.trim() : "";
-    const speakerId = /^[A-Z]{1,3}$/.test(id) ? id : "不明";
-    return [{
-      startMs, endMs, speakerId, text: transcript,
-      emphasis: Array.isArray(value.emphasis) ? [...new Set<string>(value.emphasis.filter(
-        (word: unknown): word is string => typeof word === "string" && !!word && transcript.includes(word),
-      ))].slice(0, 2) : [],
-      needsReview: value.needsReview !== false || startMs === null || endMs === null || startMs >= endMs || speakerId === "不明",
-    }];
-  });
+}
+
+class CaptionRequestError extends Error {
+  constructor(readonly issue: string, message: string, readonly wait?: number) { super(message); }
 }
 
 export function isAudioUsable(audio: UploadedAudio | null | undefined): boolean {

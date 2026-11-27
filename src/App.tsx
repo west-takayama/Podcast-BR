@@ -796,7 +796,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 2.4</h1>
+        <h1>🎙️ AI STUDIO 2.4.1</h1>
         <nav className="tabs">
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
             作成
@@ -909,6 +909,7 @@ export default function App() {
           promptConfig={settings.prompt}
           apiKey={settings.apiKey}
           model={settings.model}
+          captionModel={settings.captionModel}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
         />
         </div>
@@ -1101,6 +1102,7 @@ export default function App() {
                 promptConfig={settings.prompt}
                 apiKey={settings.apiKey}
                 model={settings.model}
+                captionModel={settings.captionModel}
                 onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
                 audioReport={audioReport}
                 originalAudio={!!convertedRef.current?.originalAudio}

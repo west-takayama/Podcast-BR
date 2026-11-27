@@ -64,13 +64,14 @@ function nearbyEdge(ms: number, edges: number[]): number | null {
   return candidates.length === 1 ? candidates[0] : null;
 }
 
-export function alignCues(input: CaptionCue[], activity: SpeechSpan[], durationMs: number): CaptionCue[] {
+export function alignCues(input: CaptionCue[], activity: SpeechSpan[], durationMs: number, preserveUnknown = false): CaptionCue[] {
   const cues = input.slice().sort((a, b) => (a.startMs ?? Infinity) - (b.startMs ?? Infinity));
   const starts = activity.map(run => run.startMs);
   const ends = activity.map(run => run.endMs);
   return cues.map((cue, i) => {
     const start = cue.startMs;
     const end = cue.endMs;
+    if (preserveUnknown && (start === null || end === null)) return { ...cue, needsReview: true };
     if (start === null || start < 0 || start >= durationMs) {
       return { ...cue, startMs: null, endMs: null, needsReview: true };
     }

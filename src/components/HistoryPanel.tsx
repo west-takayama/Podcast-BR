@@ -35,6 +35,7 @@ interface Props {
   promptConfig: PromptConfig;
   apiKey: string;
   model: string;
+  captionModel?: string;
   onModelChanged: (model: string) => void;
 }
 
@@ -63,6 +64,7 @@ export default function HistoryPanel({
   promptConfig,
   apiKey,
   model,
+  captionModel,
   onModelChanged,
 }: Props) {
   const [records, setRecords] = useState<EpisodeRecord[] | null>(null);
@@ -409,6 +411,7 @@ export default function HistoryPanel({
                 promptConfig={promptConfig}
                 apiKey={apiKey}
                 model={model}
+                captionModel={captionModel}
                 onModelChanged={onModelChanged}
                 transcript={r.transcript}
                 onEdit={(patch) => {
