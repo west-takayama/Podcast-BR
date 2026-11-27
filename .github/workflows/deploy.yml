@@ -2,43 +2,68 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, development/ai-studio-v2.1]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
 
 jobs:
-  build-deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      # id3-check は Python の mutagen で MP3 タグを外から確かめる。
-      # 素の pip は環境によって弾かれるので、Python を明示的に用意する
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: python -m pip install mutagen
       - run: npm ci
-      # 部品の検証。壊れたまま公開しないための関所
       - run: npm test
       - run: npm run build
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - id: upload
+        uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6.0.0
+      # Upload success can precede visibility through the artifact API.
+      - name: Wait for the Pages artifact to become visible
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact-id }}
+        run: |
+          test -n "$ARTIFACT_ID"
+          for delay in 1 2 4 8 16 30 30; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+                --jq 'select(.name == "github-pages" and .expired == false) | .id' |
+                grep -Fxq "$ARTIFACT_ID"; then
+              exit 0
+            fi
+            sleep "$delay"
+          done
+          echo "::error::Pages artifact $ARTIFACT_ID was uploaded but did not become visible to the Actions API."
+          exit 1
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5.0.1
