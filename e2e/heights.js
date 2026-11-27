@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 画面の長さと、消す操作の安全さを測る。
 const { chromium } = require("playwright");
 const PORT = process.argv[2] || "4218";
@@ -31,7 +32,8 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   await page.fill("input[type=password]", "AIzaMOCK");
   await page.waitForTimeout(1200);
   await page.click("button:has-text('保存して閉じる')");
-  await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+  await openLegacy(page);
+  await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
   await page.waitForSelector("h2:has-text('投稿素材が完成しました')", { timeout: 300000 });
   const rh = await h();
   console.log(`結果画面: ${rh}px = ${screens(rh)}画面`);

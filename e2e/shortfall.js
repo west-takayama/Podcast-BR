@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 返しきれなかったときに、項目を減らして通し直せるか。
 //
 //  A) 1回目が途中で切れる → 2回目は項目を減らして頼み、結果が出る
@@ -77,7 +78,8 @@ const busy = JSON.stringify({ error: { code: 503, message: "overloaded", status:
   };
 
   const convert = async (page) => {
-    await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+    await openLegacy(page);
+    await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
     await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
   };
 

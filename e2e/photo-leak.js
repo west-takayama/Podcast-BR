@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 写真は次の回へ残さず、通常制作の元音声も変更しない。
 // ID3 の互換性は scripts/id3-check.ts が検証する。
 //
@@ -116,7 +117,8 @@ async function inspect() {
   }
 
   const convert = async () => {
-    await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+    await openLegacy(page);
+    await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
     await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
     if (await page.locator(".error").count()) throw new Error(await page.textContent(".error"));
   };

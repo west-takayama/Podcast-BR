@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 無料枠の1分あたりの上限(429)に当たったとき、待たされ損にならないか。
 //
 //  A) 枠はモデルごと。空いている別のモデルがあればそちらで完了する
@@ -81,7 +82,8 @@ const perDay = JSON.stringify({
       await page.click("button:has-text('保存して閉じる')");
     }
     // 履歴を1件作る(お題は履歴が要る)
-    await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+    await openLegacy(page);
+    await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
     await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
     await page.locator("nav button, .tabs button").filter({ hasText: "次の回" }).first().click();
     await page.waitForTimeout(700);

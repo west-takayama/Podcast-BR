@@ -1,9 +1,15 @@
+import CopyButton from "./CopyButton";
+import { listEpisodes, saveEpisode } from "../lib/history";
+import { measureStage } from "../lib/timing";
 import { ShortsAudioCache } from "../lib/shortsCache";
 import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import {
   findClips,
+  generateSpotifyCopy,
+  type EpisodeMeta,
+  type UploadedAudio,
   transcribeRange,
   uploadEpisodeAudio,
   type Clip,
@@ -18,6 +24,7 @@ const loadClipLib = () => import("../lib/video/clip");
 
 interface Props {
   settings: Settings;
+  previousTitles: string[];
   onModelChanged: (model: string) => void;
 }
 
@@ -46,8 +53,10 @@ const fmt = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
 
 /** 秒を "MM:SS.S" に。字幕の時刻は小数第1位まで持つ。 */
-const fmtFine = (sec: number) =>
-  `${String(Math.floor(sec / 60)).padStart(2, "0")}:${(sec % 60).toFixed(1).padStart(4, "0")}`;
+const fmtFine = (sec: number) => {
+  const tenths = Math.round(sec * 10);
+  return `${String(Math.floor(tenths / 600)).padStart(2, "0")}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
+};
 
 /**
  * 切り出した音声だけを聴かせて書き起こすので、返ってくる時刻は 0 起点。
@@ -66,13 +75,20 @@ const shiftSegments = (segments: TranscriptSegment[], offsetSec: number): Transc
  * 音声だけを Gemini に聴かせて面白い区間を選ばせ、映像はその区間を
  * 端末内で切り出す。動画そのものはどこにも送らない。
  */
-export default function ShortsPanel({ settings, onModelChanged }: Props) {
+export default function ShortsPanel({ settings, previousTitles, onModelChanged }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   /** 映像がこの端末で復号できない動画。音声と字幕だけで作ることになる。 */
   const [videoUnusable, setVideoUnusable] = useState(false);
+  const [hasVideo, setHasVideo] = useState(false);
+  const [background, setBackground] = useState<File | null>(null);
+  const [spotify, setSpotify] = useState<Pick<EpisodeMeta, "titles" | "description"> | null>(null);
+  const [spotifyBusy, setSpotifyBusy] = useState(false);
+  const [spotifyError, setSpotifyError] = useState("");
+  const spotifyRef = useRef<AbortController | null>(null);
+  const analysisRef = useRef<{ file: File; audio: UploadedAudio; facts: string[]; clips: Clip[]; durationSec: number } | null>(null);
   const [fileInfo, setFileInfo] = useState("");
   const [clips, setClips] = useState<Clip[]>([]);
   const [selected, setSelected] = useState(0);
@@ -108,6 +124,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     return () => {
       workerRef.current?.terminate();
       abortRef.current?.abort();
+      spotifyRef.current?.abort();
       for (const u of urls) URL.revokeObjectURL(u);
     };
   }, []);
@@ -119,9 +136,10 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     if (!c) return { startSec: 0, endSec: 0 };
     const n = nudgeOf(i);
     const rawStart = (parseTimestamp(c.start) ?? 0) / 1000;
-    const rawEnd = (parseTimestamp(c.end) ?? rawStart + 45) / 1000;
-    const startSec = Math.max(0, rawStart + n.start);
-    return { startSec, endSec: Math.max(startSec + 5, rawEnd + n.end) };
+    const rawEnd = (parseTimestamp(c.end) ?? (rawStart + 45) * 1000) / 1000;
+    const limit = sourceAudioRef.current?.durationSec ?? rawEnd;
+    const startSec = Math.min(Math.max(0, limit - 5), Math.max(0, rawStart + n.start));
+    return { startSec, endSec: Math.min(limit, startSec + 90, Math.max(startSec + 5, rawEnd + n.end)) };
   };
 
   /** その候補の書き出し済み動画を捨てる。範囲や字幕を変えたら作り直しになるため。 */
@@ -171,30 +189,37 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   };
 
   /** 動画から AI に聴かせる用の音声だけを取り出す(無音カットはしない)。 */
-  const extractAudio = (file: File): Promise<{ mp3: ArrayBuffer; durationSec: number }> =>
+  const extractAudio = (file: File, signal: AbortSignal): Promise<{ mp3: ArrayBuffer; durationSec: number }> =>
     new Promise((resolve, reject) => {
       const worker = new Worker(new URL("../lib/encoder.worker.ts", import.meta.url), {
         type: "module",
       });
       workerRef.current = worker;
+      const cleanup = () => {
+        signal.removeEventListener("abort", abort);
+        worker.terminate();
+        if (workerRef.current === worker) workerRef.current = null;
+      };
+      const abort = () => {
+        cleanup();
+        reject(new DOMException("中止しました", "AbortError"));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) { abort(); return; }
       worker.onmessage = (e) => {
         const msg = e.data;
         if (msg.type === "progress") setProgress(msg.fraction ?? 0);
         else if (msg.type === "done") {
-          worker.terminate();
-          workerRef.current = null;
-          // 長さを渡さないと、短い動画で「30〜60秒の区間を3つ」が無理になる
+          cleanup();
           resolve({ mp3: msg.aiMp3, durationSec: msg.durationSec ?? 0 });
         } else if (msg.type === "error") {
-          worker.terminate();
-          workerRef.current = null;
+          cleanup();
           reject(new Error(msg.message));
         }
       };
       worker.onerror = () => {
-        worker.terminate();
-        workerRef.current = null;
-        reject(new Error("動画から音声を取り出せませんでした"));
+        cleanup();
+        reject(new Error("素材から音声を読み取れませんでした"));
       };
       worker.postMessage({
         file,
@@ -202,11 +227,60 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         // (10分の素材で 17秒 → 4秒 になる)
         purpose: "ai",
         // 無音カットを有効にすると音声と映像の時刻がずれるため、必ず切っておく
-        dsp: { ...settings.dsp, trimSilence: false },
+        dsp: { ...settings.dsp, trimSilence: false, highPass: false },
         mono: true,
         bitrate: settings.bitrate,
       });
     });
+
+  const clearSpotify = () => {
+    spotifyRef.current?.abort();
+    spotifyRef.current = null;
+    analysisRef.current = null;
+    setSpotify(null);
+    setSpotifyBusy(false);
+    setSpotifyError("");
+  };
+
+  const makeSpotify = async (model = settings.model) => {
+    const analysis = analysisRef.current;
+    if (!analysis || spotifyRef.current) return;
+    const controller = new AbortController();
+    spotifyRef.current = controller;
+    setSpotifyBusy(true);
+    setSpotifyError("");
+    try {
+      const recent = await listEpisodes().then(rows => rows.slice(0, 8).map(row => row.chosenTitle || row.meta.titles[0]).filter(Boolean)).catch(() => previousTitles);
+      controller.signal.throwIfAborted();
+      const copy = await generateSpotifyCopy({
+        apiKey: settings.apiKey,
+        model,
+        facts: analysis.facts,
+        audio: analysis.audio,
+        config: settings.prompt,
+        previousTitles: recent,
+        onModelChanged,
+        signal: controller.signal,
+      });
+      controller.signal.throwIfAborted();
+      await saveEpisode({
+        id: crypto.randomUUID(), createdAt: Date.now(), fileName: analysis.file.name,
+        durationSec: analysis.durationSec, removedSec: 0, chosenTitle: copy.titles[0],
+        audio: analysis.file, originalAudio: true, uploaded: analysis.audio,
+        meta: { ...copy, clips: analysis.clips, showNotes: "", chapters: [], hashtags: [], transcriptSummary: "", keywords: [] },
+      }).catch(() => {
+        if (!controller.signal.aborted) setSpotifyError("文章を表示しました。履歴に保存できなかったため、コピーして控えてください。");
+      });
+      if (!controller.signal.aborted) setSpotify(copy);
+    } catch (e) {
+      if (!controller.signal.aborted) setSpotifyError(noteError("Spotify用文章", e, settings.model));
+    } finally {
+      if (spotifyRef.current === controller) {
+        spotifyRef.current = null;
+        setSpotifyBusy(false);
+      }
+    }
+  };
 
   const handleFile = async (file: File) => {
     if (!settings.apiKey) {
@@ -215,6 +289,9 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     }
     abortRef.current?.abort();
     workerRef.current?.terminate();
+    clearSpotify();
+    setBackground(null);
+    setHasVideo(false);
     fileRef.current = file;
     sourceAudioRef.current = null;
     sourceCacheRef.current.clear();
@@ -231,7 +308,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     setError("");
     setFileInfo(`${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`);
     setPhase("extracting");
-    setStatus("動画から音声を取り出しています…");
+    setStatus("素材の音声を準備しています…");
     setProgress(0);
     setVideoUnusable(false);
 
@@ -243,19 +320,20 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     if (!file) return;
     setError("");
     setPhase(sourceAudioRef.current ? "finding" : "extracting");
-    setStatus(sourceAudioRef.current ? "候補の抽出を再開しています…" : "動画から音声を取り出しています…");
+    setStatus(sourceAudioRef.current ? "候補の抽出を再開しています…" : "素材の音声を準備しています…");
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       // 映像がこの端末で復号できるかを**先に**見る。
       // 出来ないと分かるのが書き出しの瞬間だと、AI の呼び出し(無料枠)も
       // 範囲の調整も全部やり直しになる。ここで一言出しておけば選び直せる
-      const { canUseVideo } = await loadClipLib();
-      const usableVideo = await canUseVideo(file);
+      const { inspectVideo } = await loadClipLib();
+      const { hasVideo: video, decodable } = await inspectVideo(file);
       controller.signal.throwIfAborted();
-      if (!usableVideo) setVideoUnusable(true);
+      setHasVideo(decodable);
+      setVideoUnusable(video && !decodable);
 
-      if (!sourceAudioRef.current) sourceAudioRef.current = await extractAudio(file);
+      if (!sourceAudioRef.current) sourceAudioRef.current = await measureStage("conversion", () => extractAudio(file, controller.signal));
       controller.signal.throwIfAborted();
       const { mp3, durationSec } = sourceAudioRef.current;
       setPhase("finding");
@@ -264,6 +342,8 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         async () => mp3,
         bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, controller.signal));
       controller.signal.throwIfAborted();
+      let facts: string[] = [];
+      let model = settings.model;
       const found = await findClips({
         audio,
         apiKey: settings.apiKey,
@@ -272,13 +352,16 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         durationSec,
         onStatus: setStatus,
         onUploadProgress: setProgress,
-        onModelChanged,
+        onEpisodeFacts: (value) => { facts = value; },
+        onModelChanged: value => { model = value; onModelChanged(value); },
         signal: controller.signal,
       });
       controller.signal.throwIfAborted();
+      analysisRef.current = { file, audio, facts, clips: found, durationSec };
       setClips(found);
       setPhase("ready");
       setStatus("");
+      void makeSpotify(model);
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       setError(noteError("ショート", e, settings.model));
@@ -343,12 +426,12 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     }
   };
 
-  const editCaption = (i: number, line: number, text: string) => {
+  const editCaption = (i: number, line: number, patch: Partial<Pick<TranscriptSegment, "text" | "speaker">>) => {
     setCaptions((prev) => {
       const list = prev[i];
       if (!list) return prev;
       const next = list.slice();
-      next[line] = { ...next[line], text };
+      next[line] = { ...next[line], ...patch };
       return { ...prev, [i]: next };
     });
     dropResult(i);
@@ -371,18 +454,26 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     const segments = withCaptions ? await buildCaptions(i, signal) : null;
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
+    const [bitmap, logo] = await Promise.all([
+      background ? createImageBitmap(background).catch(() => null) : null,
+      hasVideo ? null : fetch(new URL("icon-192.png", document.baseURI))
+        .then(response => response.ok ? response.blob() : Promise.reject())
+        .then(blob => createImageBitmap(blob)).catch(() => null),
+    ]);
     const blob = await renderClip({
-      videoFile: file,
+      ...(hasVideo ? { videoFile: file } : { audioFile: file }),
+      background: bitmap ?? undefined,
+      logo: logo ?? undefined,
       startSec,
       endSec,
       hook: clip.hook,
-      showName: settings.prompt.showName,
+      showName: settings.prompt.showName || "BRIDGE RADIO",
       accent: settings.accentColor,
       transcript: segments,
       onProgress: setProgress,
       signal,
       capability: cap ?? undefined,
-    });
+    }).finally(() => { bitmap?.close(); logo?.close(); });
     const url = URL.createObjectURL(blob);
     urlsRef.current.add(url);
     setResults((prev) => {
@@ -512,6 +603,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const { startSec, endSec } = rangeOf(selected);
   const lines = captions[selected];
   const doneCount = Object.keys(results).length;
+  const unfinished = clips.flatMap((_, i) => results[i] ? [] : [i]);
 
   return (
     <>
@@ -538,10 +630,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         </div>
       )}
       {phase === "idle" && clips.length === 0 && (
-        <label className="drop card">
+        <label className="drop card production-picker">
           <input
             type="file"
-            accept="video/*,.mp4,.mov,.m4v,.webm"
+            aria-label="音声または動画を選択"
+            accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.mp4,.mov,.m4v,.webm,.flac,.opus,.ogg,.caf"
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) void handleFile(f);
@@ -549,9 +642,9 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
             }}
           />
           <p style={{ fontSize: "2rem", margin: "0 0 8px" }}>🎬</p>
-          <p style={{ margin: 0, fontWeight: 600 }}>動画をここから選択</p>
+          <p style={{ margin: 0, fontWeight: 600 }}>音声または動画を選択</p>
           <p className="muted">
-            MP4 / MOV など。音声を聴いた AI が、ショートに向いた区間を自動で探します。
+            MP4 / MOV / WAV / MP3 など。素材を一度選ぶと、ショート候補とSpotify用の文章を作ります。
             <br />
             動画そのものは端末から出ません(送るのは音声だけです)
           </p>
@@ -589,14 +682,13 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               <div
                 key={i}
                 className={`title-option${i === selected ? " chosen" : ""}`}
-                onClick={() => setSelected(i)}
                 style={{ display: "block" }}
               >
-                <div style={{ fontWeight: 600 }}>
+                <button type="button" aria-pressed={i === selected} onClick={() => setSelected(i)}>
                   {i === selected ? "★ " : ""}
                   {results[i] ? "✅ " : ""}
                   {c.hook || "(見出しなし)"}
-                </div>
+                </button>
                 <div className="muted" style={{ marginTop: 4 }}>
                   {fmt(r.startSec)}〜{fmt(r.endSec)}({Math.round(r.endSec - r.startSec)}秒)
                   {c.why ? ` ・ ${c.why}` : ""}
@@ -618,17 +710,30 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
             </div>
           </div>
 
+          {!hasVideo && (
+            <label>
+              ショートの背景画像（任意）
+              <input type="file" accept="image/*" onChange={e => {
+                setBackground(e.target.files?.[0] ?? null);
+                clips.forEach((_, i) => dropResult(i));
+              }} />
+            </label>
+          )}
+
           <label className="check">
             <input
               type="checkbox"
               checked={withCaptions}
-              onChange={(e) => setWithCaptions(e.target.checked)}
+              onChange={(e) => {
+                setWithCaptions(e.target.checked);
+                clips.forEach((_, i) => dropResult(i));
+              }}
             />
             <span>
               字幕を入れる
               <br />
               <span className="muted">
-                この区間だけを書き起こします。ショートは音を出さずに見られることが多いので、入れたほうが伸びます。
+                選んだ区間だけを書き起こします。
               </span>
             </span>
           </label>
@@ -640,12 +745,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
           )}
           {cap && !cap.mp4 && (
             <p className="muted">
-              この端末には H.264 が入っていないため WebM で書き出します。YouTube には上げられますが、
-              Instagram と TikTok は MP4 しか受け付けません。
+              この端末ではMP4を書き出せないため、WebMを使います。
             </p>
           )}
 
-          {cap !== null && (
+          {cap && (
             <>
               {withCaptions && !lines && (
                 <button onClick={prepareCaptions}>📝 先に字幕を作って確認する</button>
@@ -653,9 +757,9 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               <button className="primary" onClick={() => void make([selected])}>
                 🎬 この範囲を縦型ショートにする
               </button>
-              {clips.length > 1 && (
-                <button onClick={() => void make(clips.map((_, i) => i))}>
-                  📦 候補をまとめて書き出す({clips.length}本)
+              {unfinished.length > 1 && (
+                <button onClick={() => void make(unfinished)}>
+                  📦 候補をまとめて書き出す({unfinished.length}本)
                 </button>
               )}
             </>
@@ -676,10 +780,13 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
           {lines.map((s, k) => (
             <div key={k} className="caption-row">
               <span className="muted caption-time">{s.time}</span>
+              <input className="caption-speaker" aria-label={`話者 ${k + 1}`} value={s.speaker}
+                onChange={e => editCaption(selected, k, { speaker: e.target.value })} />
               <input
                 type="text"
+                aria-label={`字幕 ${k + 1}`}
                 value={s.text}
-                onChange={(e) => editCaption(selected, k, e.target.value)}
+                onChange={(e) => editCaption(selected, k, { text: e.target.value })}
               />
               <button
                 className="caption-del"
@@ -694,7 +801,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       )}
 
       {/* 表紙。フィードで最初に目に入る1枚なので、先頭のコマ任せにしない */}
-      {clips.length > 0 && !busy && cap !== null && (
+      {hasVideo && clips.length > 0 && !busy && cap !== null && (
         <div className="card">
           <h2>🖼 表紙(カバー画像)</h2>
           <p className="muted">
@@ -763,12 +870,27 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         </div>
       )}
 
+      {clips.length > 0 && (
+        <section className="card">
+          <h2>Spotify用タイトル・概要欄</h2>
+          {spotifyBusy && <p role="status">文章を準備中です。ショートの編集を進められます。</p>}
+          {spotifyError && <p role="alert">{spotifyError}</p>}
+          {!spotify && !spotifyBusy && <button type="button" onClick={() => void makeSpotify()}>Spotify用文章を再試行</button>}
+          {spotify?.titles.map(title => <div className="title-option" key={title}><span>{title}</span><CopyButton text={title} /></div>)}
+          {spotify && <><p className="result-body">{spotify.description}</p><CopyButton text={spotify.description} label="概要欄をコピー" /></>}
+        </section>
+      )}
+
       {clips.length > 0 && !busy && (
         <div className="card">
           <button
             onClick={() => {
               setClips([]);
               setPhase("idle");
+              clearSpotify();
+              sourceAudioRef.current = null;
+              sourceCacheRef.current.clear();
+              rangeCacheRef.current.clear();
               fileRef.current = null;
               setNudges({});
               setCaptions({});
@@ -779,7 +901,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
               setCovers({});
             }}
           >
-            別の動画にする
+            別の素材にする
           </button>
         </div>
       )}

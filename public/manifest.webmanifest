@@ -1,7 +1,7 @@
 {
-  "name": "Podcast BR",
-  "short_name": "PodcastBR",
-  "description": "WAVをアップロードするだけでタイトル・説明文を自動生成するポッドキャスト運営ツール",
+  "name": "AI STUDIO 2.1 — BRIDGE RADIO",
+  "short_name": "AI STUDIO",
+  "description": "音声や動画から縦型ショートとSpotify用の文章を作る制作ツール",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#0a0a0a",

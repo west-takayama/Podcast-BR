@@ -15,7 +15,7 @@ const labels: Record<TimingStage, string> = {
 export default function TimingDiagnostics() {
   const timings = useSyncExternalStore(subscribeToTimings, getTimings);
   const [message, setMessage] = useState("");
-  const report = ["AI STUDIO 2.0 処理時間", ...timings.map(entry => {
+  const report = ["AI STUDIO 2.1 処理時間", ...timings.map(entry => {
     const details = [
       entry.success ? "完了" : "未完了",
       entry.attempt === undefined ? "" : `試行 ${entry.attempt}`,

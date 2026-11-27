@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 画面のパトロール。全部のタブを開いて、押せるものを押して、
 // 例外・console.error・React の警告が出ないかを見る。
 //
@@ -73,7 +74,8 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   }
 
   console.log("=== 1) 変換して結果画面まで ===");
-  await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+  await openLegacy(page);
+  await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
   await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
   if (await page.locator(".error").count())
     note("結果", (await page.textContent(".error")).slice(0, 120));
@@ -141,6 +143,7 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   await page.locator("nav button, .tabs button").filter({ hasText: "作成" }).first().click();
   await page.waitForTimeout(600);
   // 決めたお題は「これから録る」画面に出る。結果を見ている最中には出ない
+  await openLegacy(page);
   const next = page.locator("button:has-text('次のエピソードを処理する')");
   if (await next.count()) { await next.click(); await page.waitForTimeout(600); }
   const carried = await page.locator("body").innerText();

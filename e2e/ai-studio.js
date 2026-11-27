@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // API requests are intercepted; synthetic fixture and fake key never leave the browser.
 const { chromium } = require('playwright');
 const fs = require('node:fs');
@@ -34,12 +35,14 @@ const meta = { titles: ['元音声を保持する回'], description: '生成し�
     await page.goto(`http://localhost:${PORT}/`);
     await page.fill('input[type=password]','AIzaMOCK');
     await page.getByRole('button',{name:'保存して閉じる'}).click();
-    await page.locator('.drop input[type=file]').first().setInputFiles('speechlike.wav');
+    await openLegacy(page);
+    await page.locator('.legacy-production .drop input[type=file]').first().setInputFiles('speechlike.wav');
     await page.waitForSelector('.error',{timeout:120000});
     assert.deepEqual(await page.evaluate(()=>window.workerPurposes),['ai'],'normal flow must use AI-only conversion');
     assert.equal(uploads,1);
     // Resume from durable pending after a full reload. Uploaded reference must survive.
     await page.reload();
+    await openLegacy(page);
     fail=false;
     await page.getByRole('button',{name:'文章の生成から続ける'}).click();
     await page.waitForSelector("h2:has-text('投稿素材が完成しました')",{timeout:120000});
