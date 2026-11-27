@@ -187,7 +187,7 @@ export { BANDS as TONE_BANDS };
  * ラウドネスもリミッターも配信用 MP3 も捨てるだけなので、丸ごと省く。
  */
 async function runAiOnly(file: File, dsp: DspOptions): Promise<void> {
-  const reader = await openAudio(file, BLOCK_SECONDS);
+  const reader = await openAudio(file, BLOCK_SECONDS, true);
   if (!(reader.durationSec > 0)) throw new Error("音声データが空です");
   const sampleRate = reader.sampleRate;
   const numChannels = reader.numChannels;

@@ -1,3 +1,5 @@
+import { samplesOnSourceClock } from "../audio/sourceClock";
+import { detectActivity, displayCueAt, type DisplayCue } from "./captionAlignment";
 // 切り抜きの縦型動画を端末内で書き出す。
 //
 // ポッドキャストが伸びない一番の理由は「聴くまで中身が分からない」こと。
@@ -15,7 +17,6 @@ import {
   VideoSampleSink,
   type VideoSample,
   AudioBufferSource,
-  AudioSampleSink,
   BlobSource,
   BufferTarget,
   CanvasSource,
@@ -60,6 +61,8 @@ export interface ClipOptions {
   background?: CanvasImageSource & { width: number; height: number };
   /** 字幕。区間に重なるものだけ使う。 */
   transcript?: TranscriptSegment[] | null;
+  /** Already aligned to the clip clock. Never run the legacy character redistribution on these. */
+  captionCues?: DisplayCue[];
   onProgress?: (fraction: number) => void;
   /** 映像が端末で復号できず、単色の背景で作ることになったときに呼ばれる。 */
   onVideoUnusable?: () => void;
@@ -120,6 +123,7 @@ interface Caption {
   endSec: number;
   text: string;
   speaker?: string;
+  speakerColor?: string;
   emphasis?: string[];
 }
 
@@ -490,19 +494,25 @@ async function decodeRange(
   input: Input,
   startSec: number,
   endSec: number,
+  signal?: AbortSignal,
 ): Promise<{ buffer: AudioBuffer; levels: Float32Array }> {
+  signal?.throwIfAborted();
   const track = await input.getPrimaryAudioTrack();
   if (!track) throw new Error("音声を読み取れませんでした");
 
-  const sink = new AudioSampleSink(track);
   const sampleRate = track.sampleRate;
   const channels = Math.min(2, track.numberOfChannels);
-  const frames = Math.ceil((endSec - startSec) * sampleRate);
+  const originFrame = Math.round(startSec * sampleRate);
+  const frames = Math.max(1, Math.round(endSec * sampleRate) - originFrame);
   const buffer = new AudioBuffer({ numberOfChannels: channels, length: frames, sampleRate });
   const planes = Array.from({ length: channels }, (_, c) => buffer.getChannelData(c));
 
-  for await (const sample of sink.samples(startSec, endSec)) {
-    const offset = Math.round((sample.timestamp - startSec) * sampleRate);
+  for await (const sample of samplesOnSourceClock(track, startSec, endSec, signal)) {
+    if (signal?.aborted) {
+      sample.close();
+      signal.throwIfAborted();
+    }
+    const offset = Math.round(sample.timestamp * sampleRate) - originFrame;
     const count = Math.min(sample.numberOfFrames, frames - offset);
     if (count <= 0) {
       sample.close();
@@ -537,29 +547,74 @@ async function decodeRange(
   return { buffer, levels };
 }
 
-/**
- * 区間の音声だけを MP3 にする。字幕を作らせるときの素材に使う。
- *
- * 全編を聴かせて「12:34 から 13:20 まで」と頼むと、AI はファイルの頭から
- * 数えることになり、後ろへ行くほど推定がずれる(実際に数秒ずれていた)。
- * その区間だけを渡せば AI は 0 から数えれば済むので、時刻がぐっと合う。
- * 32kbps モノラルなので、60秒でも 250KB ほどにしかならない。
- */
-export async function extractRangeMp3(
-  file: Blob,
-  startSec: number,
-  endSec: number,
-): Promise<ArrayBuffer> {
-  // エンコーダ(WASM)は重い。字幕を作るときだけ取りに行く
-  const { encodeMp3 } = await import("../audio/mp3");
-  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
-  const { buffer } = await decodeRange(input, startSec, endSec);
-  const mono = new Float32Array(buffer.length);
-  for (let c = 0; c < buffer.numberOfChannels; c++) {
-    const ch = buffer.getChannelData(c);
-    for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / buffer.numberOfChannels;
+function pcmWav(buffer: AudioBuffer): ArrayBuffer {
+  const { numberOfChannels: channels, length, sampleRate } = buffer;
+  const bytes = new ArrayBuffer(44 + length * channels * 2);
+  const view = new DataView(bytes);
+  const ascii = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  ascii(0, "RIFF"); ascii(8, "WAVE"); ascii(12, "fmt "); ascii(36, "data");
+  view.setUint32(4, bytes.byteLength - 8, true);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
+  view.setUint16(34, 16, true);
+  view.setUint32(40, bytes.byteLength - 44, true);
+  for (let c = 0; c < channels; c++) {
+    const plane = buffer.getChannelData(c);
+    for (let i = 0; i < length; i++) {
+      view.setInt16(44 + (i * channels + c) * 2, Math.round(Math.max(-1, Math.min(1, plane[i])) * 32767), true);
+    }
   }
-  return encodeMp3([mono], buffer.sampleRate, 32);
+  return bytes;
+}
+
+/** Use PCM for the short transcription excerpt so MP3 priming does not shift its clock. */
+export async function prepareCaptionAudio(file: Blob, startSec: number, endSec: number, signal?: AbortSignal) {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const { buffer } = await decodeRange(input, startSec, endSec, signal);
+    const planes = Array.from({ length: buffer.numberOfChannels }, (_, c) => buffer.getChannelData(c));
+    const activity = detectActivity(planes, buffer.sampleRate);
+    const mono = new AudioBuffer({ length: buffer.length, sampleRate: buffer.sampleRate, numberOfChannels: 1 });
+    const monoSamples = mono.getChannelData(0);
+    const [left, right] = planes;
+    for (let i = 0; i < monoSamples.length; i++) {
+      const l = left[i];
+      const r = right?.[i] ?? l;
+      const mixed = (l + r) / 2;
+      // Opposite-polarity microphones can cancel in a simple stereo average.
+      monoSamples[i] = right && l * r < 0 && Math.abs(mixed) < Math.max(Math.abs(l), Math.abs(r)) * 0.2
+        ? (Math.abs(l) >= Math.abs(r) ? l : r)
+        : mixed;
+    }
+    if (mono.sampleRate === 16000) return { wav: pcmWav(mono), activity };
+    const context = new OfflineAudioContext(1, Math.ceil(mono.duration * 16000), 16000);
+    const source = context.createBufferSource();
+    source.buffer = mono;
+    source.connect(context.destination);
+    source.start();
+    const rendered = await context.startRendering();
+    signal?.throwIfAborted();
+    return { wav: pcmWav(rendered), activity };
+  } finally {
+    input.dispose();
+  }
+}
+
+/** The preview plays the same sample range as export without MP3 delay. */
+export async function createCaptionPreview(file: Blob, startSec: number, endSec: number): Promise<Blob> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const { buffer } = await decodeRange(input, startSec, endSec);
+    return new Blob([pcmWav(buffer)], { type: "audio/wav" });
+  } finally {
+    input.dispose();
+  }
 }
 
 /**
@@ -798,7 +853,7 @@ function drawFrame(
   }
 
   // 字幕。いま話している行だけを出す(声が止まったら消える)
-  const current = captions.find((c) => c.atSec <= t && t < c.endSec);
+  const current = displayCueAt(captions, t);
   if (current) {
     let size = W * 0.068;
     let lines: string[] = [];
@@ -813,7 +868,7 @@ function drawFrame(
     ctx.textAlign = "center";
     if (current.speaker) {
       ctx.font = `bold ${W * 0.035}px ${FONT_STACK}`;
-      ctx.fillStyle = accent;
+      ctx.fillStyle = current.speakerColor ?? accent;
       ctx.strokeStyle = "rgba(8, 8, 8, 0.95)";
       ctx.lineWidth = 5;
       ctx.strokeText(current.speaker.slice(0, 24), W / 2, blockTop - lineHeight * 0.65);
@@ -827,7 +882,7 @@ function drawFrame(
       ctx.strokeStyle = "rgba(8, 8, 8, 0.85)";
       ctx.lineJoin = "round";
       ctx.strokeText(lines[i], W / 2, ly);
-      ctx.fillStyle = current.emphasis?.some(word => lines[i].includes(word)) ? "#ffe680" : "#ffffff";
+      ctx.fillStyle = current.emphasis?.some(word => lines[i].includes(word)) ? "#ffe680" : (current.speakerColor ?? "#ffffff");
       ctx.fillText(lines[i], W / 2, ly);
     }
     ctx.textAlign = "left";
@@ -853,14 +908,16 @@ function drawFrame(
  */
 export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const { startSec, endSec, onProgress, signal } = opts;
-  const duration = Math.max(1, endSec - startSec);
+
 
   onProgress?.(0.02);
   const source = opts.videoFile ?? opts.audioFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
   let output: Output | undefined;
+  let canvas: HTMLCanvasElement | undefined;
   try {
-    const { buffer, levels } = await decodeRange(input, startSec, endSec);
+    const { buffer, levels } = await decodeRange(input, startSec, endSec, signal);
+    const duration = buffer.duration;
     // 動画から作る場合は、その映像を背景として使う。
     // ただし端末が復号できない形式のことがある(ブラウザの録画で作った
     // MP4 の中身が VP9、など)。そこで丸ごと失敗させると、音声も字幕も
@@ -872,13 +929,13 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
     onProgress?.(0.25);
 
-    const captions = captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
+    const captions = opts.captionCues ?? captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
       ...c,
       atSec: c.atSec - startSec,
       endSec: c.endSec - startSec,
     }));
 
-    const canvas = document.createElement("canvas");
+    canvas = document.createElement("canvas");
     canvas.width = CLIP_WIDTH;
     canvas.height = CLIP_HEIGHT;
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -896,10 +953,12 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     output.addAudioTrack(audioSource);
     await output.start();
 
+    signal?.throwIfAborted();
     await audioSource.add(buffer);
+    signal?.throwIfAborted();
     audioSource.close();
 
-    const totalFrames = Math.round(duration * FPS);
+    const totalFrames = Math.ceil(duration * FPS - 1e-7);
 
     if (frameSink) {
       // 元動画のコマを1枚ずつ受け取りながら書き出す。
@@ -923,7 +982,7 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
             image: previous.toCanvasImageSource(),
           } : null;
           drawFrame(ctx, opts, captions, levels, t, duration, frame);
-          await videoSource.add(t, 1 / FPS);
+          await videoSource.add(t, Math.min(1 / FPS, duration - t));
           if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
           i++;
         }
@@ -935,7 +994,7 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
         signal?.throwIfAborted();
         const t = i / FPS;
         drawFrame(ctx, opts, captions, levels, t, duration);
-        await videoSource.add(t, 1 / FPS);
+        await videoSource.add(t, Math.min(1 / FPS, duration - t));
         if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
       }
     }
@@ -950,5 +1009,6 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   } finally {
     input.dispose();
     if (output?.state === "started") await output.cancel().catch(() => {});
+    if (canvas) canvas.width = canvas.height = 1;
   }
 }

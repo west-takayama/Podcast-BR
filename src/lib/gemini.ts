@@ -1,3 +1,4 @@
+import type { CaptionCue } from "./video/captionAlignment";
 // Gemini API(無料枠)との連携。
 // Files API に MP3 をアップロードし、文字起こしとメタデータ生成を1回の呼び出しで行う。
 // API キーは端末の localStorage にのみ保存され、Google 以外へは送信されない。
@@ -190,7 +191,10 @@ export interface TranscriptSegment {
  * アップロード済みの音声。Gemini の Files API は48時間保持するため、
  * この間は音声を送り直さずに文章だけ作り直せる。
  */
+type AudioMime = "audio/mpeg" | "audio/wav";
+
 export interface UploadedAudio {
+  mimeType?: AudioMime;
   uri: string;
   name: string;
   expiresAt: number;
@@ -224,11 +228,12 @@ function xhrUpload(
   body: ArrayBuffer,
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
+  mimeType: AudioMime = "audio/mpeg",
 ): Promise<{ status: number; text: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
-    xhr.setRequestHeader("Content-Type", "audio/mpeg");
+    xhr.setRequestHeader("Content-Type", mimeType);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
     };
@@ -273,6 +278,7 @@ async function uploadFile(
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
   onStatus?: (status: string) => void,
+  mimeType: AudioMime = "audio/mpeg",
 ): Promise<UploadedFile> {
   const send = () =>
     xhrUpload(
@@ -280,6 +286,7 @@ async function uploadFile(
       mp3,
       onProgress,
       signal,
+      mimeType,
     );
 
   let { status, text } = await send();
@@ -505,13 +512,14 @@ export function snapChapters(
 /** 音声をアップロードして、生成に使える状態になるまで待つ。 */
 export async function uploadEpisodeAudio(
   apiKey: string,
-  mp3: ArrayBuffer,
+  bytes: ArrayBuffer,
   onStatus: (status: string) => void,
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
+  mimeType: AudioMime = "audio/mpeg",
 ): Promise<UploadedAudio> {
   onStatus("音声をアップロード中…");
-  const file = await measureStage("upload", () => uploadFile(apiKey, mp3, onProgress, signal, onStatus));
+  const file = await measureStage("upload", () => uploadFile(apiKey, bytes, onProgress, signal, onStatus, mimeType));
 
   let uri = file.uri;
   if (file.state !== "ACTIVE") {
@@ -519,7 +527,7 @@ export async function uploadEpisodeAudio(
     uri = await measureStage("activation", () => waitUntilActive(apiKey, file.name, signal));
   }
   // Files API の保持期間は48時間。この間は送り直さずに作り直せる
-  return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: mp3.byteLength };
+  return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: bytes.byteLength, ...(mimeType === "audio/wav" ? { mimeType } : {}) };
 }
 
 /**
@@ -692,92 +700,52 @@ export async function transcribeRange(opts: {
   apiKey: string;
   model: string;
   audio: UploadedAudio;
-  startSec: number;
-  endSec: number;
-  speakers: string;
-  /** この番組でよく出る言葉。聞き間違いを減らすために渡す。 */
+  durationMs: number;
   glossary?: string;
   onStatus: (status: string) => void;
   onModelChanged?: (model: string) => void;
   signal?: AbortSignal;
-}): Promise<TranscriptSegment[]> {
-  const { apiKey, model, audio, startSec, endSec, speakers, glossary, onStatus, onModelChanged, signal } = opts;
+}): Promise<CaptionCue[]> {
+  const { apiKey, model, audio, durationMs, glossary, onStatus, onModelChanged, signal } = opts;
   onStatus("字幕を作っています…");
-
-  // 字幕にそのまま載せる前提なので、行の長さと時刻の細かさを指定する。
-  // 1秒刻みだと画面上で目に見えてずれるため、小数第1位まで求める。
-  //
-  // 添付の音声が既に切り出し済み(startSec が 0)なら、範囲の指定はしない。
-  // 「12:34 から」と言うと AI はファイルの頭から数えることになり、
-  // 後ろへ行くほど推定がずれる。0 から数えさせたほうが圧倒的に合う。
-  const whole = startSec <= 0.05;
-  const target = whole
-    ? `添付の音声(${Math.round(endSec - startSec)}秒)を、最初から最後まで日本語で書き起こしてください。`
-    : `添付の音声のうち、${formatTimecode(startSec)} から ${formatTimecode(endSec)} までの区間だけを日本語で書き起こしてください。`;
-
-  const prompt = `${target}**動画の字幕としてそのまま画面に出します。**
-
-要件:
-- **1行あたり全角16文字以内**で区切る。長い発言は意味の切れ目で複数行に分ける。
-- 区切る位置は**文節の切れ目**にする。「という/ことです」のように語の途中で切らない。
-- 各行に、その行を**話し始める時刻**を付ける(${whole ? "添付した音声の先頭を 00:00 とする" : "音声全体の先頭からの時刻"})。
-- 時刻は "MM:SS.S" の形式で、**小数第1位まで**入れる(例 "01:23.4")。
-  字幕は0.5秒ずれるだけで目に見えて合わなくなるため、できる限り正確に。
-- **話していない時間には行を作らない。** 間が空いたところは飛ばす。
-- 「えー」「あの」「まあ」などのつなぎ言葉と、言い直しの前半は省く。読みやすさを優先する。
-- 話し言葉のままでよいが、「〜っていうか」のような口癖の連発は整理してよい。意味は変えない。
-- 数字・固有名詞は聞こえたとおりに漢字/カタカナで書く(「にせんにじゅうご年」ではなく「2025年」)。
-- 句読点を入れる。読点は息継ぎの位置に置く。
-- 聞き取れない箇所は推測で埋めず「(聞き取り不明)」とする。
-- emphasis は各行の中に実在する重要語を最大2個。話者が不明なら「不明」とし、人物を推測しない。
-${speakers.trim() ? `- 話者は次の呼び名を使う: ${speakers}` : "- 話者は A / B のように区別する。"}
-${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、音声と一致するときだけ使用し、聞こえない語を補わない: ${glossary.trim()}` : ""}
-
-次の構造の JSON のみを出力する:
-{"segments": [{"time": string, "speaker": string, "text": string, "emphasis": string[]}]}`;
-
-  const res = await callWithModelFallback(
-    apiKey,
-    model,
-    {
-      contents: [
-        {
-          parts: [
-            { file_data: { mime_type: "audio/mpeg", file_uri: audio.uri } },
-            { text: prompt },
-          ],
-        },
-      ],
-      generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
-    },
-    onStatus,
-    onModelChanged,
-    signal,
-  );
+  const prompt = `添付の区間音声を日本語で忠実に文字起こしし、字幕用の発話単位と時刻を返してください。
+- 添付音声の先頭は必ず0ミリ秒。対象範囲は 0〜${durationMs} ミリ秒。元の動画全体の時刻や秒単位を使わない。
+- startMs と endMs は実際に声が始まる・終わる位置を聞いて、整数ミリ秒で返す。文字数で時間を割り振らない。不確かな境界は null、needsReview は true にする。
+- 要約、言い換え、省略、補完をしない。相づち、つなぎ言葉、言い直しも聞こえた通りに残す。聞き取れない箇所は「（聞き取り不明）」。無音だけの行を作らない。
+- 話者交代で分け、同一話者はこのファイル内で一貫した A、B、C などの識別子を使う。個人名を推測しない。不明なら「不明」。重複発話は別の行で実際の時刻を返す。
+- 長い発話は境界が聞き取れる短い発話へ分ける。判断できない箇所を文字数だけで切らない。emphasis は本文に実在する語を2個以内。
+${glossary?.trim() ? `音声と一致するときだけ使う用語の表記: ${glossary.trim()}` : ""}
+JSON のみを返す:
+{"segments":[{"startMs":整数またはnull,"endMs":整数またはnull,"speaker":"A","text":"実際の発話","emphasis":[],"needsReview":false}]}`;
+  const res = await callWithModelFallback(apiKey, model, {
+    contents: [{ parts: [
+      { file_data: { mime_type: audio.mimeType ?? "audio/mpeg", file_uri: audio.uri } },
+      { text: prompt },
+    ] }],
+    generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
+  }, onStatus, onModelChanged, signal);
   if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成", apiKey);
-
-  const data = await res.json();
-  // 字幕は空でも先に進める。無音の範囲を選んだだけということがある
-  const { text } = answerFrom(data, "字幕", true);
+  const { text, finishReason } = answerFrom(await res.json(), "字幕", true);
   if (!text.trim()) return [];
-  try {
-    const parsed = extractJson(text, "字幕") as { segments?: Record<string, unknown>[] };
-    if (!Array.isArray(parsed.segments)) return [];
-    return parsed.segments
-      .filter((s) => s && typeof s.text === "string" && s.text.trim() &&
-        typeof s.time === 'string' && toSeconds(s.time) !== null &&
-        toSeconds(s.time)! >= startSec && toSeconds(s.time)! < endSec)
-      .map((s) => ({
-        time: s.time as string,
-        speaker: typeof s.speaker === "string" ? s.speaker : "不明",
-        text: (s.text as string).trim(),
-        emphasis: Array.isArray(s.emphasis) ? [...new Set(s.emphasis.filter((word): word is string =>
-          typeof word === 'string' && word.length > 0 && (s.text as string).includes(word)))].slice(0, 2) : [],
-      })).sort((a, b) => toSeconds(a.time)! - toSeconds(b.time)!);
-
-  } catch {
-    return [];
-  }
+  const parsed = extractJson(text, "字幕", finishReason) as { segments?: unknown } | null;
+  if (!Array.isArray(parsed?.segments)) throw new Error("字幕の形式が読めませんでした。再試行してください。");
+  const boundary = (value: unknown) => typeof value === "number" && Number.isInteger(value) &&
+    value >= 0 && value <= durationMs ? value : null;
+  return parsed.segments.flatMap((value): CaptionCue[] => {
+    if (!value || typeof value.text !== "string" || !value.text.trim()) return [];
+    const transcript = value.text.trim();
+    const startMs = boundary(value.startMs);
+    const endMs = boundary(value.endMs);
+    const id = typeof value.speaker === "string" ? value.speaker.trim() : "";
+    const speakerId = /^[A-Z]{1,3}$/.test(id) ? id : "不明";
+    return [{
+      startMs, endMs, speakerId, text: transcript,
+      emphasis: Array.isArray(value.emphasis) ? [...new Set<string>(value.emphasis.filter(
+        (word: unknown): word is string => typeof word === "string" && !!word && transcript.includes(word),
+      ))].slice(0, 2) : [],
+      needsReview: value.needsReview !== false || startMs === null || endMs === null || startMs >= endMs || speakerId === "不明",
+    }];
+  });
 }
 
 export function isAudioUsable(audio: UploadedAudio | null | undefined): boolean {

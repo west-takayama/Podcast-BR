@@ -1,3 +1,4 @@
+import { samplesOnSourceClock } from "./sourceClock";
 // 入力音声の読み取り。ブロック単位で何度でも先頭から読み直せる形にしている。
 //
 // WAV 以外(m4a / mp3 / aac など)も扱えるようにしたのは、通話録音をそのまま
@@ -70,6 +71,7 @@ class DecodedReader implements BlockReader {
     readonly durationSec: number,
     readonly formatLabel: string,
     private readonly blockFrames: number,
+    private readonly preserveTimeline: boolean,
   ) {}
 
   async read(onBlock: BlockHandler): Promise<void> {
@@ -88,13 +90,32 @@ class DecodedReader implements BlockReader {
       // ブロック分になるまで溜めてから渡す
       let filled = 0;
       let plane = new Float32Array(0);
+      let emitted = 0;
+      const flush = async () => {
+        emitted += filled;
+        await onBlock(channels, filled, Math.min(1, emitted / (this.durationSec * this.sampleRate)));
+        filled = 0;
+      };
 
-      for await (const sample of sink.samples()) {
+      const samples = this.preserveTimeline ? samplesOnSourceClock(track) : sink.samples();
+      for await (const sample of samples) {
         try {
           const frames = sample.numberOfFrames;
           if (plane.length < frames) plane = new Float32Array(frames);
 
-          let consumed = 0;
+          const packetStart = Math.round(sample.timestamp * this.sampleRate);
+          if (this.preserveTimeline) {
+            // Match clip extraction: clock zero is the source container's zero.
+            let gap = packetStart - emitted - filled;
+            while (gap > 0) {
+              const take = Math.min(gap, this.blockFrames - filled);
+              for (const channel of channels) channel.fill(0, filled, filled + take);
+              filled += take;
+              gap -= take;
+              if (filled === this.blockFrames) await flush();
+            }
+          }
+          let consumed = this.preserveTimeline ? Math.max(0, emitted + filled - packetStart) : 0;
           while (consumed < frames) {
             const take = Math.min(frames - consumed, this.blockFrames - filled);
             for (let c = 0; c < this.numChannels; c++) {
@@ -113,6 +134,7 @@ class DecodedReader implements BlockReader {
             consumed += take;
 
             if (filled === this.blockFrames) {
+              if (this.preserveTimeline) { await flush(); continue; }
               const at = sample.timestamp + sample.duration;
               await onBlock(
                 channels,
@@ -146,7 +168,7 @@ function labelFor(file: File, codec: string | null): string {
  * 入力を開く。WAV なら専用経路、それ以外はデコーダを通す。
  * blockSeconds はブロックの長さ(秒)。
  */
-export async function openAudio(file: File, blockSeconds: number): Promise<BlockReader> {
+export async function openAudio(file: File, blockSeconds: number, preserveTimeline = false): Promise<BlockReader> {
   // まず WAV として読めるか試す。読めれば速い経路を使う
   try {
     const head = await file.slice(0, HEADER_PROBE_BYTES).arrayBuffer();
@@ -183,6 +205,7 @@ export async function openAudio(file: File, blockSeconds: number): Promise<Block
       duration,
       labelFor(file, await track.getCodec()),
       track.sampleRate * blockSeconds,
+      preserveTimeline,
     );
   } finally {
     input.dispose?.();

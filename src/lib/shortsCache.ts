@@ -2,7 +2,9 @@ import { isAudioUsable, type UploadedAudio } from './gemini';
 
 /** One component session, never persisted; callers reset when the source changes. */
 export class ShortsAudioCache {
-  private entries = new Map<string, { mp3: ArrayBuffer; audio?: UploadedAudio; apiKey?: string }>();
+  constructor(private readonly maxEntries = 8) {}
+
+  private entries = new Map<string, { bytes: ArrayBuffer; audio?: UploadedAudio; apiKey?: string }>();
 
   private version = 0;
   clear() { this.version++; this.entries.clear(); }
@@ -11,7 +13,7 @@ export class ShortsAudioCache {
     range: string,
     apiKey: string,
     extract: () => Promise<ArrayBuffer>,
-    upload: (mp3: ArrayBuffer) => Promise<UploadedAudio>,
+    upload: (bytes: ArrayBuffer) => Promise<UploadedAudio>,
   ): Promise<UploadedAudio> {
     const version = this.version;
     const checkSource = () => {
@@ -19,14 +21,14 @@ export class ShortsAudioCache {
     };
     let entry = this.entries.get(range);
     if (!entry) {
-      entry = { mp3: await extract() };
+      entry = { bytes: await extract() };
       checkSource();
       this.entries.set(range, entry);
       // Bounded memory even after many manual adjustments.
-      if (this.entries.size > 8) this.entries.delete(this.entries.keys().next().value!);
+      if (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
     }
     if (entry.apiKey === apiKey && isAudioUsable(entry.audio)) return entry.audio!;
-    const audio = await upload(entry.mp3);
+    const audio = await upload(entry.bytes);
     checkSource();
     entry.audio = audio;
     entry.apiKey = apiKey;
