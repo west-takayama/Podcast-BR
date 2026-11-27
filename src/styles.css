@@ -691,3 +691,10 @@ video.card-preview { background: #000; }
   font-weight: 600;
   text-decoration: none;
 }
+
+.caption-preview audio { width: 100%; }
+.caption-preview-text { min-height: 4.5rem; text-align: center; padding: 0.5rem; background: #111; overflow-wrap: anywhere; }
+.caption-edit { border-top: 1px solid #444; padding: 0.5rem 0; }
+.caption-edit .row-buttons label { min-width: 0; }
+.caption-row select { flex: 0 0 auto; max-width: 5em; min-height: 44px; margin: 0; }
+.speaker-link { margin: 0.6rem 0; }

@@ -14,11 +14,13 @@ assert.equal(captions[0].speaker, 'A');
 assert.deepEqual(captions[0].emphasis, ['価値']);
 assert.ok(captions.every(c => c.endSec <= 1.1 && c.endSec > c.atSec));
 const original = globalThis.fetch;
-globalThis.fetch = async () => new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{time:'bad',text:'無効'},{time:'00:03',text:'範囲外'},{time:'00:01.0',speaker:'A',text:'対話の価値',emphasis:['価値','捏造']}]})}]}}]}),{status:200});
+globalThis.fetch = async () => new Response(JSON.stringify({candidates:[{content:{parts:[{text:JSON.stringify({segments:[{startMs:3000,text:'範囲外'},{startMs:1000,endMs:1800,speaker:'A',text:'対話の価値',emphasis:['価値','捏造'],needsReview:false}]})}]}}]}),{status:200});
 try {
- const lines = await transcribeRange({apiKey:'test',model:'gemini-test',audio:{uri:'test',name:'test',expiresAt:Date.now()+100000,bytes:1},startSec:0,endSec:2,speakers:'A',onStatus:()=>{}});
- assert.equal(lines.length,1);
- assert.deepEqual(lines[0].emphasis,['価値']);
+ const lines = await transcribeRange({apiKey:'test',model:'gemini-test',audio:{uri:'test',name:'test',expiresAt:Date.now()+100000,bytes:1},durationMs:2000,onStatus:()=>{}});
+ assert.equal(lines.length,2);
+ assert.equal(lines[0].startMs,null);
+ assert.equal(lines[0].needsReview,true);
+ assert.deepEqual(lines[1].emphasis,['価値']);
 } finally { globalThis.fetch=original; }
 console.log('shorts-check: OK (deduplication, rubric, captions, range bounds, emphasis)');
 

@@ -1,3 +1,7 @@
+import CaptionPreview from "./CaptionPreview";
+import SpeakerAssignments from "./SpeakerAssignments";
+import { alignCues, formatCueTime, type CaptionCue, type SpeechSpan } from "../lib/video/captionAlignment";
+import { addSpeaker, displayCues, swapSpeakerNames, type Speaker } from "../lib/video/speakers";
 import CopyButton from "./CopyButton";
 import { listEpisodes, saveEpisode } from "../lib/history";
 import { measureStage } from "../lib/timing";
@@ -13,7 +17,6 @@ import {
   transcribeRange,
   uploadEpisodeAudio,
   type Clip,
-  type TranscriptSegment,
 } from "../lib/gemini";
 import { parseTimestamp } from "../lib/id3";
 import type { Settings } from "../lib/settings";
@@ -52,22 +55,6 @@ const ZERO: Nudge = { start: 0, end: 0 };
 const fmt = (sec: number) =>
   `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
 
-/** 秒を "MM:SS.S" に。字幕の時刻は小数第1位まで持つ。 */
-const fmtFine = (sec: number) => {
-  const tenths = Math.round(sec * 10);
-  return `${String(Math.floor(tenths / 600)).padStart(2, "0")}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
-};
-
-/**
- * 切り出した音声だけを聴かせて書き起こすので、返ってくる時刻は 0 起点。
- * 動画全体の時間軸に戻してから字幕として使う。
- */
-const shiftSegments = (segments: TranscriptSegment[], offsetSec: number): TranscriptSegment[] =>
-  segments.map((s) => {
-    const ms = parseTimestamp(s.time);
-    return ms === null ? s : { ...s, time: fmtFine(ms / 1000 + offsetSec) };
-  });
-
 /**
  * 動画から縦型ショートを作るページ。
  *
@@ -95,7 +82,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
   // 候補ごとに、範囲・字幕・書き出した動画をそれぞれ持つ。
   // まとめて書き出すときに1本ずつの状態が要るため。
   const [nudges, setNudges] = useState<Record<number, Nudge>>({});
-  const [captions, setCaptions] = useState<Record<number, TranscriptSegment[]>>({});
+  const [captions, setCaptions] = useState<Record<number, CaptionCue[]>>({});
+  const [speakers, setSpeakers] = useState<Speaker[]>([]);
+  const [speakerLinks, setSpeakerLinks] = useState<Record<number, Record<string, string>>>({});
+  const captionActivity = useRef(new Map<string, SpeechSpan[]>());
   const [results, setResults] = useState<Record<number, Result>>({});
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
   const [covers, setCovers] = useState<Record<number, Cover>>({});
@@ -106,7 +96,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
   const fileRef = useRef<File | null>(null);
   const sourceAudioRef = useRef<{ mp3: ArrayBuffer; durationSec: number } | null>(null);
   const sourceCacheRef = useRef(new ShortsAudioCache());
-  const rangeCacheRef = useRef(new ShortsAudioCache());
+  const rangeCacheRef = useRef(new ShortsAudioCache(4));
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // 片付けのために、いま生きている URL を持っておく
@@ -184,6 +174,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       delete next[i];
       return next;
     });
+    setSpeakerLinks(prev => ({ ...prev, [i]: {} }));
     dropResult(i);
     dropCover(i);
   };
@@ -300,6 +291,9 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     setSelected(0);
     setNudges({});
     setCaptions({});
+    setSpeakers([]);
+    setSpeakerLinks({});
+    captionActivity.current.clear();
     for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
     setResults({});
@@ -377,32 +371,40 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
    * 「この区間の音声」だけを切り出して渡す。全編を聴かせて「12:34 から」と
    * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
    */
-  const buildCaptions = async (i: number, signal: AbortSignal): Promise<TranscriptSegment[]> => {
+  const buildCaptions = async (i: number, signal: AbortSignal): Promise<CaptionCue[]> => {
     const existing = captions[i];
     if (existing) return existing;
     const file = fileRef.current!;
     const { startSec, endSec } = rangeOf(i);
-    const { extractRangeMp3 } = await loadClipLib();
+    const durationMs = Math.round((endSec - startSec) * 1000);
+    const rangeKey = JSON.stringify([startSec, endSec]);
+    const { prepareCaptionAudio } = await loadClipLib();
     setStatus("この区間の音声を取り出しています…");
-    const audio = await rangeCacheRef.current.get(JSON.stringify([startSec, endSec]), settings.apiKey,
-      () => extractRangeMp3(file, startSec, endSec),
-      bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, signal));
+    const audio = await rangeCacheRef.current.get(rangeKey, settings.apiKey, async () => {
+      const prepared = await measureStage("conversion", () => prepareCaptionAudio(file, startSec, endSec));
+      signal.throwIfAborted();
+      captionActivity.current.set(rangeKey, prepared.activity);
+      if (captionActivity.current.size > 4) {
+        const oldest = captionActivity.current.keys().next().value;
+        if (oldest !== undefined) captionActivity.current.delete(oldest);
+      }
+      return prepared.wav;
+    }, bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, signal, "audio/wav"));
     signal.throwIfAborted();
     const raw = await transcribeRange({
       apiKey: settings.apiKey,
       model: settings.model,
       audio,
-      startSec: 0,
-      endSec: endSec - startSec,
-      speakers: settings.prompt.speakers,
+      durationMs,
       glossary: settings.prompt.glossary,
       onStatus: setStatus,
       onModelChanged,
       signal,
     });
-    const shifted = shiftSegments(raw, startSec);
-    setCaptions((prev) => ({ ...prev, [i]: shifted }));
-    return shifted;
+    signal.throwIfAborted();
+    const aligned = alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs);
+    setCaptions(prev => ({ ...prev, [i]: aligned }));
+    return aligned;
   };
 
   /** 書き出す前に字幕を確認・修正できるようにする。焼き込んでからでは直せないため。 */
@@ -426,7 +428,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     }
   };
 
-  const editCaption = (i: number, line: number, patch: Partial<Pick<TranscriptSegment, "text" | "speaker">>) => {
+  const editCaption = (i: number, line: number, patch: Partial<Pick<CaptionCue, "text" | "speakerId" | "personOverride" | "startMs" | "endMs">>) => {
     setCaptions((prev) => {
       const list = prev[i];
       if (!list) return prev;
@@ -451,7 +453,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     const file = fileRef.current!;
     const clip = clips[i];
     const { startSec, endSec } = rangeOf(i);
-    const segments = withCaptions ? await buildCaptions(i, signal) : null;
+    const segments = withCaptions ? await buildCaptions(i, signal) : [];
+    const captionCues = displayCues(segments, speakers, speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
     const [bitmap, logo] = await Promise.all([
@@ -469,7 +472,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       hook: clip.hook,
       showName: settings.prompt.showName || "BRIDGE RADIO",
       accent: settings.accentColor,
-      transcript: segments,
+      captionCues,
       onProgress: setProgress,
       signal,
       capability: cap ?? undefined,
@@ -602,6 +605,16 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     phase === "extracting" || phase === "finding" || phase === "rendering" || phase === "captioning";
   const { startSec, endSec } = rangeOf(selected);
   const lines = captions[selected];
+  const localSpeakerIds = [...new Set(lines?.map(cue => cue.speakerId))].sort();
+  const refreshExportsForNames = (...ids: string[]) => {
+    clips.forEach((_, i) => {
+      const linked = Object.values(speakerLinks[i] ?? {}).some(id => ids.includes(id));
+      const overridden = captions[i]?.some(cue => cue.personOverride && ids.includes(cue.personOverride));
+      if (linked || overridden) dropResult(i);
+    });
+  };
+  const durationMs = Math.round((endSec - startSec) * 1000);
+  const selectedLinks = speakerLinks[selected] ?? {};
   const doneCount = Object.keys(results).length;
   const unfinished = clips.flatMap((_, i) => results[i] ? [] : [i]);
 
@@ -777,26 +790,84 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
             番組名や相方の名前をよく間違えるなら、設定の「この番組でよく出る言葉」に入れておくと次から間違えにくくなります。
           </p>
           {lines.length === 0 && <p className="muted">この区間では話し声が拾えませんでした。</p>}
-          {lines.map((s, k) => (
-            <div key={k} className="caption-row">
-              <span className="muted caption-time">{s.time}</span>
-              <input className="caption-speaker" aria-label={`話者 ${k + 1}`} value={s.speaker}
-                onChange={e => editCaption(selected, k, { speaker: e.target.value })} />
-              <input
-                type="text"
-                aria-label={`字幕 ${k + 1}`}
-                value={s.text}
-                onChange={(e) => editCaption(selected, k, { text: e.target.value })}
+          {lines.length > 0 && (
+            <>
+              <CaptionPreview
+                key={`${selected}:${startSec}:${endSec}`}
+                cues={displayCues(lines, speakers, selectedLinks, durationMs)}
+                load={async () => (await loadClipLib()).createCaptionPreview(fileRef.current!, startSec, endSec)}
               />
-              <button
-                className="caption-del"
-                onClick={() => removeCaption(selected, k)}
-                title="この行を消す"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
+              <SpeakerAssignments
+                localIds={localSpeakerIds}
+                speakers={speakers}
+                links={selectedLinks}
+                onName={(id, name) => {
+                  setSpeakers(prev => prev.map(person => person.id === id ? { ...person, name } : person));
+                  refreshExportsForNames(id);
+                }}
+                onAdd={localId => {
+                  const next = addSpeaker(speakers);
+                  setSpeakers(next);
+                  if (localId) {
+                    setSpeakerLinks(prev => ({ ...prev, [selected]: { ...prev[selected], [localId]: next[next.length - 1].id } }));
+                    dropResult(selected);
+                  }
+                }}
+                onLink={(localId, id) => {
+                  setSpeakerLinks(prev => ({ ...prev, [selected]: { ...prev[selected], [localId]: id } }));
+                  dropResult(selected);
+                }}
+                onSwap={(a, b) => {
+                  setSpeakers(prev => swapSpeakerNames(prev, a, b));
+                  refreshExportsForNames(a, b);
+                }}
+              />
+              {lines.map((cue, k) => (
+                <div key={k} className="caption-edit">
+                  <p className="muted">{formatCueTime(cue.startMs)} – {formatCueTime(cue.endMs)} {cue.needsReview && "・要確認"}</p>
+                  <div className="caption-row">
+                    <select aria-label={`話者 ${k + 1}`} value={cue.personOverride ?? cue.speakerId}
+                      onChange={e => {
+                        const id = e.target.value;
+                        editCaption(selected, k, id.startsWith("person-") ? { personOverride: id }
+                          : { speakerId: id, personOverride: undefined });
+                      }}>
+                      <optgroup label="候補内の話者">
+                        {[...new Set([...localSpeakerIds, "不明"])].map(id => <option key={id}>{id}</option>)}
+                      </optgroup>
+                      {speakers.length > 0 && <optgroup label="出演者を直接指定">
+                        {speakers.map((person, i) => <option key={person.id} value={person.id}>
+                          {person.name.trim() || `出演者 ${i + 1}`}
+                        </option>)}
+                      </optgroup>}
+                    </select>
+                    <input aria-label={`字幕 ${k + 1}`} value={cue.text}
+                      onChange={e => editCaption(selected, k, { text: e.target.value })} />
+                    <button type="button" className="caption-del" onClick={() => removeCaption(selected, k)} aria-label={`字幕 ${k + 1} を削除`}>✕</button>
+                  </div>
+                  <details className="fold">
+                    <summary>時刻を調整（秒）</summary>
+                    <div className="row-buttons">
+                      {(["startMs", "endMs"] as const).map(field => {
+                        const label = field === "startMs" ? "開始" : "終了";
+                        return <label key={field}>{label}
+                          <input aria-label={`字幕 ${k + 1} の${label}秒`} type="number" min={0}
+                            max={durationMs / 1000} step="0.001" inputMode="decimal"
+                            value={cue[field] === null ? "" : cue[field]! / 1000}
+                            onChange={e => {
+                              const n = e.currentTarget.valueAsNumber;
+                              editCaption(selected, k, { [field]: Number.isFinite(n) ? Math.round(n * 1000) : null });
+                            }} />
+                        </label>;
+                      })}
+                    </div>
+                    {(cue.startMs === null || cue.endMs === null || cue.startMs >= cue.endMs || cue.startMs < 0 || cue.endMs > durationMs) &&
+                      <p className="muted">開始・終了が確定するまで、この字幕は表示されません。</p>}
+                  </details>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 
@@ -894,6 +965,9 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
               fileRef.current = null;
               setNudges({});
               setCaptions({});
+              setSpeakers([]);
+              setSpeakerLinks({});
+              captionActivity.current.clear();
               for (const u of urlsRef.current) URL.revokeObjectURL(u);
               urlsRef.current.clear();
               setResults({});
