@@ -5,7 +5,7 @@ import { AudioSampleSink, EncodedPacketSink, type InputAudioTrack } from "mediab
  * Restart decoding at confirmed packet gaps so the first packet reanchors each span.
  * Only metadata is inspected, within the requested interval.
  */
-export async function* samplesOnSourceClock(track: InputAudioTrack, start = 0, end = Infinity) {
+export async function* samplesOnSourceClock(track: InputAudioTrack, start = 0, end = Infinity, signal?: AbortSignal) {
   const sink = new AudioSampleSink(track);
   if (await track.getCodec() !== "opus") {
     yield* sink.samples(start, end);
@@ -18,6 +18,7 @@ export async function* samplesOnSourceClock(track: InputAudioTrack, start = 0, e
   let previousEnd: number | undefined;
   let nominalDuration = 0.02;
   for await (const packet of packets.packets(first ?? undefined, undefined, options)) {
+    signal?.throwIfAborted();
     if (packet.timestamp >= end) break;
     if (previousEnd !== undefined && packet.timestamp - previousEnd >= 0.08) {
       if (previousEnd > sectionStart) yield* sink.samples(sectionStart, previousEnd);

@@ -494,7 +494,9 @@ async function decodeRange(
   input: Input,
   startSec: number,
   endSec: number,
+  signal?: AbortSignal,
 ): Promise<{ buffer: AudioBuffer; levels: Float32Array }> {
+  signal?.throwIfAborted();
   const track = await input.getPrimaryAudioTrack();
   if (!track) throw new Error("音声を読み取れませんでした");
 
@@ -505,7 +507,11 @@ async function decodeRange(
   const buffer = new AudioBuffer({ numberOfChannels: channels, length: frames, sampleRate });
   const planes = Array.from({ length: channels }, (_, c) => buffer.getChannelData(c));
 
-  for await (const sample of samplesOnSourceClock(track, startSec, endSec)) {
+  for await (const sample of samplesOnSourceClock(track, startSec, endSec, signal)) {
+    if (signal?.aborted) {
+      sample.close();
+      signal.throwIfAborted();
+    }
     const offset = Math.round(sample.timestamp * sampleRate) - originFrame;
     const count = Math.min(sample.numberOfFrames, frames - offset);
     if (count <= 0) {
@@ -568,21 +574,21 @@ function pcmWav(buffer: AudioBuffer): ArrayBuffer {
 }
 
 /** Use PCM for the short transcription excerpt so MP3 priming does not shift its clock. */
-export async function prepareCaptionAudio(file: Blob, startSec: number, endSec: number) {
+export async function prepareCaptionAudio(file: Blob, startSec: number, endSec: number, signal?: AbortSignal) {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
   try {
-    const { buffer } = await decodeRange(input, startSec, endSec);
+    const { buffer } = await decodeRange(input, startSec, endSec, signal);
     const planes = Array.from({ length: buffer.numberOfChannels }, (_, c) => buffer.getChannelData(c));
     const activity = detectActivity(planes, buffer.sampleRate);
     const mono = new AudioBuffer({ length: buffer.length, sampleRate: buffer.sampleRate, numberOfChannels: 1 });
-    const signal = mono.getChannelData(0);
+    const monoSamples = mono.getChannelData(0);
     const [left, right] = planes;
-    for (let i = 0; i < signal.length; i++) {
+    for (let i = 0; i < monoSamples.length; i++) {
       const l = left[i];
       const r = right?.[i] ?? l;
       const mixed = (l + r) / 2;
       // Opposite-polarity microphones can cancel in a simple stereo average.
-      signal[i] = right && l * r < 0 && Math.abs(mixed) < Math.max(Math.abs(l), Math.abs(r)) * 0.2
+      monoSamples[i] = right && l * r < 0 && Math.abs(mixed) < Math.max(Math.abs(l), Math.abs(r)) * 0.2
         ? (Math.abs(l) >= Math.abs(r) ? l : r)
         : mixed;
     }
@@ -592,7 +598,9 @@ export async function prepareCaptionAudio(file: Blob, startSec: number, endSec: 
     source.buffer = mono;
     source.connect(context.destination);
     source.start();
-    return { wav: pcmWav(await context.startRendering()), activity };
+    const rendered = await context.startRendering();
+    signal?.throwIfAborted();
+    return { wav: pcmWav(rendered), activity };
   } finally {
     input.dispose();
   }
@@ -906,8 +914,9 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const source = opts.videoFile ?? opts.audioFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
   let output: Output | undefined;
+  let canvas: HTMLCanvasElement | undefined;
   try {
-    const { buffer, levels } = await decodeRange(input, startSec, endSec);
+    const { buffer, levels } = await decodeRange(input, startSec, endSec, signal);
     const duration = buffer.duration;
     // 動画から作る場合は、その映像を背景として使う。
     // ただし端末が復号できない形式のことがある(ブラウザの録画で作った
@@ -926,7 +935,7 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
       endSec: c.endSec - startSec,
     }));
 
-    const canvas = document.createElement("canvas");
+    canvas = document.createElement("canvas");
     canvas.width = CLIP_WIDTH;
     canvas.height = CLIP_HEIGHT;
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -944,7 +953,9 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     output.addAudioTrack(audioSource);
     await output.start();
 
+    signal?.throwIfAborted();
     await audioSource.add(buffer);
+    signal?.throwIfAborted();
     audioSource.close();
 
     const totalFrames = Math.ceil(duration * FPS - 1e-7);
@@ -998,5 +1009,6 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   } finally {
     input.dispose();
     if (output?.state === "started") await output.cancel().catch(() => {});
+    if (canvas) canvas.width = canvas.height = 1;
   }
 }

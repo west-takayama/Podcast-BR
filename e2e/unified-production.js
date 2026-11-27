@@ -115,10 +115,11 @@ const candidates = {
         await previewAtFirst();
         await namesAtStart.getByText("たそ", { exact: true }).waitFor();
         assert.equal(requestCount(), beforeLink);
-        await page.getByRole("button", { name: /候補をまとめて書き出す/ }).click();
+        await page.getByRole("button", { name: /選択した動画をまとめて生成/ }).click();
         await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
         const videos = page.locator("video.card-preview");
         assert.equal(await videos.count(), 2);
+        await videos.evaluateAll(elements => elements.forEach(video => { video.preload = "metadata"; video.load(); }));
         await page.waitForFunction(() => [...document.querySelectorAll("video.card-preview")].every(v => v.videoWidth === 1080 && v.videoHeight === 1920));
         // The source video encodes a solid blue frame. Audio-only exports use a dark background.
         const center = await videos.first().evaluate(async v => {
