@@ -133,7 +133,7 @@ const measure = () => {
 
   await page.fill("input[type=password]", "AIzaMOCK");
   await page.waitForTimeout(1200);
-  await page.locator("input[type=text]").first().fill("ブリッジラジオ");
+  await page.getByLabel(/番組名/).fill("ブリッジラジオ");
   await report("設定(入力後)");
   await page.click("button:has-text('保存して閉じる')");
   await page.waitForTimeout(500);

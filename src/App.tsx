@@ -788,7 +788,7 @@ export default function App() {
   };
 
   const openSettings = (fromDrive = false) => {
-    if (tab !== "settings") setSettingsReturnTab(tab);
+    if (tab !== "settings") setSettingsReturnTab(fromDrive ? tab : "create");
     setDriveSetupShortcut(fromDrive);
     setTab("settings");
   };
