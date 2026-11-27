@@ -4,7 +4,7 @@
 
 import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
 import { parseTimestamp } from "./id3";
-import { measureStage } from "./timing";
+import { measureStage, recordTiming } from "./timing";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
@@ -1077,6 +1077,7 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
   const { text, finishReason } = answerFrom(data, "生成結果");
   const parsed: unknown = extractJson(text, "生成結果", finishReason);
   const result = normalizeMeta(parsed);
+  recordTiming("generation-and-parsing", performance.now() - generationStartedAt, true);
   // Local diagnostics only: never log audio, API keys, or generated text.
   console.info("[AI STUDIO] metadata timing", {
     uploadAndActivationMs: Math.round(uploadMs),

@@ -1,4 +1,5 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import TimingDiagnostics from "./TimingDiagnostics";
 import CopyButton from "./CopyButton";
 import { clearErrors, errorsAsText, loadErrors, summarize } from "../lib/errorLog";
 
@@ -409,6 +410,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       </p>
       </details>
 
+      <TimingDiagnostics />
       <ErrorLog />
 
       <button className="primary" onClick={onClose}>

@@ -58,6 +58,18 @@ const meta = { titles: ['元音声を保持する回'], description: '生成し�
       const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('podcast-br');r.onsuccess=()=>resolve(r.result);r.onerror=reject;});
       const rows=await new Promise((resolve,reject)=>{const r=db.transaction('episodes').objectStore('episodes').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=reject;});db.close();return rows.some(r=>r.meta.titles[0]==='元音声を保持する回'&&r.audio?.size>0);
     });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.getByRole('button', { name: '設定', exact: true }).click();
+    await page.getByText(/処理時間の診断/).click();
+    const diagnostic = page.getByRole('textbox', { name: '処理時間の記録' });
+    const report = await diagnostic.inputValue();
+    assert.match(report, /生成要求 \(generation-request\).*HTTP 200/);
+    assert.match(report, /結果の表示 \(result-display\)/);
+    assert.doesNotMatch(report, /AIzaMOCK|mock\/audio|speechlike|元音声を保持する回|生成した概要欄/);
+    await page.getByRole('button', { name: '処理時間をコピー' }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), report);
+    await page.getByRole('button', { name: '計測をリセット' }).click();
+    await page.getByText('処理時間の診断（0件）').waitFor();
     assert.deepEqual(errors,[]);
     console.log('OK: AI-only conversion, persisted resume, upload reuse, original bytes, history, metadata, mobile UI');
   } finally { await browser.close(); }

@@ -26,7 +26,7 @@ import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress
 import { castLine } from "./lib/cast";
 import { clearPlan, loadPlan, planAsText, type Plan } from "./lib/plan";
 import { noteError } from "./lib/errorLog";
-import { measureStage } from "./lib/timing";
+import { measureStage, recordTiming } from "./lib/timing";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
@@ -124,9 +124,7 @@ export default function App() {
 
   const onResultDisplayed = useCallback(() => {
     if (!resultReadyAtRef.current) return;
-    console.info("[AI STUDIO] stage timing", {
-      stage: "result-display", durationMs: Math.round(performance.now() - resultReadyAtRef.current), success: true,
-    });
+    recordTiming("result-display", performance.now() - resultReadyAtRef.current, true);
     resultReadyAtRef.current = 0;
   }, []);
 
