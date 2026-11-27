@@ -1,3 +1,4 @@
+import DriveSavePanel from "./DriveSavePanel";
 import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
 import { archivedCaptionCues } from "../lib/video/archivedCaptions";
 import CaptionPreview from "./CaptionPreview";
@@ -60,6 +61,10 @@ interface Result {
   filename: string;
   title: string;
   post: string;
+  description: string;
+  hashtags: string[];
+  startMs: number;
+  endMs: number;
 }
 
 interface BatchProgress {
@@ -592,7 +597,11 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       const extension = blob.type === "video/mp4" ? "mp4" : "webm";
       const title = clip.hook || `候補${i + 1}`;
       const post = [clip.socialPost, clip.hashtags?.join(" ")].filter(Boolean).join("\n\n");
-      return { ...prev, [i]: { blob, url, filename: `short${i + 1}.${extension}`, title, post } };
+      return { ...prev, [i]: {
+        blob, url, filename: `short${i + 1}.${extension}`, title, post,
+        description: clip.socialPost ?? "", hashtags: clip.hashtags ?? [],
+        startMs: Math.round(startSec * 1000), endMs: Math.round(endSec * 1000),
+      } };
     });
   };
 
@@ -1079,6 +1088,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
             </>
           )}
         </div>
+      )}
+
+      {doneCount > 0 && fileRef.current && (
+        <DriveSavePanel videos={completedVideos} source={fileRef.current} encoding={busy} />
       )}
 
       {doneCount > 0 && (
