@@ -13,6 +13,7 @@
 import {
   ALL_FORMATS,
   VideoSampleSink,
+  type VideoSample,
   AudioBufferSource,
   AudioSampleSink,
   BlobSource,
@@ -47,6 +48,8 @@ export interface ClipOptions {
   mp3?: ArrayBuffer;
   /** 動画から作る場合の元ファイル。映像と音声の両方をここから取る。 */
   videoFile?: Blob;
+  audioFile?: Blob;
+  logo?: CanvasImageSource;
   startSec: number;
   endSec: number;
   /** 画面上部に大きく出す見出し。 */
@@ -495,7 +498,7 @@ async function decodeRange(
   const sampleRate = track.sampleRate;
   const channels = Math.min(2, track.numberOfChannels);
   const frames = Math.ceil((endSec - startSec) * sampleRate);
-  const buffer = new AudioContext({ sampleRate }).createBuffer(channels, frames, sampleRate);
+  const buffer = new AudioBuffer({ numberOfChannels: channels, length: frames, sampleRate });
   const planes = Array.from({ length: channels }, (_, c) => buffer.getChannelData(c));
 
   for await (const sample of sink.samples(startSec, endSec)) {
@@ -566,13 +569,13 @@ export async function extractRangeMp3(
  * MP4 の中身が VP9 だと、読めはするが再生できない、ということが起きる。
  * 書き出しの瞬間に分かるのでは遅いので、選んだ直後に確かめられるようにする。
  */
-export async function canUseVideo(file: Blob): Promise<boolean> {
+export async function inspectVideo(file: Blob): Promise<{ hasVideo: boolean; decodable: boolean }> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
   try {
-    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
     const track = await input.getPrimaryVideoTrack();
-    return track ? await track.canDecode() : false;
-  } catch {
-    return false;
+    return { hasVideo: !!track, decodable: track ? await track.canDecode().catch(() => false) : false };
+  } finally {
+    input.dispose();
   }
 }
 
@@ -759,6 +762,11 @@ function drawFrame(
 
   // 番組名(小さく・字間を開けて)
   let y = H * 0.085;
+  if (opts.logo) {
+    const size = W * 0.075;
+    ctx.drawImage(opts.logo, pad, y, size, size);
+    y += size + W * 0.026;
+  }
   if (opts.showName) {
     const size = W * 0.03;
     ctx.font = `700 ${size}px ${FONT_STACK}`;
@@ -848,97 +856,99 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const duration = Math.max(1, endSec - startSec);
 
   onProgress?.(0.02);
-  const source = opts.videoFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
+  const source = opts.videoFile ?? opts.audioFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
-  const { buffer, levels } = await decodeRange(input, startSec, endSec);
-  // 動画から作る場合は、その映像を背景として使う。
-  // ただし端末が復号できない形式のことがある(ブラウザの録画で作った
-  // MP4 の中身が VP9、など)。そこで丸ごと失敗させると、音声も字幕も
-  // 揃っているのに何も作れない。**映像だけ諦めて**単色の背景で作る。
-  const videoTrack = opts.videoFile ? await input.getPrimaryVideoTrack() : null;
-  const usableVideo = videoTrack ? await videoTrack.canDecode() : false;
-  if (videoTrack && !usableVideo) opts.onVideoUnusable?.();
-  const frameSink = usableVideo && videoTrack ? new VideoSampleSink(videoTrack) : null;
-  if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
-  onProgress?.(0.25);
+  let output: Output | undefined;
+  try {
+    const { buffer, levels } = await decodeRange(input, startSec, endSec);
+    // 動画から作る場合は、その映像を背景として使う。
+    // ただし端末が復号できない形式のことがある(ブラウザの録画で作った
+    // MP4 の中身が VP9、など)。そこで丸ごと失敗させると、音声も字幕も
+    // 揃っているのに何も作れない。**映像だけ諦めて**単色の背景で作る。
+    const videoTrack = opts.videoFile ? await input.getPrimaryVideoTrack() : null;
+    const usableVideo = videoTrack ? await videoTrack.canDecode() : false;
+    if (videoTrack && !usableVideo) opts.onVideoUnusable?.();
+    const frameSink = usableVideo && videoTrack ? new VideoSampleSink(videoTrack) : null;
+    if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
+    onProgress?.(0.25);
 
-  const captions = captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
-    ...c,
-    atSec: c.atSec - startSec,
-    endSec: c.endSec - startSec,
-  }));
+    const captions = captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
+      ...c,
+      atSec: c.atSec - startSec,
+      endSec: c.endSec - startSec,
+    }));
 
-  const canvas = document.createElement("canvas");
-  canvas.width = CLIP_WIDTH;
-  canvas.height = CLIP_HEIGHT;
-  const ctx = canvas.getContext("2d", { alpha: false });
-  if (!ctx) throw new Error("描画できませんでした");
+    const canvas = document.createElement("canvas");
+    canvas.width = CLIP_WIDTH;
+    canvas.height = CLIP_HEIGHT;
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) throw new Error("描画できませんでした");
 
-  const cap = opts.capability ?? (await detectCapability());
-  if (!cap) throw new Error("この端末では動画を書き出せません");
-  const output = new Output({
-    format: cap.mp4 ? new Mp4OutputFormat() : new WebMOutputFormat(),
-    target: new BufferTarget(),
-  });
-  const videoSource = new CanvasSource(canvas, { codec: cap.videoCodec, bitrate: QUALITY_HIGH });
-  const audioSource = new AudioBufferSource({ codec: cap.audioCodec, bitrate: 128e3 });
-  output.addVideoTrack(videoSource, { frameRate: FPS });
-  output.addAudioTrack(audioSource);
-  await output.start();
+    const cap = opts.capability ?? (await detectCapability());
+    if (!cap) throw new Error("この端末では動画を書き出せません");
+    output = new Output({
+      format: cap.mp4 ? new Mp4OutputFormat() : new WebMOutputFormat(),
+      target: new BufferTarget(),
+    });
+    const videoSource = new CanvasSource(canvas, { codec: cap.videoCodec, bitrate: QUALITY_HIGH });
+    const audioSource = new AudioBufferSource({ codec: cap.audioCodec, bitrate: 128e3 });
+    output.addVideoTrack(videoSource, { frameRate: FPS });
+    output.addAudioTrack(audioSource);
+    await output.start();
 
-  await audioSource.add(buffer);
-  audioSource.close();
+    await audioSource.add(buffer);
+    audioSource.close();
 
-  const totalFrames = Math.round(duration * FPS);
+    const totalFrames = Math.round(duration * FPS);
 
-  if (frameSink) {
-    // 元動画のコマを1枚ずつ受け取りながら書き出す。
-    // samplesAtTimestamps は時刻が昇順なら各パケットを一度しかデコードしないので、
-    // 1コマずつ getSample を呼ぶより桁違いに速い。
-    const stamps = Array.from({ length: totalFrames }, (_, i) => startSec + i / FPS);
-    let i = 0;
-    let last: Frame | null = null;
-    for await (const sample of frameSink.samplesAtTimestamps(stamps)) {
-      if (signal?.aborted) {
-        sample?.close();
-        await output.cancel();
-        throw new DOMException("中止しました", "AbortError");
+    if (frameSink) {
+      // 元動画のコマを1枚ずつ受け取りながら書き出す。
+      // samplesAtTimestamps は時刻が昇順なら各パケットを一度しかデコードしないので、
+      // 1コマずつ getSample を呼ぶより桁違いに速い。
+      const firstVideoTime = await videoTrack!.getFirstTimestamp();
+      const stamps = Array.from({ length: totalFrames }, (_, i) => Math.max(firstVideoTime, startSec + i / FPS));
+      let i = 0;
+      let previous: VideoSample | null = null;
+      try {
+        for await (const sample of frameSink.samplesAtTimestamps(stamps)) {
+          if (sample && sample !== previous) {
+            previous?.close();
+            previous = sample;
+          }
+          signal?.throwIfAborted();
+          const t = i / FPS;
+          const frame = previous ? {
+            width: previous.displayWidth,
+            height: previous.displayHeight,
+            image: previous.toCanvasImageSource(),
+          } : null;
+          drawFrame(ctx, opts, captions, levels, t, duration, frame);
+          await videoSource.add(t, 1 / FPS);
+          if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
+          i++;
+        }
+      } finally {
+        previous?.close();
       }
-      const t = i / FPS;
-      if (sample) {
-        last = {
-          width: sample.displayWidth,
-          height: sample.displayHeight,
-          image: sample.toCanvasImageSource(),
-        };
-        drawFrame(ctx, opts, captions, levels, t, duration, last);
-        sample.close();
-      } else {
-        // コマが取れない時刻は直前のコマを出す(黒落ちさせない)
-        drawFrame(ctx, opts, captions, levels, t, duration, last);
+    } else {
+      for (let i = 0; i < totalFrames; i++) {
+        signal?.throwIfAborted();
+        const t = i / FPS;
+        drawFrame(ctx, opts, captions, levels, t, duration);
+        await videoSource.add(t, 1 / FPS);
+        if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
       }
-      await videoSource.add(t, 1 / FPS);
-      if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
-      i++;
     }
-  } else {
-    for (let i = 0; i < totalFrames; i++) {
-      if (signal?.aborted) {
-        await output.cancel();
-        throw new DOMException("中止しました", "AbortError");
-      }
-      const t = i / FPS;
-      drawFrame(ctx, opts, captions, levels, t, duration);
-      await videoSource.add(t, 1 / FPS);
-      if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
-    }
+    videoSource.close();
+
+    await output.finalize();
+    onProgress?.(1);
+
+    const bytes = (output.target as BufferTarget).buffer;
+    if (!bytes) throw new Error("動画を書き出せませんでした");
+    return new Blob([bytes], { type: cap.mp4 ? "video/mp4" : "video/webm" });
+  } finally {
+    input.dispose();
+    if (output?.state === "started") await output.cancel().catch(() => {});
   }
-  videoSource.close();
-
-  await output.finalize();
-  onProgress?.(1);
-
-  const bytes = (output.target as BufferTarget).buffer;
-  if (!bytes) throw new Error("動画を書き出せませんでした");
-  return new Blob([bytes], { type: cap.mp4 ? "video/mp4" : "video/webm" });
 }

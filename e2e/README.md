@@ -50,3 +50,5 @@ node e2e/run.js patrol-ui      # 1つだけ
 - `photo-leak`: 通常制作では写真・タイトルの変更が元音声を書き換えず、次の回へ写真を持ち越さないことを検証します。従来の ID3 処理は `npm test` 内で検証します。
 - `E2E_CHROMIUM=/path/to/chromium npm run e2e` でブラウザを指定できます。未指定ならシステム Chromium、なければ Playwright 管理の Chromium を使います。
 - Worker の比較は Vite 開発サーバーを起動して `node e2e/worker-bench.js PORT`。36秒の合成 WAV を同じブラウザで従来処理・AI専用処理の順に3回ずつ実行します。実音声・実APIは使用しません。API待ち時間や実機の性能を代表する測定ではありません。
+
+2.1統合制作の回帰テストは `npm run e2e -- unified-production` で実行。動画用の合成素材を生成するため、VP8とOpusに対応した `ffmpeg` が必要です。Gemini通信はモックです。

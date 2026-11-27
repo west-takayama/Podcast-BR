@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 切り抜きが「頼んだ場所」を切り出しているか。
 //
 // ここがずれていると、縦型ショートの中身が別の場面になる。しかも
@@ -106,7 +107,8 @@ async function countBeeps(url) {
   }
 
   console.log("=== 目印入りの音を変換する ===");
-  await page.setInputFiles(".drop input[type=file]", "marked.wav");
+  await openLegacy(page);
+  await page.setInputFiles(".legacy-production .drop input[type=file]", "marked.wav");
   await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
   if (await page.locator(".error").count()) throw new Error(await page.textContent(".error"));
 

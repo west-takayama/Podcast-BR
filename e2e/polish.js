@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // スマホで使う道具としての作りを測る。
 //
 //  1) 横にはみ出していないか(390px 幅で横スクロールが出ると片手で扱えない)
@@ -139,13 +140,14 @@ const measure = () => {
   await report("作成(待機)");
 
   console.log("\n=== 変換して結果画面 ===");
-  await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+  await openLegacy(page);
+  await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
   await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
   await report("結果");
   await page.screenshot({ path: "polish-result.png", fullPage: true });
 
   console.log("\n=== 各タブ ===");
-  for (const t of ["ショート", "次の回", "履歴", "設定"]) {
+  for (const t of ["作成", "次の回", "履歴", "設定"]) {
     await page.click(`nav button:has-text('${t}')`);
     await page.waitForTimeout(800);
     await report(t);

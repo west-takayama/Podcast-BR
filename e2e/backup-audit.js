@@ -1,3 +1,4 @@
+const { openLegacy } = require("./legacy-production");
 // 控えの取り回しを確かめる。
 //
 //  A) 控えを取ったあとに手直しし、その古い控えを戻したとき、手直しは残るか
@@ -51,7 +52,8 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   await page.click("button:has-text('保存して閉じる')");
 
   console.log("=== 1回作って、控えを取る ===");
-  await page.setInputFiles(".drop input[type=file]", "speechlike.wav");
+  await openLegacy(page);
+  await page.setInputFiles(".legacy-production .drop input[type=file]", "speechlike.wav");
   await page.waitForSelector("h2:has-text('投稿素材が完成しました'), .error", { timeout: 300000 });
   if (await page.locator(".error").count()) throw new Error(await page.textContent(".error"));
 

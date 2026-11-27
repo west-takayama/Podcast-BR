@@ -57,7 +57,7 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "create" | "shorts" | "next" | "history" | "settings";
+type Tab = "create" | "legacy" | "next" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -65,6 +65,7 @@ export type { AudioReport };
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [tab, setTab] = useState<Tab>(() => (loadSettings().apiKey ? "create" : "settings"));
+  const [studioVisited, setStudioVisited] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [stage, setStage] = useState<Stage>("analyze");
   const [overall, setOverall] = useState(0);
@@ -152,7 +153,8 @@ export default function App() {
 
   // お題は別のタブで決める。作成画面に戻ってきた時点で拾い直す
   useEffect(() => {
-    if (tab === "create") setPlan(loadPlan());
+    if (tab === "create") setStudioVisited(true);
+    if (tab === "create" || tab === "legacy") setPlan(loadPlan());
   }, [tab]);
 
   // Service Worker が新しい版を用意したら知らせる(切り替えは利用者の操作で)
@@ -781,13 +783,10 @@ export default function App() {
   return (
     <>
       <header>
-        <h1>🎙️ AI STUDIO 2.0</h1>
+        <h1>🎙️ AI STUDIO 2.1</h1>
         <nav className="tabs">
-          <button className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
+          <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
             作成
-          </button>
-          <button className={tab === "shorts" ? "active" : ""} onClick={() => setTab("shorts")}>
-            ショート
           </button>
           <button className={tab === "next" ? "active" : ""} onClick={() => setTab("next")}>
             次の回
@@ -851,12 +850,17 @@ export default function App() {
         <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setTab("create")} />
       )}
 
-      {tab === "shorts" && (
+      {(tab === "create" || studioVisited) && <div hidden={tab !== "create"}>
         <ShortsPanel
           settings={settings}
+          previousTitles={previousTitles}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
         />
-      )}
+        <details className="card fold">
+          <summary>従来の制作・中断した回</summary>
+          <button type="button" onClick={() => setTab("legacy")}>従来の制作を開く</button>
+        </details>
+      </div>}
 
       {tab === "next" && (
         <InsightsPanel
@@ -892,8 +896,9 @@ export default function App() {
         />
       )}
 
-      {tab === "create" && (
-        <>
+      {tab === "legacy" && (
+        <div className="legacy-production">
+          <button type="button" onClick={() => setTab("create")}>素材選択に戻る</button>
           {/* 前回の変換が生き残っている場合。変換をやり直させないのが目的 */}
           {phase === "idle" && !meta && pending && (
             <div className="card resume">
@@ -1097,7 +1102,7 @@ export default function App() {
               </button>
             </>
           )}
-        </>
+        </div>
       )}
       </Suspense>
     </>
