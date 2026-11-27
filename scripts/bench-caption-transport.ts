@@ -58,7 +58,7 @@ for (const seconds of [20, 30, 40, 60, 90]) {
     release.push(await sample(seconds, direct));
   }
   rows.push({ seconds, version: "baseline", transport: "Files", ...baseline.sort((a, b) => a.ms - b.ms)[1] });
-  rows.push({ seconds, version: "2.4", transport: direct ? "inline" : "Files", ...release.sort((a, b) => a.ms - b.ms)[1] });
+  rows.push({ seconds, version: "current", transport: direct ? "inline" : "Files", ...release.sort((a, b) => a.ms - b.ms)[1] });
 }
 console.table(rows);
 
