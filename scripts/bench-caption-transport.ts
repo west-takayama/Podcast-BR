@@ -35,19 +35,30 @@ globalThis.fetch = async (url, init) => {
 };
 const options = { apiKey: "fixture", model: "test", onStatus: () => {} };
 
+async function sample(seconds: number, direct: boolean) {
+  const wav = new ArrayBuffer(44 + seconds * 32_000);
+  requests = bytes = 0;
+  const started = performance.now();
+  const audio = direct ? { wav } : await uploadEpisodeAudio(options.apiKey, wav, options.onStatus, undefined, undefined, "audio/wav");
+  const result = await transcribeRange({ ...options, audio, durationMs: seconds * 1000 });
+  assert.deepEqual(result, [{ startMs: 100, endMs: 500, speakerId: "A", text: "テスト", emphasis: [], needsReview: false }]);
+  assert.equal(requests, direct ? 1 : 3);
+  return { ms: Math.round(performance.now() - started), requests, requestBodyBytes: bytes };
+}
+
+await sample(20, false);
+await sample(20, true);
 const rows = [];
 for (const seconds of [20, 30, 40, 60, 90]) {
-  const wav = new ArrayBuffer(44 + seconds * 32_000);
-  for (const baseline of [true, false]) {
-    requests = bytes = 0;
-    const started = performance.now();
-    const direct = !baseline && useDirectCaptionAudio(seconds * 1000);
-    const audio = direct ? { wav } : await uploadEpisodeAudio(options.apiKey, wav, options.onStatus, undefined, undefined, "audio/wav");
-    const result = await transcribeRange({ ...options, audio, durationMs: seconds * 1000 });
-    assert.deepEqual(result, [{ startMs: 100, endMs: 500, speakerId: "A", text: "テスト", emphasis: [], needsReview: false }]);
-    assert.equal(requests, direct ? 1 : 3);
-    rows.push({ seconds, version: baseline ? "baseline" : "2.4", transport: direct ? "inline" : "Files", ms: Math.round(performance.now() - started), requests, requestBodyBytes: bytes });
+  const direct = useDirectCaptionAudio(seconds * 1000);
+  const baseline = [];
+  const release = [];
+  for (let run = 0; run < 3; run++) {
+    baseline.push(await sample(seconds, false));
+    release.push(await sample(seconds, direct));
   }
+  rows.push({ seconds, version: "baseline", transport: "Files", ...baseline.sort((a, b) => a.ms - b.ms)[1] });
+  rows.push({ seconds, version: "2.4", transport: direct ? "inline" : "Files", ...release.sort((a, b) => a.ms - b.ms)[1] });
 }
 console.table(rows);
 
