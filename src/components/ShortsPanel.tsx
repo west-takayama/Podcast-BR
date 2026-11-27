@@ -129,6 +129,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
   const [covers, setCovers] = useState<Record<number, Cover>>({});
   const [withCaptions, setWithCaptions] = useState(!existing || !!settings.apiKey || !!existing.transcript?.length);
+  const [resolution, setResolution] = useState<720 | 1080>(1080);
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
   const [shareStatus, setShareStatus] = useState("");
   const previousArchiveBackground = useRef(existing?.background);
@@ -587,7 +588,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         captionCues,
         signal,
         capability: cap ?? undefined,
-      }));
+        resolution,
+      }), undefined, cap ? {
+        height: resolution === 720 ? 1280 : 1920,
+        video: cap.videoCodec,
+        audio: cap.audioCodec,
+        seconds: Math.round((endSec - startSec) * 1000) / 1000,
+      } : undefined);
     } finally {
       bitmap?.close();
       logo?.close();
@@ -948,6 +955,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
           {cap && (
             <>
+              <label>
+                次の書き出しの画質
+                <select value={resolution} onChange={event => setResolution(event.target.value === "720" ? 720 : 1080)}>
+                  <option value={1080}>1080 × 1920（標準）</option>
+                  <option value={720}>720 × 1280（軽量）</option>
+                </select>
+              </label>
               {withCaptions && !lines && (
                 <button onClick={prepareCaptions}>📝 先に字幕を作って確認する</button>
               )}

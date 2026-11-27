@@ -1,4 +1,4 @@
-import { measureStage } from "../timing";
+import { measureStage, recordTiming } from "../timing";
 import { samplesOnSourceClock } from "../audio/sourceClock";
 import { detectActivity, displayCueAt, type DisplayCue } from "./captionAlignment";
 // 切り抜きの縦型動画を端末内で書き出す。
@@ -69,6 +69,7 @@ export interface ClipOptions {
   signal?: AbortSignal;
   /** 事前に調べたコーデック。省くとこの場で調べる。 */
   capability?: ClipCapability;
+  resolution?: 720 | 1080;
 }
 
 /**
@@ -948,6 +949,9 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
   let output: Output | undefined;
   let canvas: HTMLCanvasElement | undefined;
+  let drawingMs = 0;
+  let encodingMs = 0;
+  let completed = false;
   try {
     const { buffer, levels } = await measureStage("video-audio-decode", () => decodeRange(input, startSec, endSec, signal));
     const duration = buffer.duration;
@@ -966,10 +970,12 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     const drawing = { textLayouts: new Map<string, TextLayout>() };
 
     canvas = document.createElement("canvas");
-    canvas.width = CLIP_WIDTH;
-    canvas.height = CLIP_HEIGHT;
+    const scale = opts.resolution === 720 ? 2 / 3 : 1;
+    canvas.width = Math.round(CLIP_WIDTH * scale);
+    canvas.height = Math.round(CLIP_HEIGHT * scale);
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("描画できませんでした");
+    ctx.scale(scale, scale);
 
     const cap = opts.capability ?? (await detectCapability());
     if (!cap) throw new Error("この端末では動画を書き出せません");
@@ -988,7 +994,7 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     await output.start();
 
     signal?.throwIfAborted();
-    await audioSource.add(buffer);
+    await measureStage("video-audio-encode", () => audioSource.add(buffer));
     signal?.throwIfAborted();
     audioSource.close();
 
@@ -1015,8 +1021,15 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
             height: previous.displayHeight,
             image: previous.toCanvasImageSource(),
           } : null;
+          const drawStarted = performance.now();
           drawFrame(ctx, opts, captions, levels, t, duration, frame, drawing);
-          await videoSource.add(t, Math.min(1 / FPS, duration - t));
+          drawingMs += performance.now() - drawStarted;
+          const encodeStarted = performance.now();
+          try {
+            await videoSource.add(t, Math.min(1 / FPS, duration - t));
+          } finally {
+            encodingMs += performance.now() - encodeStarted;
+          }
           if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
           i++;
         }
@@ -1027,20 +1040,34 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
       for (let i = 0; i < totalFrames; i++) {
         signal?.throwIfAborted();
         const t = i / FPS;
+        const drawStarted = performance.now();
         drawFrame(ctx, opts, captions, levels, t, duration, undefined, drawing);
-        await videoSource.add(t, Math.min(1 / FPS, duration - t));
+        drawingMs += performance.now() - drawStarted;
+        const encodeStarted = performance.now();
+        try {
+          await videoSource.add(t, Math.min(1 / FPS, duration - t));
+        } finally {
+          encodingMs += performance.now() - encodeStarted;
+        }
         if (i % 15 === 0) onProgress?.(0.25 + 0.7 * (i / totalFrames));
       }
     }
-    videoSource.close();
-
-    await output.finalize();
+    await measureStage("video-finalize", async () => {
+      videoSource.close();
+      await output!.finalize();
+    });
     onProgress?.(1);
 
     const bytes = (output.target as BufferTarget).buffer;
     if (!bytes) throw new Error("動画を書き出せませんでした");
-    return new Blob([bytes], { type: cap.mp4 ? "video/mp4" : "video/webm" });
+    return await measureStage("video-blob", async () => {
+      const blob = new Blob([bytes], { type: cap.mp4 ? "video/mp4" : "video/webm" });
+      completed = true;
+      return blob;
+    });
   } finally {
+    recordTiming("video-draw", drawingMs, completed);
+    recordTiming("video-encode", encodingMs, completed);
     input.dispose();
     if (output?.state === "started") await output.cancel().catch(() => {});
     if (canvas) canvas.width = canvas.height = 1;

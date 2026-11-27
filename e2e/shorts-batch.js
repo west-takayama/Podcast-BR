@@ -157,6 +157,23 @@ const candidates = {
     assert.equal(stats.maxActive, 1, "encoders are created serially");
     assert.equal(stats.active, 0, "encoder resources close after both success and failure");
     assert.deepEqual(stats.shared, [[names[0]], names]);
+    await page.getByLabel("次の書き出しの画質").selectOption("720");
+    await page.getByRole("button", { name: /この範囲を縦型ショートにする/ }).click();
+    await page.getByText(/完了 1本 \/ 失敗 0本/).waitFor();
+    const lightVideo = outputs.first().locator("video");
+    const lightSize = await lightVideo.evaluate(async video => {
+      if (!video.videoWidth) {
+        video.preload = "metadata";
+        video.load();
+        await new Promise((resolve, reject) => {
+          video.addEventListener("loadedmetadata", resolve, { once: true });
+          video.addEventListener("error", reject, { once: true });
+        });
+      }
+      return [video.videoWidth, video.videoHeight];
+    });
+    assert.deepEqual(lightSize, [720, 1280]);
+    assert.equal(transcriptions.length, 6, "changing export resolution reuses captions");
     const urls = await outputs.locator("a[download]").evaluateAll(links => links.map(link => link.href));
     await page.getByRole("button", { name: "別の素材にする" }).click();
     assert.equal(await outputs.count(), 0);
