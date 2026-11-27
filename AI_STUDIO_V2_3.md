@@ -1,5 +1,7 @@
 # AI STUDIO 2.3 経営本部向け報告
 
+2.3.1以降のGoogle Drive初期設定は「設定」タブから行います。 [2.3.1の操作手順](./AI_STUDIO_V2_3_1.md)
+
 ショート動画を書き出した画面から、完成動画と投稿情報を Google Drive の [01_投稿候補](https://drive.google.com/drive/folders/14tBUxITSF8mdAx5eAtBqZvGeKbSq-oqu) に個別・一括保存できます。通常制作、旧制作、履歴からの再編集は同じ保存画面を使います。保存にあたり Gemini への追加通信は発生しません。
 
 ## 初回設定と日常操作
