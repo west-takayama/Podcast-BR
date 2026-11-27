@@ -1,3 +1,5 @@
+import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
+import { archivedCaptionCues } from "../lib/video/archivedCaptions";
 import CaptionPreview from "./CaptionPreview";
 import SpeakerAssignments from "./SpeakerAssignments";
 import { alignCues, formatCueTime, type CaptionCue, type SpeechSpan } from "../lib/video/captionAlignment";
@@ -14,6 +16,8 @@ import {
   generateSpotifyCopy,
   type EpisodeMeta,
   type UploadedAudio,
+  type TranscriptSegment,
+  isAudioUsable,
   transcribeRange,
   uploadEpisodeAudio,
   type Clip,
@@ -29,6 +33,18 @@ interface Props {
   settings: Settings;
   previousTitles: string[];
   onModelChanged: (model: string) => void;
+  existing?: {
+    file: File;
+    clips: Clip[];
+    durationSec: number;
+    episodeId?: string;
+    hasVideo: boolean;
+    transcript?: TranscriptSegment[] | null;
+    uploaded?: UploadedAudio | null;
+    background?: ImageBitmap | null;
+    previewUrl?: string;
+    onClipsFound?: (clips: Clip[]) => void;
+  };
 }
 
 type Phase = "idle" | "extracting" | "finding" | "ready" | "captioning" | "rendering";
@@ -72,24 +88,24 @@ const fmt = (sec: number) =>
  * 音声だけを Gemini に聴かせて面白い区間を選ばせ、映像はその区間を
  * 端末内で切り出す。動画そのものはどこにも送らない。
  */
-export default function ShortsPanel({ settings, previousTitles, onModelChanged }: Props) {
-  const [phase, setPhase] = useState<Phase>("idle");
+export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing }: Props) {
+  const [phase, setPhase] = useState<Phase>(existing ? "ready" : "idle");
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
   /** 映像がこの端末で復号できない動画。音声と字幕だけで作ることになる。 */
   const [videoUnusable, setVideoUnusable] = useState(false);
-  const [hasVideo, setHasVideo] = useState(false);
+  const [hasVideo, setHasVideo] = useState(existing?.hasVideo ?? false);
   const [background, setBackground] = useState<File | null>(null);
   const [spotify, setSpotify] = useState<Pick<EpisodeMeta, "titles" | "description"> | null>(null);
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyError, setSpotifyError] = useState("");
   const spotifyRef = useRef<AbortController | null>(null);
   const analysisRef = useRef<{ file: File; audio: UploadedAudio; facts: string[]; clips: Clip[]; durationSec: number } | null>(null);
-  const [fileInfo, setFileInfo] = useState("");
-  const [clips, setClips] = useState<Clip[]>([]);
+  const [fileInfo, setFileInfo] = useState(existing?.file.name ?? "");
+  const [clips, setClips] = useState<Clip[]>(existing?.clips ?? []);
   const [selected, setSelected] = useState(0);
-  const [checked, setChecked] = useState<number[]>([]);
+  const [checked, setChecked] = useState<number[]>(existing?.clips.map((_, i) => i) ?? []);
   const [batch, setBatch] = useState<BatchProgress | null>(null);
   const [batchSummary, setBatchSummary] = useState("");
   const [failures, setFailures] = useState<Partial<Record<number, string>>>({});
@@ -100,15 +116,17 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [speakerLinks, setSpeakerLinks] = useState<Record<number, Record<string, string>>>({});
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
+  const newEpisodeId = useRef<string>();
   const rangeDrafts = useRef(new Map<string, CaptionCue[]>());
   const [results, setResults] = useState<Record<number, Result>>({});
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
   const [covers, setCovers] = useState<Record<number, Cover>>({});
-  const [withCaptions, setWithCaptions] = useState(true);
+  const [withCaptions, setWithCaptions] = useState(!existing || !!settings.apiKey || !!existing.transcript?.length);
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
   const [shareStatus, setShareStatus] = useState("");
+  const previousArchiveBackground = useRef(existing?.background);
 
-  const fileRef = useRef<File | null>(null);
+  const fileRef = useRef<File | null>(existing?.file ?? null);
   const sourceAudioRef = useRef<{ mp3: ArrayBuffer; durationSec: number } | null>(null);
   const sourceCacheRef = useRef(new ShortsAudioCache());
   const rangeCacheRef = useRef(new ShortsAudioCache(4));
@@ -136,13 +154,15 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
 
   const nudgeOf = (i: number) => nudges[i] ?? ZERO;
 
+  const sourceDuration = () => existing?.durationSec ?? sourceAudioRef.current?.durationSec;
+
   const rangeOf = (i: number) => {
     const c = clips[i];
     if (!c) return { startSec: 0, endSec: 0 };
     const n = nudgeOf(i);
     const rawStart = (parseTimestamp(c.start) ?? 0) / 1000;
     const rawEnd = (parseTimestamp(c.end) ?? (rawStart + 45) * 1000) / 1000;
-    const limit = sourceAudioRef.current?.durationSec ?? rawEnd;
+    const limit = sourceDuration() ?? rawEnd;
     const startSec = Math.min(Math.max(0, limit - 5), Math.max(0, rawStart + n.start));
     return { startSec, endSec: Math.min(limit, startSec + 90, Math.max(startSec + 5, rawEnd + n.end)) };
   };
@@ -158,6 +178,19 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       delete next[i];
       return next;
     });
+
+  useEffect(() => {
+    if (previousArchiveBackground.current === existing?.background) return;
+    previousArchiveBackground.current = existing?.background;
+    if (hasVideo || background) return;
+    setResults(prev => {
+      for (const result of Object.values(prev)) {
+        URL.revokeObjectURL(result.url);
+        urlsRef.current.delete(result.url);
+      }
+      return {};
+    });
+  }, [existing?.background, hasVideo, background]);
 
   /** 範囲が変わると表紙の候補も別物になる。 */
   const dropCover = (i: number) => {
@@ -269,15 +302,20 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         signal: controller.signal,
       });
       controller.signal.throwIfAborted();
+      const id = crypto.randomUUID();
       await saveEpisode({
-        id: crypto.randomUUID(), createdAt: Date.now(), fileName: analysis.file.name,
+        id, createdAt: Date.now(), fileName: analysis.file.name,
         durationSec: analysis.durationSec, removedSec: 0, chosenTitle: copy.titles[0],
         audio: analysis.file, originalAudio: true, uploaded: analysis.audio,
         meta: { ...copy, clips: analysis.clips, showNotes: "", chapters: [], hashtags: [], transcriptSummary: "", keywords: [] },
       }).catch(() => {
         if (!controller.signal.aborted) setSpotifyError("文章を表示しました。履歴に保存できなかったため、コピーして控えてください。");
       });
-      if (!controller.signal.aborted) setSpotify(copy);
+      if (!controller.signal.aborted) {
+        newEpisodeId.current = id;
+        for (const [range, cues] of rangeDrafts.current) saveEpisodeDraft(id, range, cues);
+        setSpotify(copy);
+      }
     } catch (e) {
       if (!controller.signal.aborted) setSpotifyError(noteError("Spotify用文章", e, settings.model));
     } finally {
@@ -314,6 +352,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     setSpeakerLinks({});
     captionActivity.current.clear();
     rangeDrafts.current.clear();
+    newEpisodeId.current = undefined;
     for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
     setResults({});
@@ -347,13 +386,17 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       setHasVideo(decodable);
       setVideoUnusable(video && !decodable);
 
-      if (!sourceAudioRef.current) sourceAudioRef.current = await measureStage("conversion", () => extractAudio(file, controller.signal));
+      const reusable = existing?.uploaded;
+      if (!isAudioUsable(reusable) && !sourceAudioRef.current) {
+        sourceAudioRef.current = await measureStage("conversion", () => extractAudio(file, controller.signal));
+      }
       controller.signal.throwIfAborted();
-      const { mp3, durationSec } = sourceAudioRef.current;
+      const mp3 = sourceAudioRef.current?.mp3;
+      const durationSec = sourceDuration() ?? 0;
       setPhase("finding");
       setProgress(0);
-      const audio = await sourceCacheRef.current.get("source", settings.apiKey,
-        async () => mp3,
+      const audio = isAudioUsable(reusable) ? reusable! : await sourceCacheRef.current.get("source", settings.apiKey,
+        async () => mp3!,
         bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, controller.signal));
       controller.signal.throwIfAborted();
       let facts: string[] = [];
@@ -366,17 +409,18 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         durationSec,
         onStatus: setStatus,
         onUploadProgress: setProgress,
-        onEpisodeFacts: (value) => { facts = value; },
+        onEpisodeFacts: existing ? undefined : (value) => { facts = value; },
         onModelChanged: value => { model = value; onModelChanged(value); },
         signal: controller.signal,
       });
       controller.signal.throwIfAborted();
       analysisRef.current = { file, audio, facts, clips: found, durationSec };
       setClips(found);
+      existing?.onClipsFound?.(found);
       setChecked(found.map((_, i) => i));
       setPhase("ready");
       setStatus("");
-      void makeSpotify(model);
+      if (!existing) void makeSpotify(model);
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       setError(noteError("ショート", e, settings.model));
@@ -393,8 +437,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
    * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
    */
   const buildCaptions = async (i: number, signal: AbortSignal, reportProgress: (fraction: number) => void = setProgress): Promise<CaptionCue[]> => {
-    const existing = captions[i];
-    if (existing) return existing;
+    const draft = captions[i];
+    if (draft) return draft;
     const file = fileRef.current!;
     const { startSec, endSec } = rangeOf(i);
     const durationMs = Math.round((endSec - startSec) * 1000);
@@ -405,7 +449,23 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       setCaptions(prev => ({ ...prev, [i]: cached }));
       return cached;
     }
-    const { prepareCaptionAudio } = await loadClipLib();
+    const { prepareCaptionAudio, captionActivityForRange } = await loadClipLib();
+    const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
+    if (archived) {
+      setStatus("保存済み字幕を音声に合わせています…");
+      const activity = await captionActivityForRange(file, startSec, endSec, signal);
+      signal.throwIfAborted();
+      const aligned = alignCues(archived, activity, durationMs);
+      setCaptions(prev => ({ ...prev, [i]: aligned }));
+      return aligned;
+    }
+    const episodeId = existing?.episodeId ?? newEpisodeId.current;
+    const sharedDraft = episodeId ? readEpisodeDraft(episodeId, rangeKey) : undefined;
+    if (sharedDraft) {
+      setCaptions(prev => ({ ...prev, [i]: sharedDraft }));
+      return sharedDraft;
+    }
+    if (!settings.apiKey) throw new Error("保存済みの字幕が区間全体にありません。Gemini APIキーを設定するか、字幕をオフにしてください。");
     setStatus("この区間の音声を取り出しています…");
     const audio = await rangeCacheRef.current.get(rangeKey, settings.apiKey, async () => {
       const prepared = await measureStage("conversion", () => prepareCaptionAudio(file, startSec, endSec, signal));
@@ -431,6 +491,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
     signal.throwIfAborted();
     const aligned = alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs);
     rangeDrafts.current.set(rangeKey, aligned);
+    const savedId = existing?.episodeId ?? newEpisodeId.current;
+    if (savedId) saveEpisodeDraft(savedId, rangeKey, aligned);
     if (rangeDrafts.current.size > 4) {
       const oldest = rangeDrafts.current.keys().next().value;
       if (oldest !== undefined) rangeDrafts.current.delete(oldest);
@@ -502,7 +564,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
       signal.throwIfAborted();
       blob = await renderClip({
         ...(hasVideo ? { videoFile: file } : { audioFile: file }),
-        background: bitmap ?? undefined,
+        background: bitmap ?? existing?.background ?? undefined,
         logo: logo ?? undefined,
         startSec,
         endSec,
@@ -677,6 +739,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
   const selectedLinks = speakerLinks[selected] ?? {};
   const doneCount = completedVideos.length;
   const batchTargets = checked.filter(i => !results[i] || failures[i]).sort((a, b) => a - b);
+  const allTargets = clips.flatMap((_, i) => !results[i] || failures[i] ? [i] : []);
   const failedIndexes = Object.keys(failures).map(Number);
   const overallProgress = batch ? (batch.position - 1 + progress) / batch.total : progress;
 
@@ -698,13 +761,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         </div>
       )}
 
-      {phase === "idle" && clips.length === 0 && fileRef.current && (
+      {!existing && phase === "idle" && clips.length === 0 && fileRef.current && (
         <div className="card">
           <p className="muted">{fileInfo} — 完了した音声処理・有効な送信済み音声を再利用します。</p>
           <button className="primary" onClick={() => void findCandidates()}>候補の抽出を再開する</button>
         </div>
       )}
-      {phase === "idle" && clips.length === 0 && (
+      {!existing && phase === "idle" && clips.length === 0 && (
         <label className="drop card production-picker">
           <input
             type="file"
@@ -755,10 +818,19 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         </div>
       )}
 
+      {existing && !busy && !clips.length && <section className="card">
+        <h2>ショートの候補</h2>
+        <button type="button" className="primary" disabled={!settings.apiKey} onClick={() => void findCandidates()}>この素材から候補を作る</button>
+        {!settings.apiKey && <p>候補を作るにはGemini APIキーを設定してください。</p>}
+      </section>}
       {batchSummary && <p role="status" className="card">{batchSummary}</p>}
       {clips.length > 0 && !busy && (
         <div className="card">
           <h2>✂️ ショートの候補</h2>
+          <button type="button" className="primary shorts-all-generate" disabled={!cap || !allTargets.length}
+            onClick={() => { setChecked(clips.map((_, i) => i)); void make(allTargets); }}>
+            すべてのショート動画をまとめて生成
+          </button>
           <p className="muted">{fileInfo}</p>
           <div className="row-buttons">
             <button type="button" disabled={checked.length === clips.length} onClick={() => setChecked(clips.map((_, i) => i))}>全選択</button>
@@ -811,10 +883,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
             </div>
           </div>
 
+          {existing?.previewUrl && <audio controls preload="none"
+            src={`${existing.previewUrl}#t=${startSec},${endSec}`} style={{ width: "100%" }} />}
+
           {!hasVideo && (
             <label>
               ショートの背景画像（任意）
-              <input type="file" accept="image/*" onChange={e => {
+              <input type="file" className="shorts-asset-picker" accept="image/*" onChange={e => {
                 setBackground(e.target.files?.[0] ?? null);
                 clips.forEach((_, i) => dropResult(i));
               }} />
@@ -834,7 +909,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
               字幕を入れる
               <br />
               <span className="muted">
-                選んだ区間だけを書き起こします。
+                {existing?.transcript?.length ? "区間をカバーする保存済みの書き起こしを使い、不足時は区間だけ生成します。" : "選んだ区間だけを書き起こします。"}
               </span>
             </span>
           </label>
@@ -1033,7 +1108,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         </section>
       )}
 
-      {clips.length > 0 && (
+      {!existing && clips.length > 0 && (
         <section className="card">
           <h2>Spotify用タイトル・概要欄</h2>
           {spotifyBusy && <p role="status">文章を準備中です。ショートの編集を進められます。</p>}
@@ -1044,7 +1119,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
         </section>
       )}
 
-      {clips.length > 0 && !busy && (
+      {!existing && clips.length > 0 && !busy && (
         <div className="card">
           <button
             onClick={() => {
@@ -1065,6 +1140,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged }
               setSpeakerLinks({});
               captionActivity.current.clear();
               rangeDrafts.current.clear();
+              newEpisodeId.current = undefined;
               for (const u of urlsRef.current) URL.revokeObjectURL(u);
               urlsRef.current.clear();
               setResults({});

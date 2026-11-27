@@ -75,6 +75,7 @@ export default function App() {
   const [meta, setMeta] = useState<EpisodeMeta | null>(null);
   const [episodeId, setEpisodeId] = useState("");
   const [chosenTitle, setChosenTitle] = useState("");
+  const [shortsSource, setShortsSource] = useState<Blob>();
   const [mp3Url, setMp3Url] = useState("");
   const [fileInfo, setFileInfo] = useState("");
   const [outputName, setOutputName] = useState("episode.mp3");
@@ -241,6 +242,7 @@ export default function App() {
     convertedRef.current = null;
     if (mp3Url) URL.revokeObjectURL(mp3Url);
     setMp3Url("");
+    setShortsSource(undefined);
     // 次の回に進む/やめる時点で、中断復帰用の控えは意味を失う
     setPending(null);
     void clearPending().catch(() => {});
@@ -669,6 +671,7 @@ export default function App() {
         return URL.createObjectURL(blob);
       });
 
+      setShortsSource(blob);
       resultReadyAtRef.current = performance.now();
       setMeta(generated);
       setChosenTitle(title);
@@ -1073,6 +1076,10 @@ export default function App() {
                   if (meta) void retagMp3(meta, title, "MP3 のタイトルを入れ直しています…");
                 }}
                 audioUrl={mp3Url}
+                shortsSource={shortsSource}
+                shortsEpisodeId={episodeId}
+                shortsUploaded={uploaded}
+                shortsDuration={convertedRef.current?.durationSec}
                 fileName={outputName}
                 showName={settings.prompt.showName}
                 accentColor={settings.accentColor}

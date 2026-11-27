@@ -2,7 +2,7 @@ import CopyButton from "./CopyButton";
 import EpisodePhoto from "./EpisodePhoto";
 import ClipStudio from "./ClipStudio";
 import { useEffect, useState } from "react";
-import { transcriptToText, type EpisodeMeta, type TranscriptSegment } from "../lib/gemini";
+import { transcriptToText, type EpisodeMeta, type TranscriptSegment, type UploadedAudio } from "../lib/gemini";
 import type { AudioReport } from "../App";
 import type { Finding } from "../lib/audio/diagnostics";
 import { CEILING_DBFS } from "../lib/audio/limiter";
@@ -10,6 +10,7 @@ import { castLine, withCast } from "../lib/cast";
 import { formatChapters, parseChapters } from "../lib/chapters";
 import { readId3Summary, type Id3Summary } from "../lib/id3";
 import CoverPrompt from "./CoverPrompt";
+import { DEFAULT_SETTINGS } from "../lib/settings";
 import type { PromptConfig } from "../lib/prompt";
 
 interface Props {
@@ -18,6 +19,10 @@ interface Props {
   chosenTitle: string;
   onChooseTitle: (title: string) => void;
   audioUrl?: string;
+  shortsSource?: Blob;
+  shortsEpisodeId?: string;
+  shortsUploaded?: UploadedAudio | null;
+  shortsDuration?: number;
   originalAudio?: boolean;
   fileName?: string;
   showName: string;
@@ -446,6 +451,10 @@ export default function ResultView({
   chosenTitle,
   onChooseTitle,
   audioUrl,
+  shortsSource,
+  shortsEpisodeId,
+  shortsUploaded,
+  shortsDuration,
   originalAudio = false,
   fileName,
   showName,
@@ -641,15 +650,27 @@ export default function ResultView({
         }}
       />
 
-      {meta.clips && meta.clips.length > 0 && (
+      {(shortsSource || !!meta.clips?.length) && (
         <ClipStudio
-          clips={meta.clips}
+          clips={meta.clips ?? []}
+          source={shortsSource}
+          episodeId={shortsEpisodeId}
           audioUrl={audioUrl}
           transcript={transcript}
-          showName={showName}
-          accent={accentColor}
+          uploaded={shortsUploaded}
+          durationSec={shortsDuration}
+          originalAudio={originalAudio}
           background={background}
           fileName={fileName || "episode.mp3"}
+          settings={{
+            ...DEFAULT_SETTINGS,
+            apiKey: apiKey ?? "",
+            model: model ?? DEFAULT_SETTINGS.model,
+            prompt: { ...(promptConfig ?? DEFAULT_SETTINGS.prompt), showName },
+            accentColor,
+          }}
+          onModelChanged={onModelChanged ?? (() => {})}
+          onClipsFound={onEdit ? clips => onEdit({ clips }) : undefined}
         />
       )}
 
