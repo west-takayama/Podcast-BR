@@ -928,11 +928,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
               この端末では動画を書き出せません(WebCodecs 非対応)。ブラウザを更新するか、パソコンでお試しください。
             </p>
           )}
-          {cap && !cap.mp4 && (
-            <p className="muted">
-              この端末ではMP4を書き出せないため、WebMを使います。
-            </p>
-          )}
+          {cap && <p className="muted">{cap.mp4 ? "出力形式 MP4（H.264 / AAC）" : "出力形式 WebM。SNS投稿用のMP4は対応する端末で書き出してください。"}</p>}
 
           {cap && (
             <>
@@ -1090,10 +1086,6 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         </div>
       )}
 
-      {doneCount > 0 && fileRef.current && (
-        <DriveSavePanel videos={completedVideos} source={fileRef.current} encoding={busy} />
-      )}
-
       {doneCount > 0 && (
         <section className="card">
           <h2>📱 書き出した動画({doneCount}本)</h2>
@@ -1111,14 +1103,30 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
               {!busy && readyToShare([video]) && (
                 <button type="button" onClick={() => void shareVideos([video])}>共有・保存</button>
               )}
-              {video.post && <details className="fold">
+              <details className="fold">
                 <summary>投稿文・ハッシュタグ</summary>
-                <p className="result-body" style={{ whiteSpace: "pre-wrap" }}>{video.post}</p>
-                <CopyButton text={video.post} label="投稿文とハッシュタグをコピー" />
-              </details>}
+                <label>投稿文（{video.title}）
+                  <textarea value={video.description} disabled={busy} onChange={event => {
+                    const description = event.target.value;
+                    setClips(previous => previous.map((clip, index) => index === video.index ? { ...clip, socialPost: description } : clip));
+                    setResults(previous => {
+                      const result = previous[video.index];
+                      if (!result || result.url !== video.url) return previous;
+                      const post = [description, result.hashtags.join(" ")].filter(Boolean).join("\n\n");
+                      return { ...previous, [video.index]: { ...result, description, post } };
+                    });
+                  }} />
+                </label>
+                {video.hashtags.length > 0 && <p>{video.hashtags.join(" ")}</p>}
+                {video.post && <CopyButton text={video.post} label="投稿文とハッシュタグをコピー" />}
+              </details>
             </div>
           ))}
         </section>
+      )}
+
+      {doneCount > 0 && fileRef.current && (
+        <DriveSavePanel videos={completedVideos} source={fileRef.current} encoding={busy} />
       )}
 
       {!existing && clips.length > 0 && (

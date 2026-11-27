@@ -1,6 +1,32 @@
 import { CANDIDATE_FOLDER_ID } from "./driveSave";
 
 export interface DriveConfig { clientId: string; project: string; pickerKey: string }
+const CONFIG_KEY = "studio-drive-public-config";
+export const emptyDriveConfig: DriveConfig = { clientId: "", project: "", pickerKey: "" };
+
+export function validDriveConfig(config: DriveConfig) {
+  return typeof config.clientId === "string" && /^[a-z0-9-]+\.apps\.googleusercontent\.com$/i.test(config.clientId) &&
+    typeof config.project === "string" && /^\d+$/.test(config.project) &&
+    typeof config.pickerKey === "string" && /^[\w-]+$/.test(config.pickerKey);
+}
+
+export function readDriveConfig(): DriveConfig {
+  try {
+    const config = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? "null") as DriveConfig | null;
+    if (config && validDriveConfig(config)) {
+      return { clientId: config.clientId, project: config.project, pickerKey: config.pickerKey };
+    }
+  } catch { /* Storage can be unavailable in private browsing. */ }
+  return emptyDriveConfig;
+}
+
+export function writeDriveConfig(config?: DriveConfig) {
+  if (!config) localStorage.removeItem(CONFIG_KEY);
+  else if (validDriveConfig(config)) {
+    const { clientId, project, pickerKey } = config;
+    localStorage.setItem(CONFIG_KEY, JSON.stringify({ clientId, project, pickerKey }));
+  }
+}
 type TokenResponse = { access_token?: string; expires_in?: number | string; error?: string };
 interface TokenClient { requestAccessToken: (config: { prompt: string }) => void }
 type TokenConfig = {
@@ -66,7 +92,7 @@ export function loadDriveLibraries() {
   return libraries;
 }
 
-export function requestDriveToken(clientId: string): Promise<{ token: string; expiresAt: number }> {
+export function requestDriveToken(clientId: string, selectAccount = false): Promise<{ token: string; expiresAt: number }> {
   return new Promise((resolve, reject) => {
     const fail = () => reject(new Error("Google認証を完了できませんでした。ポップアップとアカウント設定を確認してください。"));
     const oauth = globals.google?.accounts?.oauth2;
@@ -81,7 +107,7 @@ export function requestDriveToken(clientId: string): Promise<{ token: string; ex
       },
       error_callback: fail,
     });
-    client.requestAccessToken({ prompt: "select_account" });
+    client.requestAccessToken({ prompt: selectAccount ? "select_account" : "" });
   });
 }
 

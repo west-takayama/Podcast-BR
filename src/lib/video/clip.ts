@@ -38,6 +38,8 @@ import { wrapJapanese } from "../image";
 export const CLIP_WIDTH = 1080;
 export const CLIP_HEIGHT = 1920;
 const FPS = 30;
+const CLIP_AUDIO_RATE = 48_000;
+const CLIP_AUDIO_BITRATE = 128_000;
 
 const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif`;
 
@@ -71,18 +73,15 @@ export interface ClipOptions {
 /**
  * この端末で使えるコーデックを決める。
  *
- * H.264 + AAC の MP4 が第一希望。Instagram と TikTok はこれしか受け付けない。
- * ただし H.264 は特許の都合で載っていないブラウザがあるため(実際に
- * 手元の headless Chromium には無かった)、その場合は VP9 + Opus の WebM に
- * 落とす。WebM は YouTube には上げられるので、出せないよりはるかにましで、
- * 「この端末では無理です」とだけ言って終わるのは避けたい。
+ * SNS 投稿向けの H.264 + AAC を優先し、端末が対応しなければ WebM を選ぶ。
+ * 実際の書き出しと同じ解像度・ビットレート・音声サンプルレートで確認する。
  */
 export async function detectCapability(): Promise<ClipCapability | null> {
   if (typeof VideoEncoder === "undefined" || typeof AudioEncoder === "undefined") return null;
   try {
     return await chooseClipCapability(
-      codecs => getFirstEncodableVideoCodec(codecs, { width: CLIP_WIDTH, height: CLIP_HEIGHT }),
-      codecs => getFirstEncodableAudioCodec(codecs),
+      codecs => getFirstEncodableVideoCodec(codecs, { width: CLIP_WIDTH, height: CLIP_HEIGHT, bitrate: QUALITY_HIGH }),
+      codecs => getFirstEncodableAudioCodec(codecs, { sampleRate: CLIP_AUDIO_RATE, bitrate: CLIP_AUDIO_BITRATE }),
     );
   } catch {
     return null;
@@ -923,10 +922,7 @@ function drawFrame(
 }
 
 /**
- * 縦型動画を書き出す。返り値は MP4 の Blob。
- *
- * 音声は AAC、映像は H.264。Instagram / TikTok / YouTube が
- * そのまま受け取れる組み合わせにしている。
+ * 縦型動画を H.264/AAC の MP4、または対応端末で WebM に書き出す。
  */
 export async function renderClip(opts: ClipOptions): Promise<Blob> {
   const { startSec, endSec, onProgress, signal } = opts;
@@ -963,11 +959,15 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     const cap = opts.capability ?? (await detectCapability());
     if (!cap) throw new Error("この端末では動画を書き出せません");
     output = new Output({
-      format: cap.mp4 ? new Mp4OutputFormat() : new WebMOutputFormat(),
+      format: cap.mp4 ? new Mp4OutputFormat({ fastStart: "in-memory" }) : new WebMOutputFormat(),
       target: new BufferTarget(),
     });
     const videoSource = new CanvasSource(canvas, { codec: cap.videoCodec, bitrate: QUALITY_HIGH });
-    const audioSource = new AudioBufferSource({ codec: cap.audioCodec, bitrate: 128e3 });
+    const audioSource = new AudioBufferSource({
+      codec: cap.audioCodec,
+      bitrate: CLIP_AUDIO_BITRATE,
+      transform: buffer.sampleRate === CLIP_AUDIO_RATE ? undefined : { sampleRate: CLIP_AUDIO_RATE },
+    });
     output.addVideoTrack(videoSource, { frameRate: FPS });
     output.addAudioTrack(audioSource);
     await output.start();

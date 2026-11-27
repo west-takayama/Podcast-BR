@@ -5,8 +5,8 @@ export const CANDIDATE_FOLDER_ID = "14tBUxITSF8mdAx5eAtBqZvGeKbSq-oqu";
 export const CANDIDATE_FOLDER_URL = `https://drive.google.com/drive/folders/${CANDIDATE_FOLDER_ID}`;
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
-const FIELDS = "id,name,mimeType,parents,trashed,appProperties,webViewLink";
-const SOURCE_DIGESTS = new WeakMap<Blob, string>();
+const FIELDS = "id,name,mimeType,parents,trashed,appProperties,createdTime";
+const BLOB_DIGESTS = new WeakMap<Blob, string>();
 
 export interface DriveShort {
   blob: Blob;
@@ -19,6 +19,8 @@ export interface DriveShort {
 
 export interface SavedShort {
   candidateId: string;
+  versionId: string;
+  latestVersionId: string;
   videoId: string;
   manifestId: string;
   reused: boolean;
@@ -30,18 +32,19 @@ interface DriveFile {
   mimeType?: string;
   parents?: string[];
   trashed?: boolean;
+  createdTime?: string;
   appProperties?: Record<string, string>;
   capabilities?: { canAddChildren?: boolean };
 }
 interface ReservedIds { video: string; manifest: string }
 type Role = keyof ReservedIds;
 
-export async function candidateIdentity(source: Blob, startMs: number, endMs: number, signal: AbortSignal) {
+async function blobDigest(blob: Blob, signal: AbortSignal) {
   signal.throwIfAborted();
-  let digest = SOURCE_DIGESTS.get(source);
+  let digest = BLOB_DIGESTS.get(blob);
   if (!digest) {
     const hash = sha256.create();
-    const reader = source.stream().getReader();
+    const reader = blob.stream().getReader();
     try {
       for (;;) {
         signal.throwIfAborted();
@@ -51,13 +54,24 @@ export async function candidateIdentity(source: Blob, startMs: number, endMs: nu
       }
       signal.throwIfAborted();
       digest = bytesToHex(hash.digest());
-      SOURCE_DIGESTS.set(source, digest);
+      BLOB_DIGESTS.set(blob, digest);
     } finally {
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }
+  return digest;
+}
+
+export async function candidateIdentity(source: Blob, startMs: number, endMs: number, signal: AbortSignal) {
+  const digest = await blobDigest(source, signal);
   return bytesToHex(sha256(utf8ToBytes(`short-v1:${digest}:${startMs}:${endMs}`)));
+}
+
+export async function versionIdentity(clip: DriveShort, signal: AbortSignal) {
+  const digest = await blobDigest(clip.blob, signal);
+  const content = JSON.stringify(["short-version-v1", digest, clip.blob.type, clip.title, clip.description, clip.hashtags]);
+  return bytesToHex(sha256(utf8ToBytes(content)));
 }
 
 export class DriveSaveError extends Error {
@@ -117,11 +131,11 @@ async function reserveIds(key: string, proposed: ReservedIds): Promise<ReservedI
 }
 
 async function listSaved(token: string, id: string, signal: AbortSignal) {
-  const entries: Partial<Record<Role, DriveFile>> = {};
+  const entries = new Map<string, Partial<Record<Role, DriveFile>>>();
   const url = new URL(`${DRIVE}/files`);
   url.search = new URLSearchParams({
     q: `'${CANDIDATE_FOLDER_ID}' in parents and trashed = false and appProperties has { key='candidateId' and value='${id}' }`,
-    fields: "nextPageToken,files(id,name,mimeType,appProperties)",
+    fields: "nextPageToken,files(id,name,mimeType,appProperties,createdTime)",
     supportsAllDrives: "true",
     includeItemsFromAllDrives: "true",
     pageSize: "100",
@@ -134,15 +148,34 @@ async function listSaved(token: string, id: string, signal: AbortSignal) {
       if (f.appProperties?.candidateId !== id) continue;
       const role = f.appProperties?.studioRole;
       if (role !== "video" && role !== "manifest") continue;
-      if (entries[role] && entries[role]?.id !== f.id) {
-        throw new Error("Driveに同じ候補IDのファイルが複数あります。管理担当者に確認してください。");
+      const version = f.appProperties?.versionId;
+      // Legacy files have no verifiable content identity. Leave them in Drive.
+      if (!version) continue;
+      const pair = entries.get(version) ?? {};
+      if (pair[role] && pair[role]?.id !== f.id) {
+        throw new Error("Driveに同じ候補・版IDのファイルが複数あります。管理担当者に確認してください。");
       }
-      entries[role] = f;
+      pair[role] = f;
+      entries.set(version, pair);
     }
     if (!nextPageToken) break;
     url.searchParams.set("pageToken", nextPageToken);
   } while (true);
   return entries;
+}
+
+function latestVersion(versions: Awaited<ReturnType<typeof listSaved>>, fallback: string) {
+  let latestTime = -Infinity;
+  let latest = fallback;
+  for (const [version, pair] of versions) {
+    if (!pair.video || !pair.manifest) continue;
+    const time = Date.parse(pair.manifest.createdTime ?? "");
+    if (time > latestTime || (time === latestTime && version > latest)) {
+      latestTime = time;
+      latest = version;
+    }
+  }
+  return latest;
 }
 
 async function readReservation(key: string): Promise<ReservedIds | undefined> {
@@ -182,18 +215,21 @@ function putUpload(url: string, token: string, body: Blob, signal: AbortSignal, 
   });
 }
 
-async function verifyUploaded(token: string, id: string, candidateId: string, role: Role, signal: AbortSignal) {
+type VersionKey = { candidateId: string; versionId: string };
+
+async function verifyUploaded(token: string, id: string, key: VersionKey, role: Role, signal: AbortSignal) {
   const res = await driveFetch(`${DRIVE}/files/${encodeURIComponent(id)}?supportsAllDrives=true&fields=${FIELDS}`, token, signal);
   if (!res.ok) throw new DriveSaveError(res.status);
   const file: DriveFile = await res.json();
   if (file.id !== id || file.trashed || !file.parents?.includes(CANDIDATE_FOLDER_ID) ||
-      file.appProperties?.candidateId !== candidateId || file.appProperties?.studioRole !== role) {
+      file.appProperties?.candidateId !== key.candidateId || file.appProperties?.versionId !== key.versionId ||
+      file.appProperties?.studioRole !== role) {
     throw new Error("保存ファイルと候補の対応を確認できません。Driveの投稿候補フォルダを確認してください。");
   }
   return file;
 }
 
-async function upload(token: string, id: string, candidateId: string, role: Role, name: string, body: Blob,
+async function upload(token: string, id: string, key: VersionKey, role: Role, name: string, body: Blob,
   signal: AbortSignal, progress: (fraction: number) => void) {
   const res = await fetch(`${UPLOAD}?uploadType=resumable&supportsAllDrives=true`, {
     method: "POST",
@@ -201,7 +237,7 @@ async function upload(token: string, id: string, candidateId: string, role: Role
       "X-Upload-Content-Type": body.type, "X-Upload-Content-Length": String(body.size) },
     body: JSON.stringify({
       id, name, mimeType: body.type, parents: [CANDIDATE_FOLDER_ID],
-      appProperties: { candidateId, studioRole: role },
+      appProperties: { ...key, studioRole: role },
     }),
     signal,
   });
@@ -217,7 +253,7 @@ async function upload(token: string, id: string, candidateId: string, role: Role
     const status = await putUpload(url.toString(), token, body, signal, progress);
     if (![200, 201, 409].includes(status)) throw new DriveSaveError(status);
   }
-  return verifyUploaded(token, id, candidateId, role, signal);
+  return verifyUploaded(token, id, key, role, signal);
 }
 
 export async function saveShortToDrive(options: {
@@ -225,17 +261,20 @@ export async function saveShortToDrive(options: {
   onProgress: (stage: string, fraction: number) => void;
 }): Promise<SavedShort> {
   const { token, project, source, clip, signal, onProgress } = options;
-  onProgress("候補IDを確認中", 0);
+  onProgress("候補と版を確認中", 0);
   const candidateId = await candidateIdentity(source, clip.startMs, clip.endMs, signal);
+  const versionId = await versionIdentity(clip, signal);
+  const key = { candidateId, versionId };
   const save = async () => {
     onProgress("保存済みか確認中", 0.03);
-    const found = await listSaved(token, candidateId, signal);
+    const versions = await listSaved(token, candidateId, signal);
+    const found = versions.get(versionId) ?? {};
     if (found.video && found.manifest) {
       onProgress("保存済み", 1);
-      return { candidateId, videoId: found.video.id, manifestId: found.manifest.id, reused: true };
+      return { ...key, latestVersionId: latestVersion(versions, versionId), videoId: found.video.id, manifestId: found.manifest.id, reused: true };
     }
     if (found.manifest && !found.video) throw new Error("投稿情報だけが残っています。Driveで元動画の状態を確認してください。");
-    const reservationKey = JSON.stringify([project, CANDIDATE_FOLDER_ID, candidateId]);
+    const reservationKey = JSON.stringify([project, CANDIDATE_FOLDER_ID, candidateId, versionId]);
     let ids = await readReservation(reservationKey);
     if (!ids) {
       const proposed = await newIds(token, signal);
@@ -245,28 +284,28 @@ export async function saveShortToDrive(options: {
     }
     const videoId = found.video?.id ?? ids.video;
     const manifestId = found.manifest?.id ?? ids.manifest;
-    const filename = `${clip.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim().slice(0, 50) || "short"}-${candidateId.slice(0, 12)}`;
+    const title = clip.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").trim().slice(0, 50) || "short";
+    const filename = `${candidateId.slice(0, 12)}-${versionId.slice(0, 12)}-${title}`;
     const ext = clip.blob.type === "video/mp4" ? "mp4" : "webm";
     let videoFile = found.video;
     if (!videoFile) {
       onProgress("動画を保存中", 0.05);
-      videoFile = await upload(token, videoId, candidateId, "video", `${filename}.${ext}`, clip.blob, signal,
+      videoFile = await upload(token, videoId, key, "video", `${filename}.${ext}`, clip.blob, signal,
         progress => onProgress("動画を保存中", 0.05 + 0.85 * progress));
     }
-    if (!found.manifest) {
-      onProgress("投稿情報を保存中", 0.93);
-      const manifest = {
-        schemaVersion: 1, candidateId, status: "pending_owner_approval",
-        title: clip.title, description: clip.description, hashtags: clip.hashtags,
-        video: { driveFileId: videoId, filename: videoFile.name ?? `${filename}.${ext}`, mimeType: videoFile.mimeType ?? clip.blob.type },
-        range: { startMs: clip.startMs, endMs: clip.endMs },
-      };
-      await upload(token, manifestId, candidateId, "manifest", `${filename}.json`, new Blob(
-        [JSON.stringify(manifest, null, 2)], { type: "application/json" },
-      ), signal, () => {});
-    }
+    onProgress("投稿情報を保存中", 0.93);
+    const manifest = {
+      schemaVersion: 2, ...key, status: "pending_owner_approval",
+      title: clip.title, description: clip.description, hashtags: clip.hashtags,
+      video: { driveFileId: videoId, filename: videoFile.name ?? `${filename}.${ext}`, mimeType: videoFile.mimeType ?? clip.blob.type },
+      range: { startMs: clip.startMs, endMs: clip.endMs },
+    };
+    const manifestFile = await upload(token, manifestId, key, "manifest", `${filename}.json`, new Blob(
+      [JSON.stringify(manifest, null, 2)], { type: "application/json" },
+    ), signal, () => {});
+    versions.set(versionId, { video: videoFile, manifest: manifestFile });
     onProgress("保存完了", 1);
-    return { candidateId, videoId, manifestId, reused: false };
+    return { ...key, latestVersionId: latestVersion(versions, versionId), videoId, manifestId, reused: false };
   };
   // IDB reserves the same IDs even without Web Locks (e.g. older iOS).
   return navigator.locks

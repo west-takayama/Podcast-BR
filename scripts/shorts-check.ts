@@ -62,3 +62,16 @@ assert.deepEqual(await chooseClipCapability(supported(['avc','vp9']), supported(
 assert.equal(await chooseClipCapability(supported(['avc']), supported(['opus'])), null, 'H264 cannot be put in WebM');
 assert.equal(await chooseClipCapability(supported(['vp9']), supported(['aac'])), null, 'AAC cannot be put in WebM');
 console.log('shorts-codecs: MP4 priority and valid WebM fallback OK');
+
+const { candidateIdentity, versionIdentity } = await import('../src/lib/driveSave');
+const signal = new AbortController().signal;
+const source = new Blob(['source audio']);
+const candidate = { startMs: 1000, endMs: 4000, title: '見出し', description: '旧投稿文', hashtags: ['#短編'] };
+const completed = { ...candidate, blob: new Blob(['original render'], { type: 'video/mp4' }) };
+const originalVersion = await versionIdentity(completed, signal);
+assert.equal(await versionIdentity({ ...completed }, signal), originalVersion);
+assert.notEqual(await versionIdentity({ ...completed, description: '改訂済み投稿文' }, signal), originalVersion);
+assert.notEqual(await versionIdentity({ ...completed, blob: new Blob(['new caption and speaker name'], { type: 'video/mp4' }) }, signal), originalVersion);
+assert.equal(await candidateIdentity(source, 1000, 4000, signal), await candidateIdentity(new Blob(['source audio']), 1000, 4000, signal));
+assert.notEqual(await candidateIdentity(source, 1000, 4000, signal), await candidateIdentity(source, 1000, 4500, signal));
+console.log('drive-short-ids: stable candidate, content revisions and range changes OK');

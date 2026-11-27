@@ -108,9 +108,10 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
         const metadata = request.postDataJSON();
         assert.deepEqual(metadata.parents, [folder]);
         assert(!metadata.permissions);
+        assert.match(metadata.appProperties.versionId, /^[a-f0-9]{64}$/);
         if (files.has(metadata.id)) { manifestConflict = true; return send(409, {}); }
         const session = String(sessions.size + 1);
-        sessions.set(session, metadata);
+        sessions.set(session, { ...metadata, createdTime: new Date(1700000000000 + Number(session) * 1000).toISOString() });
         return send(200, {}, { location: `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=${session}` });
       }
       if (url.pathname === "/upload/drive/v3/files" && method === "PUT") {
@@ -121,10 +122,13 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
         if (role === "manifest") {
           const manifest = request.postDataJSON();
           assert.equal(manifest.candidateId, metadata.appProperties.candidateId);
+          assert.equal(manifest.versionId, metadata.appProperties.versionId);
+          assert.equal(manifest.schemaVersion, 2);
           assert.equal(manifest.status, "pending_owner_approval");
           assert.deepEqual(manifest.hashtags, [`#${manifest.title}`]);
           assert(files.has(manifest.video.driveFileId));
-          assert.equal(manifest.description, manifest.title === "短編一" ? "投稿の本文一" : "投稿の本文二");
+          assert.equal(manifest.description, uploadedManifests.length === 2 ? "投稿文を改訂" :
+            manifest.title === "短編一" ? "投稿の本文一" : "投稿の本文二");
           assert.equal(manifest.video.mimeType, files.get(manifest.video.driveFileId).metadata.mimeType);
           uploadedManifests.push(manifest);
           if (failFirstManifest) {
@@ -156,7 +160,7 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     await page.getByLabel("OAuthクライアントID").fill("fixture.apps.googleusercontent.com");
     await page.getByLabel("Google Cloudプロジェクト番号").fill("123456");
     await page.getByLabel("Picker用ブラウザ制限キー").fill("no-real-key");
-    await page.getByRole("button", { name: "Google接続を準備" }).click();
+    await page.getByRole("button", { name: "Google接続設定を保存" }).click();
     await page.getByRole("button", { name: "Googleに接続", exact: true }).click();
     assert.equal(await page.evaluate(() => window.observedScope), "https://www.googleapis.com/auth/drive.file");
     assert.equal(await page.evaluate(() => window.observedGrantedScopes), false);
@@ -191,11 +195,27 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     assert.equal(uploadedRoles.length, 4, "retry does not send a second video or manifest body");
     assert.equal(files.size, 4);
     assert.equal(await save.isDisabled(), true);
-    for (const secret of ["fixture-token", "no-real-key", "fixture.apps.googleusercontent.com"]) {
-      assert.equal(await page.evaluate(value => Object.values(localStorage).some(data => data.includes(value)), secret), false);
-    }
+    const edited = page.locator(".clip-result").filter({ has: page.getByRole("heading", { name: "短編一" }) });
+    await edited.getByText("投稿文・ハッシュタグ", { exact: true }).click();
+    await edited.getByLabel("投稿文（短編一）").fill("投稿文を改訂");
+    await save.click();
+    await page.getByText(/完了 1本、失敗 0本/).waitFor();
+    assert.equal(files.size, 6, "revised metadata creates one new pair and retains old files");
+    assert.equal(uploadedManifests[2].candidateId, firstId);
+    assert.notEqual(uploadedManifests[2].versionId, uploadedManifests[0].versionId);
+    const latest = page.getByRole("link", { name: uploadedManifests[2].versionId.slice(0, 12) });
+    assert(await latest.isVisible());
+    assert.match(await latest.locator("..").innerText(), /保存時の最新版/);
+    assert.equal(await save.isDisabled(), true);
+    await page.reload();
+    const persisted = await page.evaluate(() => ({
+      config: JSON.parse(localStorage.getItem("studio-drive-public-config")),
+      tokenStored: [...Object.values(localStorage), ...Object.values(sessionStorage)].some(data => data.includes("fixture-token")),
+    }));
+    assert.deepEqual(persisted.config, { clientId: "fixture.apps.googleusercontent.com", project: "123456", pickerKey: "no-real-key" });
+    assert.equal(persisted.tokenStored, false);
     assert.deepEqual(errors, []);
-    console.log("OK: Drive OAuth scope, folder guard, batch upload, sidecars, partial retry, reserved-ID deduplication and no credential persistence");
+    console.log("OK: Drive batch/retry, versioned metadata, saved browser settings, memory-only token");
   } finally {
     await browser.close();
   }
