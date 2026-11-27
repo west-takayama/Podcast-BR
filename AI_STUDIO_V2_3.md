@@ -12,7 +12,9 @@
 
 ブラウザから Google に直接接続します。App の OAuth スコープは `drive.file` です。OAuth トークンと接続設定はページのメモリに保持し、再読み込みで消えます。ブラウザの永続ストレージには重複防止用の ID のみ記録します。既存の Gemini 設定と履歴には書き込みません。ドライブには保存ボタンで選んだ完成動画と投稿情報を送信し、ファイルの共有設定は保存先フォルダから継承します。経営本部は、運用開始前にフォルダの共有先を確認してください。
 
-[Google Picker の設定](https://developers.google.com/workspace/drive/picker/guides/web-picker) · [Drive OAuth スコープ](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+Drive API は無償の Standard Tier を使います。動画は保存アカウントの Drive 容量を消費します。
+
+[Google Picker の設定](https://developers.google.com/workspace/drive/picker/guides/web-picker) · [Drive OAuth スコープ](https://developers.google.com/workspace/drive/api/guides/api-specific-auth) · [Drive API の利用枠](https://developers.google.com/workspace/drive/api/guides/quotas)
 
 ## 保存と重複防止
 
@@ -25,7 +27,7 @@
 ## Metricool への受け渡し
 
 - 推奨は縦型の MP4（9:16、H.264/AAC）です。WebM で書き出された動画も候補フォルダに保存できます。投稿先に合わせて管理側で MP4 版を用意してください。尺・容量の上限は投稿先ごとに確認してください。 [Metricool の投稿メディア要件](https://help.metricool.com/publishing-requirements-for-images-and-videos-from-metricool-vfc8n)
-- Metricool の Drive 連携が使える場合は、管理担当者が Planner の Google Drive から対象の動画を選べます。公式のプラン案内では Starter 以上です。スマートフォン向けには Drive アプリの共有メニューを使う手順もあります。アカウントと端末で使える経路を確認してください。 [Drive 連携](https://help.metricool.com/google-drive-integration-0u1ei) · [プラン](https://help.metricool.com/plans-add-ons-and-api-access-explained-xux1u) · [モバイル共有](https://help.metricool.com/how-to-share-files-from-google-drive-to-metricool-from-your-mobile-1oxn3)
+- Starter 以上では、管理担当者が Planner の Google Drive から対象動画を選べます。スマートフォンには Drive アプリの「コピーを送信」から Metricool アプリに渡す手順もあります。無料プランでは、利用中のアカウントと端末でモバイル共有が使えるか確認してください。 [Drive 連携](https://help.metricool.com/google-drive-integration-0u1ei) · [モバイル共有](https://help.metricool.com/how-to-share-files-from-google-drive-to-metricool-from-your-mobile-1oxn3)
 - 管理担当者は JSON の投稿文・ハッシュタグを確認し、候補 ID と投稿先の組み合わせで下書き・承認・予約を管理してください。主宰者の承認後に経営本部が予約します。アプリの保存ボタンで投稿や予約は行われません。Metricool の API／CSV で動画を渡す方式は公開アクセス可能な URL を要求するため、今回は採用していません。 [Metricool API](https://help.metricool.com/common-questions-and-errors-when-using-the-api-8x9nq) · [CSV](https://help.metricool.com/common-troubleshooting-when-importing-csv-into-metricool-m2lcv)
 
 ## 公開前の実機確認
