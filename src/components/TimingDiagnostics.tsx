@@ -2,6 +2,12 @@ import { useState, useSyncExternalStore } from "react";
 import { clearTimings, getTimings, subscribeToTimings, type TimingStage } from "../lib/timing";
 
 const labels: Record<TimingStage, string> = {
+  "caption-conversion": "字幕用音声の準備",
+  "caption-audio-decode": "字幕照合用の音声デコード",
+  "caption-alignment": "字幕タイミング補正",
+  "video-export": "動画書き出し",
+  "video-audio-decode": "書き出し用音声のデコード",
+  "drive-save": "Google Drive保存",
   conversion: "音声準備",
   upload: "音声送信",
   activation: "Geminiの音声解析待ち",
@@ -15,7 +21,7 @@ const labels: Record<TimingStage, string> = {
 export default function TimingDiagnostics() {
   const timings = useSyncExternalStore(subscribeToTimings, getTimings);
   const [message, setMessage] = useState("");
-  const report = ["AI STUDIO 2.3.1 処理時間", ...timings.map(entry => {
+  const report = ["AI STUDIO 2.4 処理時間", ...timings.map(entry => {
     const details = [
       entry.success ? "完了" : "未完了",
       entry.attempt === undefined ? "" : `試行 ${entry.attempt}`,

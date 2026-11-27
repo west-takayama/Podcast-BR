@@ -50,6 +50,8 @@ const candidates = {
     const uploads = [];
     const transcriptions = [];
     let clipRequests = 0;
+    let inlineRequests = 0;
+    let useThirtySecondCandidate = false;
     let hold;
     const blocked = new Promise(resolve => { hold = resolve; });
     let markRequestStarted;
@@ -70,7 +72,18 @@ const candidates = {
       if (prompt.includes("Spotify掲載用")) return route.fulfill({ json: answer({ titles: ["確認用"], description: "検証。" }) });
       if (!prompt.includes("segments")) {
         clipRequests++;
-        return route.fulfill({ json: answer(candidates) });
+        return route.fulfill({ json: answer(useThirtySecondCandidate ? { ...candidates, clips: [{ ...candidates.clips[0], end: 30 }] } : candidates) });
+      }
+      if (parts[0].inline_data) {
+        inlineRequests++;
+        assert.equal(req.headers()["x-goog-api-key"], "AIzaMOCK");
+        assert.equal(parts[0].inline_data.mime_type, "audio/wav");
+        const wav = Buffer.from(parts[0].inline_data.data, "base64");
+        assert.equal(wav.toString("ascii", 0, 4), "RIFF");
+        assert.equal(wav.length, 960044);
+        return route.fulfill({ json: answer({ segments: [
+          { startMs: 500, endMs: 1400, text: "インライン字幕", speaker: "A", needsReview: false },
+        ] }) });
       }
       const id = Number(parts[0].file_data.file_uri.split("/").at(-1));
       transcriptions.push(id);
@@ -117,7 +130,9 @@ const candidates = {
     await box(5).check();
     await start.click();
     await page.getByText(/1本目 \/ 全2本/).waitFor();
-    await page.getByRole("heading", { name: /字幕を作っています/ }).waitFor();
+    await page.getByRole("heading", { name: /Geminiの字幕応答を待っています/ }).waitFor();
+    await page.getByText(/経過 \d+秒/).waitFor();
+    assert.equal(await page.getByRole("progressbar").count(), 0, "Gemini wait must not show a percentage");
     await requestStarted;
     assert.equal(transcriptions.at(-1), 5);
     assert.equal(await outputs.count(), 3, "completed files stay accessible while processing");
@@ -147,7 +162,14 @@ const candidates = {
     assert.equal(await outputs.count(), 0);
     assert((await page.evaluate(() => window.probe.revoked)).filter(url => urls.includes(url)).length === 5);
 
-    console.log("OK: selection, serial encoding, failure/retry, cancellation/resume, media release, posts and file sharing");
+    useThirtySecondCandidate = true;
+    await page.locator(".production-picker input").setInputFiles("speechlike.wav");
+    await page.getByRole("button", { name: "先に字幕を作って確認する" }).click();
+    await page.getByRole("textbox", { name: "字幕 1", exact: true }).waitFor();
+    assert.equal(await page.getByRole("textbox", { name: "字幕 1", exact: true }).inputValue(), "インライン字幕");
+    assert.equal(inlineRequests, 1);
+    assert.equal(uploads.length, 7, "only the episode upload is needed with inline captions");
+    console.log("OK: serial export, retry, cancellation, captions reused and 30-second inline transport");
   } finally {
     await browser.close();
   }

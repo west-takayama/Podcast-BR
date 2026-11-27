@@ -9,7 +9,6 @@ import { CEILING_DBFS } from "../lib/audio/limiter";
 import { castLine, withCast } from "../lib/cast";
 import { formatChapters, parseChapters } from "../lib/chapters";
 import { readId3Summary, type Id3Summary } from "../lib/id3";
-import CoverPrompt from "./CoverPrompt";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import type { PromptConfig } from "../lib/prompt";
 
@@ -41,9 +40,9 @@ interface Props {
   /** 今回の出演者。説明文の頭に出す。 */
   cast?: string;
   onCastChange?: (next: string) => void;
-  /** カバー画像の注文文を組み立てるために使う。番組名・背景・想定聴き手が入る。 */
+  /** 履歴・旧制作のショート動画で使用する番組設定。 */
   promptConfig?: PromptConfig;
-  /** 絵柄をAIに考えてもらうために要る。無ければその機能だけ出さない。 */
+  /** 履歴・旧制作のショート動画の候補や字幕を生成する設定。 */
   apiKey?: string;
   model?: string;
   onModelChanged?: (model: string) => void;
@@ -628,19 +627,6 @@ export default function ResultView({
         busy={!!busyText}
         onMake={onMakeTranscript}
       />
-
-      {promptConfig && (
-        <CoverPrompt
-          title={chosenTitle || meta.titles[0] || ""}
-          summary={meta.transcriptSummary}
-          keywords={meta.keywords}
-          accent={accentColor}
-          config={promptConfig}
-          apiKey={apiKey}
-          model={model}
-          onModelChanged={onModelChanged}
-        />
-      )}
 
       <EpisodePhoto
         onChange={(b, restored) => {

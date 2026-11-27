@@ -31,7 +31,7 @@ interface Props {
   accentColor: string;
   /** 控えから設定を戻したときに、動いているアプリへ反映するため。 */
   onSettingsRestored: () => void;
-  /** カバー画像の注文文に使う。過去回でも同じように出せるようにするため。 */
+  /** 過去回をショート編集する際の番組設定。 */
   promptConfig: PromptConfig;
   apiKey: string;
   model: string;

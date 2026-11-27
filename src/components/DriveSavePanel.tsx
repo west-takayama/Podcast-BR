@@ -1,3 +1,4 @@
+import { measureStage } from "../lib/timing";
 import { useEffect, useRef, useState } from "react";
 import { DriveSaveError, saveShortToDrive, verifyCandidateFolder, type DriveShort, type SavedShort } from "../lib/driveSave";
 import { useDriveConnection } from "./DriveConnection";
@@ -49,12 +50,12 @@ export default function DriveSavePanel({ videos, source, encoding }: {
         setBatch({ number: index + 1, total: targets.length });
         const key = rowKey(clip);
         try {
-          const receipt = await saveShortToDrive({
+          const receipt = await measureStage("drive-save", () => saveShortToDrive({
             token: connection.token, project: config.project, source, clip, signal: controller.signal,
             onProgress: (stage, fraction) => {
               if (mounted.current) setRows(prev => ({ ...prev, [key]: { state: "saving", stage, fraction } }));
             },
-          });
+          }));
           completed++;
           if (mounted.current) setRows(prev => ({ ...prev, [key]: { state: "saved", receipt } }));
         } catch (error) {

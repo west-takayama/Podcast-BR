@@ -6,6 +6,7 @@ import type { CaptionCue } from "./video/captionAlignment";
 import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
 import { parseTimestamp } from "./id3";
 import { measureStage, recordTiming } from "./timing";
+import { withDeadline } from "./deadline";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
@@ -233,6 +234,7 @@ function xhrUpload(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
+    xhr.timeout = 90_000;
     xhr.setRequestHeader("Content-Type", mimeType);
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -251,7 +253,9 @@ function xhrUpload(
         reject(new DOMException("Aborted", "AbortError"));
         return;
       }
-      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      const abort = () => xhr.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      xhr.onloadend = () => signal.removeEventListener("abort", abort);
       xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
     }
     xhr.send(body);
@@ -356,7 +360,7 @@ async function waitUntilActive(
 /** 縦型ショートとして成立する最短の長さ。これ未満は動画にならない。 */
 const MIN_CLIP_SEC = 5;
 /** 長すぎる候補は切り詰める。捨てるより短くしたほうが使える。 */
-const MAX_CLIP_SEC = 90;
+const MAX_CLIP_SEC = 60;
 
 /** 秒に直す。AI は数値でも文字列でも返してくる。 */
 function toSeconds(v: unknown): number | null {
@@ -564,19 +568,9 @@ export async function findClips(opts: {
 
   onStatus("面白い区間を探しています…");
 
-  // 動画が短いと「30〜60秒を3つ」は物理的に無理で、候補が返ってこない。
-  // 長さに応じて頼み方を変える(実際に短い動画で0件になった)。
   const total = durationSec && durationSec > 0 ? durationSec : 0;
-  const lengthRule = !total
-    ? "- 長さは30〜60秒。"
-    : total <= 70
-      ? `- この音声は全体で ${Math.round(total)}秒しかありません。**動画全体を1つの候補にして構いません。**
-  無理に短く切らず、面白い部分が入るように取ってください。候補は1〜2個で構いません。`
-      : total <= 150
-        ? `- この音声は全体で ${Math.round(total)}秒です。長さは20〜60秒の範囲で、
-  音声の長さを超えない区間にしてください。候補は2〜3個。`
-        : `- 長さは30〜60秒。
-- この音声は全体で ${formatTimecode(total)} です。**この長さを超える時刻を返さないでください。**`;
+  const lengthRule = `- 30秒前後を推奨。通常20〜40秒、最大60秒。自然な発言の区切りを優先。
+${total ? `- 全体は ${formatTimecode(total)}。素材の終端を越えない。短い素材は20秒未満でも、自然に完結する候補を1つ返す。` : ""}`;
 
   const prompt = `添付の音声を聴いて、縦型ショート動画(TikTok / Reels / YouTube Shorts)に
 切り出す区間を選んでください。
@@ -634,12 +628,13 @@ ${onEpisodeFacts ? "clips を先に返し、episodeFacts には短い候補だ�
   if (clips.length > 0) return clips;
 
   // ここまで来たら AI の答えは使えない。それでも行き止まりにはしない。
-  // 音声があるのだから、全体(長ければ先頭60秒)を候補として出す。
+  // 音声があるのだから、全体(長ければ先頭30秒)を候補として出す。
   if (total >= MIN_CLIP_SEC) {
     return [
       {
         start: "00:00",
-        end: formatTimecode(Math.min(total, 60)),
+        end: formatTimecode(Math.min(total, 30)),
+        needsReview: true,
         hook: "冒頭から",
         why: "AIが選べなかったため、先頭から仮に取っています",
       },
@@ -696,10 +691,25 @@ ${facts.length ? `音声から確認した事実: ${JSON.stringify(facts)}` : "�
  * 指定した区間だけを書き起こす。字幕用。
  * 全編を書き起こすより速く、無料枠も食わない。時刻のずれも小さい。
  */
+/** Chunk the conversion to avoid spreading the whole audio into a single call. */
+export function encodeCaptionAudio(wav: ArrayBuffer): string {
+  const bytes = new Uint8Array(wav) as Uint8Array & { toBase64?: () => string };
+  if (bytes.toBase64) return bytes.toBase64();
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+  }
+  return btoa(binary);
+}
+
+export function useDirectCaptionAudio(durationMs: number): boolean {
+  return durationMs >= 20_000 && durationMs <= 40_000;
+}
+
 export async function transcribeRange(opts: {
   apiKey: string;
   model: string;
-  audio: UploadedAudio;
+  audio: UploadedAudio | { wav: ArrayBuffer };
   durationMs: number;
   glossary?: string;
   onStatus: (status: string) => void;
@@ -707,7 +717,7 @@ export async function transcribeRange(opts: {
   signal?: AbortSignal;
 }): Promise<CaptionCue[]> {
   const { apiKey, model, audio, durationMs, glossary, onStatus, onModelChanged, signal } = opts;
-  onStatus("字幕を作っています…");
+
   const prompt = `添付の区間音声を日本語で忠実に文字起こしし、字幕用の発話単位と時刻を返してください。
 - 添付音声の先頭は必ず0ミリ秒。対象範囲は 0〜${durationMs} ミリ秒。元の動画全体の時刻や秒単位を使わない。
 - startMs と endMs は実際に声が始まる・終わる位置を聞いて、整数ミリ秒で返す。文字数で時間を割り振らない。不確かな境界は null、needsReview は true にする。
@@ -717,17 +727,84 @@ export async function transcribeRange(opts: {
 ${glossary?.trim() ? `音声と一致するときだけ使う用語の表記: ${glossary.trim()}` : ""}
 JSON のみを返す:
 {"segments":[{"startMs":整数またはnull,"endMs":整数またはnull,"speaker":"A","text":"実際の発話","emphasis":[],"needsReview":false}]}`;
-  const res = await callWithModelFallback(apiKey, model, {
+  const body = JSON.stringify({
     contents: [{ parts: [
-      { file_data: { mime_type: audio.mimeType ?? "audio/mpeg", file_uri: audio.uri } },
+      "wav" in audio
+        ? { inline_data: { mime_type: "audio/wav", data: encodeCaptionAudio(audio.wav) } }
+        : { file_data: { mime_type: audio.mimeType ?? "audio/mpeg", file_uri: audio.uri } },
       { text: prompt },
     ] }],
     generationConfig: { response_mime_type: "application/json", temperature: 0.1 },
-  }, onStatus, onModelChanged, signal);
-  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成", apiKey);
-  const { text, finishReason } = answerFrom(await res.json(), "字幕", true);
-  if (!text.trim()) return [];
-  const parsed = extractJson(text, "字幕", finishReason) as { segments?: unknown } | null;
+  });
+  const res = await withDeadline(signal, 75_000, async deadline => {
+    let activeModel = model;
+    for (let attempt = 1; ; attempt++) {
+      onStatus(`Geminiの字幕応答を待っています（${attempt}回目）…`);
+      let retryMs = 1500;
+      let reason = "通信が切断されました";
+      try {
+        const result = await measureStage("generation-request", async () => {
+          const response = await fetch(`${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
+            method: "POST", signal: deadline,
+            headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+            body,
+          });
+          return new Response(response.status === 204 ? null : await response.text(), { status: response.status });
+        }, attempt);
+        if (result.ok) {
+          if (activeModel !== model) onModelChanged?.(activeModel);
+          return result;
+        }
+        if (attempt === 1 && result.status === 404) {
+          const replacement = pickDefaultModel(await listModels(apiKey, deadline));
+          if (replacement && replacement !== activeModel) {
+            activeModel = replacement;
+            continue;
+          }
+        }
+        if (attempt !== 1) return result;
+        if (TRANSIENT_STATUS.includes(result.status)) {
+          reason = `Geminiが混雑しています（${result.status}）`;
+        } else if (result.status === 429) {
+          const details = await result.clone().text();
+          retryMs = retryDelayMs(details);
+          if (isDailyQuota(details) || retryMs > 15_000) return result;
+          reason = "Geminiの短時間の利用上限に達しました";
+        } else {
+          return result;
+        }
+      } catch (error) {
+        deadline.throwIfAborted();
+        if (!(error instanceof TypeError) || attempt !== 1) {
+          if (error instanceof TypeError) throw new Error("Geminiとの通信が切断されました。接続を確認して再試行してください。");
+          throw error;
+        }
+      }
+      await measureStage("retry-wait", () => countdown(retryMs,
+        left => onStatus(`${reason}。${left}秒後に再試行します…`), deadline));
+    }
+  });
+  if (!res.ok) {
+    const details = await res.text();
+    if (res.status === 429) throw new Error(isDailyQuota(details)
+      ? "Geminiの1日あたりの利用上限です（429）。枠が戻ってから再試行してください。"
+      : "Geminiの短時間の利用上限です（429）。少し間を置いて再試行してください。");
+    if (res.status === 401 || res.status === 403 || details.includes("API_KEY_INVALID")) {
+      throw new Error(`Geminiの認証または音声へのアクセスに失敗しました（${res.status}）。APIキーとモデルの利用権限を確認してください。`);
+    }
+    if (TRANSIENT_STATUS.includes(res.status)) {
+      throw new Error(`Geminiの字幕生成でサーバーエラーが続いています（${res.status}）。時間をおいて再試行してください。`);
+    }
+    throw new Error(`Geminiの字幕生成に失敗しました（${res.status}）。設定を確認して再試行してください。`);
+  }
+  let parsed: { segments?: unknown };
+  try {
+    const { text, finishReason } = answerFrom(await res.json(), "字幕", true);
+    if (!text.trim()) return [];
+    parsed = extractJson(text, "字幕", finishReason);
+  } catch {
+    throw new Error("Geminiの字幕形式を読み取れませんでした。再試行してください。");
+  }
   if (!Array.isArray(parsed?.segments)) throw new Error("字幕の形式が読めませんでした。再試行してください。");
   const boundary = (value: unknown) => typeof value === "number" && Number.isInteger(value) &&
     value >= 0 && value <= durationMs ? value : null;
@@ -1544,115 +1621,4 @@ ${
     // 出典が1つも返らなければ、実際には調べていない。そう見せない
     searched: searched && sources.length > 0,
   };
-}
-
-/**
- * カバー画像の「絵柄の案」。
- *
- * タイトルだけを画像生成に渡すと、題名を図解しただけの記号的な絵になる。
- * 何を写すかまで先に決めてから注文すると、その回らしい一枚になる。
- *
- * **音声は使わない。** 保存してある本文だけで考えるので、音声を消した
- * 古い回でも、アップロードの48時間を過ぎた回でも同じように出せる。
- */
-export interface CoverIdea {
-  /** 一行でどんな絵か。選ぶときに見る。 */
-  headline: string;
-  /** 実際に注文文へ入れる情景。何が写っているかを具体的に書いたもの。 */
-  scene: string;
-}
-
-export async function suggestCoverIdeas(opts: {
-  apiKey: string;
-  model: string;
-  /** その回のカバーか、番組そのもののカバーか。 */
-  scope: "episode" | "show";
-  title?: string;
-  summary?: string;
-  keywords?: string[];
-  config: PromptConfig;
-  count?: number;
-  onStatus: (status: string) => void;
-  onModelChanged?: (model: string) => void;
-  signal?: AbortSignal;
-}): Promise<CoverIdea[]> {
-  const { apiKey, model, scope, config, onStatus, onModelChanged, signal } = opts;
-  const count = opts.count ?? 3;
-  onStatus("絵柄を考えています…");
-
-  const material = [
-    config.showName.trim() && `番組名: ${config.showName.trim()}`,
-    config.showContext.trim() && `どんな番組か: ${config.showContext.trim()}`,
-    config.audience.trim() && `想定している聴き手: ${config.audience.trim()}`,
-    scope === "episode" && opts.title?.trim() && `この回のタイトル: 「${opts.title.trim()}」`,
-    scope === "episode" && opts.summary?.trim() && `話している内容: ${opts.summary.trim()}`,
-    scope === "episode" &&
-      (opts.keywords ?? []).length > 0 &&
-      `出てくる言葉: ${(opts.keywords ?? []).slice(0, 8).join(" / ")}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const prompt = `あなたはポッドキャストのカバー画像を作ってきたアートディレクターです。
-${
-  scope === "show"
-    ? "この番組の顔になる一枚に、何を写すかを"
-    : "この回のカバー画像に、何を写すかを"
-}${count}案考えてください。
-
-## 材料
-${material || "(材料が足りません。番組名から想像してください)"}
-
-## 考え方
-- **記号にしない。** 「電球=ひらめき」「歯車=仕組み」のような比喩は、
-  一覧に並んだときに他と見分けが付かない。
-- ${
-    scope === "show"
-      ? "この番組を一言で表す「場」を選び、そこに何が置いてあるかで見せる。"
-      : "その話が実際に交わされている「場」を選び、そこに何が置いてあるかで見せる。タイトルを図解しない。"
-  }
-- **写す物は3つまで。** 一覧では 1〜2cm で表示される。それより多いと潰れる。
-- 3案はそれぞれ違う入り口にする。同じ絵の言い換えを並べない。
-- **文字は描かせない。** 案の中に看板や本の題名など、文字が読める物を入れない。
-- マイク・ヘッドホン・音波・ON AIR のランプは使わない。使われすぎていて見分けが付かない。
-- 材料に書いていないことを事実として決めつけない。
-
-## 各案に付けるもの
-- headline: どんな絵かが一言で分かる見出し(20文字以内)
-- scene: 実際に何が写っているか。物・場所・光を具体的に書く(80文字程度)。
-  そのまま画像生成への注文文に入れるので、これだけ読んで絵が浮かぶように書く。
-
-次の構造の JSON のみを出力する:
-{ "ideas": [{ "headline": string, "scene": string }] }`;
-
-  const res = await callWithModelFallback(
-    apiKey,
-    model,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      // 案出しなので散らす。固くすると似た絵が並ぶ
-      generationConfig: { response_mime_type: "application/json", temperature: 1.0 },
-    },
-    onStatus,
-    onModelChanged,
-    signal,
-  );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案", apiKey);
-
-  const data = await res.json();
-  const { text, finishReason } = answerFrom(data, "絵柄");
-
-  const parsed = extractJson(text, "絵柄", finishReason);
-  const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
-    .map((raw) => {
-      const o = (raw ?? {}) as Record<string, unknown>;
-      return {
-        headline: typeof o.headline === "string" ? o.headline.trim() : "",
-        scene: typeof o.scene === "string" ? o.scene.trim() : "",
-      };
-    })
-    .filter((i) => i.scene);
-
-  if (ideas.length === 0) throw new Error("絵柄が返りませんでした。もう一度お試しください。");
-  return ideas;
 }

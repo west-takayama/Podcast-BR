@@ -1,5 +1,5 @@
 /** Local-only diagnostics. Fixed stage names and numbers; never include request/response data. */
-export type TimingStage = 'upload' | 'activation' | 'generation-request' | 'retry-wait' | 'metadata-total' | 'generation-and-parsing' | 'conversion' | 'result-display';
+export type TimingStage = 'upload' | 'activation' | 'generation-request' | 'retry-wait' | 'metadata-total' | 'generation-and-parsing' | 'conversion' | 'result-display' | 'caption-conversion' | 'caption-audio-decode' | 'caption-alignment' | 'video-export' | 'video-audio-decode' | 'drive-save';
 type TimingEntry = {
   stage: TimingStage;
   durationMs: number;
