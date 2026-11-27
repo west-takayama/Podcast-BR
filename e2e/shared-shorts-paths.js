@@ -73,6 +73,12 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
       await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
       assert.deepEqual(await page.locator(".clip-result h3:visible").allTextContents(), ["冒頭の候補", "二番目の候補"]);
       assert.equal(await page.locator(".clip-result a[download]:visible").count(), 2);
+      await page.getByText("Googleドライブへ保存", { exact: true }).click();
+      await page.getByRole("button", { name: "設定でGoogle Drive連携を開く" }).click();
+      await page.getByRole("heading", { name: "Google Drive連携" }).waitFor();
+      await page.getByRole("button", { name: "保存して閉じる" }).click();
+      assert.equal(await page.locator(".clip-result a[download]:visible").count(), 2);
+
     };
 
     await page.getByRole("button", { name: /先に字幕を作って確認/ }).click();

@@ -44,7 +44,7 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
     await page.waitForTimeout(1200);
   }
   // 番組の設定を書き込む(手で書いた、作り直せない類いのもの)
-  const nameBox = page.locator("input[type=text]").first();
+  const nameBox = page.getByLabel(/番組名/);
   if (await nameBox.count()) await nameBox.fill("ブリッジラジオ");
   const areas = page.locator("textarea");
   if (await areas.count()) await areas.first().fill("30代2人の雑談番組。西武ライオンズの話が多い");
@@ -125,7 +125,7 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   console.log("  読み込みの結果:", note2.replace(/\s+/g, " ").slice(0, 90));
   await p2.click("nav button:has-text('設定')");
   await p2.waitForTimeout(800);
-  const name2 = await p2.locator("input[type=text]").first().inputValue().catch(() => "");
+  const name2 = await p2.getByLabel(/番組名/).inputValue().catch(() => "");
   const ctx2 = await p2.locator("textarea").first().inputValue().catch(() => "");
   const key2 = await p2.locator("input[type=password]").first().inputValue().catch(() => "");
   console.log("  戻った番組名:", name2 || "(空)");

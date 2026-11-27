@@ -153,14 +153,14 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
   console.log("\n=== 5) 設定の往復 ===");
   await page.locator("nav button, .tabs button").filter({ hasText: "設定" }).first().click();
   await page.waitForTimeout(500);
-  const nameBox = page.locator("input[type=text]").first();
+  const nameBox = page.getByLabel(/番組名/);
   await nameBox.fill("巡回ラジオ");
   await page.waitForTimeout(300);
   await page.reload();
   await page.waitForTimeout(900);
   await page.locator("nav button, .tabs button").filter({ hasText: "設定" }).first().click();
   await page.waitForTimeout(600);
-  const kept = await page.locator("input[type=text]").first().inputValue();
+  const kept = await page.getByLabel(/番組名/).inputValue();
   console.log("  番組名が残ったか:", kept || "(空)");
   if (kept !== "巡回ラジオ") note("設定", `番組名が残っていない(${kept})`);
 

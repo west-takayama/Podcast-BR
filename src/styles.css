@@ -702,3 +702,8 @@ video.card-preview { background: #000; }
 button.primary.shorts-all-generate { background: #ffd400; color: #141414; }
 button.primary.shorts-all-generate:active { background: #e7bc00; }
 .shorts-asset-picker { min-height: 44px; max-width: 100%; }
+
+.drive-settings fieldset { border: 0; min-inline-size: 0; padding: 0; margin: 0; }
+.drive-settings a { display: inline-flex; align-items: center; min-height: 44px; }
+.drive-settings fieldset a { display: flex; width: fit-content; }
+.drive-settings input { font-size: 16px; }
