@@ -102,3 +102,21 @@ const swapped = displayCues(checked, swapSpeakerNames(people, "person-1", "perso
 assert.equal(swapped[0].speaker, "ゲスト");
 assert.equal(swapped[0].speakerColor, rendered[0].speakerColor);
 console.log("caption-alignment: OK");
+
+const { archivedCaptionCues } = await import("../src/lib/video/archivedCaptions");
+const { readEpisodeDraft, saveEpisodeDraft } = await import("../src/lib/video/episodeCaptionCache");
+const transcript = [
+  { time: "00:01.000", text: "冒頭", speaker: "A" },
+  { time: "00:12.250", text: "区間内", speaker: "B" },
+  { time: "00:15.000", text: "境界", speaker: "A" },
+  { time: "00:40.000", text: "後半", speaker: "C" },
+];
+const archived = archivedCaptionCues(transcript, 12, 15, 40);
+assert.deepEqual(archived?.map(cue => [cue.startMs, cue.endMs, cue.speakerId, cue.needsReview]), [[250, null, "B", true]]);
+assert.equal(archivedCaptionCues(transcript.slice(0, 2), 12, 25, 40), null, "truncated transcript must not replace short transcription");
+assert.equal(archivedCaptionCues(transcript, 19, 24, 40), null, "no stored utterance in this range");
+saveEpisodeDraft("archived-test", "[12,15]", archived!);
+assert.equal(readEpisodeDraft("archived-test", "[12,15]"), archived);
+assert.equal(readEpisodeDraft("other-episode", "[12,15]"), undefined);
+assert.equal(readEpisodeDraft("archived-test", "[13,15]"), undefined);
+console.log("archived captions and exact-range episode cache: OK");

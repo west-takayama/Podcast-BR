@@ -67,7 +67,7 @@ export default function HistoryPanel({
 }: Props) {
   const [records, setRecords] = useState<EpisodeRecord[] | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
+  const [openAudioUrl, setOpenAudioUrl] = useState<{ blob: Blob; url: string }>();
   const [backupNote, setBackupNote] = useState("");
   const [backedUpAt, setBackedUpAt] = useState<number | null>(() => lastBackupAt());
   const [confirming, setConfirming] = useState<"all" | "audio" | null>(null);
@@ -89,20 +89,16 @@ export default function HistoryPanel({
     refresh();
   }, []);
 
-  // 開いた履歴の音声だけ Blob URL を作り、閉じる/離脱時に解放する
+  const openAudio = records?.find(record => record.id === openId)?.audio;
   useEffect(() => {
-    if (!openId || !records) return;
-    const record = records.find((r) => r.id === openId);
-    if (!record?.audio || audioUrls[openId]) return;
-    const url = URL.createObjectURL(record.audio);
-    setAudioUrls((prev) => ({ ...prev, [openId]: url }));
-  }, [openId, records, audioUrls]);
-
-  useEffect(() => {
-    return () => {
-      Object.values(audioUrls).forEach(URL.revokeObjectURL);
-    };
-  }, [audioUrls]);
+    if (!openAudio) {
+      setOpenAudioUrl(undefined);
+      return;
+    }
+    const url = URL.createObjectURL(openAudio);
+    setOpenAudioUrl({ blob: openAudio, url });
+    return () => URL.revokeObjectURL(url);
+  }, [openAudio]);
 
   // フックは早期 return より前に置く(React のフックの規則)
   const found = useMemo(
@@ -114,11 +110,6 @@ export default function HistoryPanel({
     setRemoving(null);
     await deleteEpisode(id);
     if (openId === id) setOpenId(null);
-    setAudioUrls((prev) => {
-      if (prev[id]) URL.revokeObjectURL(prev[id]);
-      const { [id]: _removed, ...rest } = prev;
-      return rest;
-    });
     refresh();
   };
 
@@ -243,8 +234,6 @@ export default function HistoryPanel({
                 onClick={async () => {
                   if (confirming === "audio") await dropAllAudio();
                   else await deleteAllEpisodes();
-                  Object.values(audioUrls).forEach(URL.revokeObjectURL);
-                  setAudioUrls({});
                   setOpenId(null);
                   setConfirming(null);
                   refresh();
@@ -408,7 +397,11 @@ export default function HistoryPanel({
                     prev?.map((x) => (x.id === r.id ? { ...x, chosenTitle: title } : x)) ?? prev,
                   );
                 }}
-                audioUrl={audioUrls[r.id]}
+                audioUrl={openAudioUrl?.blob === r.audio ? openAudioUrl?.url : undefined}
+                shortsSource={r.audio}
+                shortsEpisodeId={r.id}
+                shortsUploaded={r.uploaded}
+                shortsDuration={r.durationSec}
                 fileName={r.originalAudio ? r.fileName : r.fileName.replace(/\.[a-z0-9]+$/i, ".mp3")}
                 originalAudio={r.originalAudio}
                 showName={showName}

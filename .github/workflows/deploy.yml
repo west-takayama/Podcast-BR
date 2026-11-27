@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main, development/ai-studio-v2.1, development/ai-studio-v2.2]
+    branches: [main, development/ai-studio-v2.1, development/ai-studio-v2.2, development/ai-studio-v2.2-shared-shorts]
   workflow_dispatch:
 
 permissions:

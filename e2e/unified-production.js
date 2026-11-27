@@ -115,7 +115,7 @@ const candidates = {
         await previewAtFirst();
         await namesAtStart.getByText("たそ", { exact: true }).waitFor();
         assert.equal(requestCount(), beforeLink);
-        await page.getByRole("button", { name: /選択した動画をまとめて生成/ }).click();
+        await page.getByRole("button", { name: /すべてのショート動画をまとめて生成/ }).click();
         await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
         const videos = page.locator("video.card-preview");
         assert.equal(await videos.count(), 2);

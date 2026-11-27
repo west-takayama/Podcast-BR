@@ -43,10 +43,9 @@ const FONT_STACK = `-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sa
 
 export interface ClipOptions {
   /**
-   * 音声の入り口。MP3(音声だけの回)か、動画ファイルそのもの。
+   * 音声の入り口は保存素材のBlob。動画なら映像も使う。
    * 動画を渡した場合は、その映像を切り出して縦型に収める。
    */
-  mp3?: ArrayBuffer;
   /** 動画から作る場合の元ファイル。映像と音声の両方をここから取る。 */
   videoFile?: Blob;
   audioFile?: Blob;
@@ -59,9 +58,7 @@ export interface ClipOptions {
   accent: string;
   /** 背景に敷く画像(取り込んだ写真)。無ければ暗い単色。 */
   background?: CanvasImageSource & { width: number; height: number };
-  /** 字幕。区間に重なるものだけ使う。 */
-  transcript?: TranscriptSegment[] | null;
-  /** Already aligned to the clip clock. Never run the legacy character redistribution on these. */
+  /** Already aligned to the clip clock by the shared editor. */
   captionCues?: DisplayCue[];
   onProgress?: (fraction: number) => void;
   /** 映像が端末で復号できず、単色の背景で作ることになったときに呼ばれる。 */
@@ -634,6 +631,31 @@ export async function inspectVideo(file: Blob): Promise<{ hasVideo: boolean; dec
   }
 }
 
+/** Read container metadata without decoding or sending the stored episode. */
+export async function inspectClipSource(file: Blob): Promise<{ durationSec: number; hasVideo: boolean }> {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const track = await input.getPrimaryAudioTrack();
+    if (!track || !(await track.canDecode())) throw new Error("音声を読み取れませんでした");
+    const durationSec = await track.computeDuration();
+    if (!(durationSec > 0) || !Number.isFinite(durationSec)) throw new Error("音声の長さを読み取れませんでした");
+    const video = await input.getPrimaryVideoTrack();
+    return { durationSec, hasVideo: !!video && await video.canDecode().catch(() => false) };
+  } finally {
+    input.dispose();
+  }
+}
+
+export async function captionActivityForRange(file: Blob, startSec: number, endSec: number, signal?: AbortSignal) {
+  const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(file) });
+  try {
+    const { buffer } = await decodeRange(input, startSec, endSec, signal);
+    return detectActivity(Array.from({ length: buffer.numberOfChannels }, (_, ch) => buffer.getChannelData(ch)), buffer.sampleRate);
+  } finally {
+    input.dispose();
+  }
+}
+
 /** 表紙(カバー画像)の候補。選ぶための小さな絵と、その時刻。 */
 export interface CoverCandidate {
   atSec: number;
@@ -911,7 +933,8 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
 
 
   onProgress?.(0.02);
-  const source = opts.videoFile ?? opts.audioFile ?? new Blob([opts.mp3!], { type: "audio/mpeg" });
+  const source = opts.videoFile ?? opts.audioFile;
+  if (!source) throw new Error("書き出す素材がありません。");
   const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(source) });
   let output: Output | undefined;
   let canvas: HTMLCanvasElement | undefined;
@@ -929,11 +952,7 @@ export async function renderClip(opts: ClipOptions): Promise<Blob> {
     if (signal?.aborted) throw new DOMException("中止しました", "AbortError");
     onProgress?.(0.25);
 
-    const captions = opts.captionCues ?? captionsForRange(opts.transcript, startSec, endSec, levels).map((c) => ({
-      ...c,
-      atSec: c.atSec - startSec,
-      endSec: c.endSec - startSec,
-    }));
+    const captions = opts.captionCues ?? [];
 
     canvas = document.createElement("canvas");
     canvas.width = CLIP_WIDTH;

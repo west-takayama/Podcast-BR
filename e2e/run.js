@@ -17,6 +17,7 @@ const PORT = process.env.E2E_PORT || "4218";
 const ALL = [
   "unified-production",
   "shorts-batch",
+  "shared-shorts-paths",
   "ai-studio",    // AI専用変換・元音声保持・再開
   "load",         // 起動の速さ
   "polish",       // 画面の寸法(はみ出し・押せる大きさ)

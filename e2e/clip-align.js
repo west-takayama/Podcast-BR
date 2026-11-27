@@ -122,6 +122,7 @@ async function countBeeps(url) {
   console.log(`\n=== 「${RANGE.start}〜${RANGE.end}」を切り抜く ===`);
   const studio = page.locator(".card").filter({ has: page.locator(".clip-trim") }).first();
   await studio.scrollIntoViewIfNeeded();
+  await studio.getByRole("checkbox", { name: /字幕を入れる/ }).uncheck();
   const btn = studio.locator("button").filter({ hasText: "縦型" }).first();
   if (!(await btn.count())) {
     console.log("  ボタン:", (await studio.locator("button").allInnerTexts()).join(" / "));
@@ -135,6 +136,7 @@ async function countBeeps(url) {
     } else {
       const src = await page.locator("video.card-preview").first().getAttribute("src");
       const got = await page.evaluate(countBeeps, src);
+      await page.locator("video.card-preview").first().evaluate(video => { video.preload = "metadata"; video.load(); });
       await page.waitForFunction(() => document.querySelector("video.card-preview")?.videoWidth > 0);
       const dimensions = await page.locator("video.card-preview").first().evaluate(video => [video.videoWidth, video.videoHeight]);
       if (dimensions[0] !== 1080 || dimensions[1] !== 1920) fails.push(`縦型寸法が違う(${dimensions.join("x")})`);
