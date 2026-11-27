@@ -796,7 +796,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 2.3.1</h1>
+        <h1>🎙️ AI STUDIO 2.4</h1>
         <nav className="tabs">
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
             作成

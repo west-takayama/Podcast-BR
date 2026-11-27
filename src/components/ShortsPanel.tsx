@@ -7,6 +7,7 @@ import { alignCues, formatCueTime, type CaptionCue, type SpeechSpan } from "../l
 import { addSpeaker, displayCues, swapSpeakerNames, type Speaker } from "../lib/video/speakers";
 import CopyButton from "./CopyButton";
 import { listEpisodes, saveEpisode } from "../lib/history";
+import { withDeadline } from "../lib/deadline";
 import { measureStage } from "../lib/timing";
 import { ShortsAudioCache } from "../lib/shortsCache";
 import ClipDetails from "./ClipDetails";
@@ -20,6 +21,7 @@ import {
   type TranscriptSegment,
   isAudioUsable,
   transcribeRange,
+  useDirectCaptionAudio,
   uploadEpisodeAudio,
   type Clip,
 } from "../lib/gemini";
@@ -127,6 +129,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
   const [covers, setCovers] = useState<Record<number, Cover>>({});
   const [withCaptions, setWithCaptions] = useState(!existing || !!settings.apiKey || !!existing.transcript?.length);
+  const [resolution, setResolution] = useState<720 | 1080>(1080);
   const [cap, setCap] = useState<ClipCapability | null | undefined>(undefined);
   const [shareStatus, setShareStatus] = useState("");
   const previousArchiveBackground = useRef(existing?.background);
@@ -441,7 +444,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
    * 「この区間の音声」だけを切り出して渡す。全編を聴かせて「12:34 から」と
    * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
    */
-  const buildCaptions = async (i: number, signal: AbortSignal, reportProgress: (fraction: number) => void = setProgress): Promise<CaptionCue[]> => {
+  const buildCaptions = async (i: number, signal: AbortSignal): Promise<CaptionCue[]> => {
     const draft = captions[i];
     if (draft) return draft;
     const file = fileRef.current!;
@@ -458,9 +461,11 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
     if (archived) {
       setStatus("保存済み字幕を音声に合わせています…");
-      const activity = await captionActivityForRange(file, startSec, endSec, signal);
+      const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
       signal.throwIfAborted();
-      const aligned = alignCues(archived, activity, durationMs);
+      const aligned = await measureStage("caption-alignment", async () => alignCues(archived, activity, durationMs));
+      rangeDrafts.current.set(rangeKey, aligned);
+      if (rangeDrafts.current.size > 4) rangeDrafts.current.delete(rangeDrafts.current.keys().next().value!);
       setCaptions(prev => ({ ...prev, [i]: aligned }));
       return aligned;
     }
@@ -472,8 +477,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     }
     if (!settings.apiKey) throw new Error("保存済みの字幕が区間全体にありません。Gemini APIキーを設定するか、字幕をオフにしてください。");
     setStatus("この区間の音声を取り出しています…");
-    const audio = await rangeCacheRef.current.get(rangeKey, settings.apiKey, async () => {
-      const prepared = await measureStage("conversion", () => prepareCaptionAudio(file, startSec, endSec, signal));
+    const extract = async () => {
+      const prepared = await measureStage("caption-conversion", () => prepareCaptionAudio(file, startSec, endSec, signal));
       signal.throwIfAborted();
       captionActivity.current.set(rangeKey, prepared.activity);
       if (captionActivity.current.size > 4) {
@@ -481,7 +486,11 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         if (oldest !== undefined) captionActivity.current.delete(oldest);
       }
       return prepared.wav;
-    }, bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, reportProgress, signal, "audio/wav"));
+    };
+    const audio = useDirectCaptionAudio(durationMs)
+      ? { wav: await rangeCacheRef.current.getBytes(rangeKey, extract) }
+      : await rangeCacheRef.current.get(rangeKey, settings.apiKey, extract, bytes =>
+        withDeadline(signal, 45_000, deadline => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, undefined, deadline, "audio/wav")));
     signal.throwIfAborted();
     const raw = await transcribeRange({
       apiKey: settings.apiKey,
@@ -494,7 +503,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       signal,
     });
     signal.throwIfAborted();
-    const aligned = alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs);
+    setStatus("字幕を調整しています…");
+    const aligned = await measureStage("caption-alignment", async () => alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs));
     rangeDrafts.current.set(rangeKey, aligned);
     const savedId = existing?.episodeId ?? newEpisodeId.current;
     if (savedId) saveEpisodeDraft(savedId, rangeKey, aligned);
@@ -508,7 +518,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
   /** 書き出す前に字幕を確認・修正できるようにする。焼き込んでからでは直せないため。 */
   const prepareCaptions = async () => {
-    if (!fileRef.current || !clips[selected]) return;
+    if (!fileRef.current || !clips[selected] || abortRef.current) return;
     setError("");
     setPhase("captioning");
     setProgress(0);
@@ -552,9 +562,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const file = fileRef.current!;
     const clip = clips[i];
     const { startSec, endSec } = rangeOf(i);
-    const segments = withCaptions ? await buildCaptions(i, signal, fraction => setProgress(fraction * 0.2)) : [];
+    const segments = withCaptions ? await buildCaptions(i, signal) : [];
     signal.throwIfAborted();
-    setProgress(0.2);
     const captionCues = displayCues(segments, speakers, speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
@@ -567,7 +576,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     let blob: Blob;
     try {
       signal.throwIfAborted();
-      blob = await renderClip({
+      blob = await measureStage("video-export", () => renderClip({
         ...(hasVideo ? { videoFile: file } : { audioFile: file }),
         background: bitmap ?? existing?.background ?? undefined,
         logo: logo ?? undefined,
@@ -577,10 +586,15 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         showName: settings.prompt.showName || "BRIDGE RADIO",
         accent: settings.accentColor,
         captionCues,
-        onProgress: fraction => setProgress(0.2 + fraction * 0.8),
         signal,
         capability: cap ?? undefined,
-      });
+        resolution,
+      }), undefined, cap ? {
+        height: resolution === 720 ? 1280 : 1920,
+        video: cap.videoCodec,
+        audio: cap.audioCodec,
+        seconds: Math.round((endSec - startSec) * 1000) / 1000,
+      } : undefined);
     } finally {
       bitmap?.close();
       logo?.close();
@@ -734,6 +748,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
   const busy =
     phase === "extracting" || phase === "finding" || phase === "rendering" || phase === "captioning";
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  useEffect(() => {
+    setElapsedSeconds(0);
+    if (!busy) return;
+    const start = performance.now();
+    const timer = window.setInterval(() => setElapsedSeconds(Math.floor((performance.now() - start) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
   const { startSec, endSec } = rangeOf(selected);
   const lines = captions[selected];
   const localSpeakerIds = [...new Set(lines?.map(cue => cue.speakerId))].sort();
@@ -803,13 +825,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
           <h2>⏳ {batch?.cancelling ? "中断しています…" : status || "処理中…"}</h2>
           {batch && <p role="status">
             {batch.position}本目 / 全{batch.total}本 · {clips[batch.clipIndex].hook || `候補${batch.clipIndex + 1}`}
-            <br />全体 {Math.floor(overallProgress * 100)}%
+
           </p>}
+          <p>経過 {elapsedSeconds}秒</p>
           <p className="muted">{fileInfo}</p>
-          <div className="progress-track" role="progressbar" aria-label={batch ? "生成全体の進捗" : "進捗"}
+          {phase === "extracting" && <div className="progress-track" role="progressbar" aria-label={batch ? "生成全体の進捗" : "進捗"}
             aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(overallProgress * 100)}>
             <div className="progress-fill" style={{ width: `${Math.round(overallProgress * 100)}%` }} />
-          </div>
+          </div>}
           {(batch || abortRef.current) && <button
             type="button"
             disabled={batch?.cancelling}
@@ -932,6 +955,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
           {cap && (
             <>
+              <label>
+                次の書き出しの画質
+                <select value={resolution} onChange={event => setResolution(event.target.value === "720" ? 720 : 1080)}>
+                  <option value={1080}>1080 × 1920（標準）</option>
+                  <option value={720}>720 × 1280（軽量）</option>
+                </select>
+              </label>
               {withCaptions && !lines && (
                 <button onClick={prepareCaptions}>📝 先に字幕を作って確認する</button>
               )}

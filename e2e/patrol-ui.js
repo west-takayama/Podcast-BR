@@ -172,7 +172,7 @@ const MODELS = { models: [{ name: "models/gemini-3-flash", supportedGenerationMe
     await page.waitForTimeout(1200);
     const has = await page.locator(".card").filter({ hasText: "カバー画像の注文文" }).count();
     console.log("  過去回にカバーの注文文:", has ? "出る" : "出ない");
-    if (!has) note("履歴", "過去回にカバーの注文文が出ない");
+    if (has) note("履歴", "廃止したカバー注文文が出ている");
     const titles = await page.locator(".title-option").count();
     console.log("  タイトル案:", titles, "件");
   } else {

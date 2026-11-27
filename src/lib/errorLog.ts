@@ -12,7 +12,7 @@ const MAX = 30;
 
 export interface ErrorEntry {
   at: number;
-  /** 何をしていたときか(変換・お題・絵柄など)。 */
+  /** 何をしていたときか(変換・お題など)。 */
   what: string;
   /** 画面に出した文言。 */
   message: string;
