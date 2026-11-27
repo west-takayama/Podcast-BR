@@ -1,3 +1,4 @@
+import type { SplitCaptionDraft } from "../lib/captionResponse";
 import DriveSavePanel from "./DriveSavePanel";
 import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
 import { archivedCaptionCues } from "../lib/video/archivedCaptions";
@@ -124,6 +125,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [speakerLinks, setSpeakerLinks] = useState<Record<number, Record<string, string>>>({});
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
   const newEpisodeId = useRef<string>();
+  const splitDrafts = useRef(new Map<string, SplitCaptionDraft>());
   const rangeDrafts = useRef(new Map<string, CaptionCue[]>());
   const [results, setResults] = useState<Record<number, Result>>({});
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
@@ -360,6 +362,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     setSpeakerLinks({});
     captionActivity.current.clear();
     rangeDrafts.current.clear();
+    splitDrafts.current.clear();
     newEpisodeId.current = undefined;
     for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
@@ -487,24 +490,28 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       }
       return prepared.wav;
     };
-    const audio = useDirectCaptionAudio(durationMs)
-      ? { wav: await rangeCacheRef.current.getBytes(rangeKey, extract) }
+    const model = settings.captionModel || settings.model;
+    const splitKey = JSON.stringify([rangeKey, model, settings.prompt.glossary]);
+    let parts = splitDrafts.current.get(splitKey);
+    if (!parts) {
+      parts = { parts: new Map() };
+      splitDrafts.current.set(splitKey, parts);
+      if (splitDrafts.current.size > 4) splitDrafts.current.delete(splitDrafts.current.keys().next().value!);
+    }
+    const getWav = () => rangeCacheRef.current.getBytes(rangeKey, extract);
+    const audio = parts.model || useDirectCaptionAudio(durationMs)
+      ? { wav: await getWav() }
       : await rangeCacheRef.current.get(rangeKey, settings.apiKey, extract, bytes =>
         withDeadline(signal, 45_000, deadline => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, undefined, deadline, "audio/wav")));
     signal.throwIfAborted();
     const raw = await transcribeRange({
-      apiKey: settings.apiKey,
-      model: settings.model,
-      audio,
-      durationMs,
-      glossary: settings.prompt.glossary,
-      onStatus: setStatus,
-      onModelChanged,
-      signal,
+      apiKey: settings.apiKey, model, audio, durationMs, glossary: settings.prompt.glossary,
+      onStatus: setStatus, signal, getWav, splitDrafts: parts,
     });
+    splitDrafts.current.delete(splitKey);
     signal.throwIfAborted();
     setStatus("字幕を調整しています…");
-    const aligned = await measureStage("caption-alignment", async () => alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs));
+    const aligned = await measureStage("caption-alignment", async () => alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs, true));
     rangeDrafts.current.set(rangeKey, aligned);
     const savedId = existing?.episodeId ?? newEpisodeId.current;
     if (savedId) saveEpisodeDraft(savedId, rangeKey, aligned);
@@ -564,6 +571,9 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const { startSec, endSec } = rangeOf(i);
     const segments = withCaptions ? await buildCaptions(i, signal) : [];
     signal.throwIfAborted();
+    if (segments.some(cue => cue.startMs === null || cue.endMs === null)) {
+      throw new Error("時刻が未確定の字幕があります。字幕の下書きで時刻を入力してから、書き出しを再試行してください。");
+    }
     const captionCues = displayCues(segments, speakers, speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
@@ -983,6 +993,9 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       {lines && !busy && withCaptions && (
         <div className="card">
           <h2>📝 字幕の下書き</h2>
+          {lines.some(cue => /^[12]:/.test(cue.speakerId)) && (
+            <p>分割で作った字幕です。区間をまたぐ話者名と、区間の境目を確認してください。</p>
+          )}
           <p className="muted">
             聞き間違いがあればここで直せます。直した内容がそのまま動画に焼き込まれます。
             <br />
@@ -1191,6 +1204,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
               setSpeakerLinks({});
               captionActivity.current.clear();
               rangeDrafts.current.clear();
+              splitDrafts.current.clear();
               newEpisodeId.current = undefined;
               for (const u of urlsRef.current) URL.revokeObjectURL(u);
               urlsRef.current.clear();
