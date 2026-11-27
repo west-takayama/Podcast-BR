@@ -38,6 +38,7 @@ export interface EpisodeRecord {
   removedSec: number;
   meta: EpisodeMeta;
   chosenTitle: string;
+  originalAudio?: boolean;
   audio?: Blob; // 古い履歴では削除されている場合がある
   /** 全文書き起こし。作った回だけ入る。 */
   transcript?: TranscriptSegment[];
@@ -160,7 +161,8 @@ export interface PendingConversion {
   mp3: Blob;
   /** AI 送信用の 32kbps モノラル。 */
   aiMp3: Blob;
-  report: AudioReport;
+  originalAudio?: boolean;
+  report: AudioReport | null;
   /** アップロードまで済んでいれば、復帰後の送信も省ける。 */
   uploaded?: UploadedAudio;
   /** 変換前に打ち込んだ出演者。開き直しても消えないように控える。 */

@@ -4,7 +4,7 @@ export type Stage = "analyze" | "process" | "upload" | "generate";
 
 export const STAGE_LABELS: Record<Stage, string> = {
   analyze: "音声を解析中",
-  process: "整音・MP3変換中",
+  process: "音声を変換中",
   upload: "音声をアップロード中",
   generate: "タイトル・説明文を生成中",
 };

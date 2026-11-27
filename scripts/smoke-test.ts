@@ -1934,7 +1934,7 @@ function makeWav(bits: 16 | 24 | 32, float: boolean, channels: number, seconds =
     const day = say(perDay);
     check("1分の上限: 自動で試したことを伝える", min.includes("自動") && min.includes("別のモデル"),
       min.slice(0, 50));
-    check("1分の上限: 変換が無駄でないと伝える", min.includes("変換済みMP3"));
+    check("1分の上限: 変換が無駄でないと伝える", min.includes("準備済みの音声"));
     check("1日の上限: 押し直しても戻らないと伝える", day.includes("戻りません"), day.slice(0, 40));
     check("1日の上限: モデルを替える道を示す", day.includes("別のモデル"));
     check("1日の上限で「1分待って」と言わない", !day.includes("1分ほど待って"));

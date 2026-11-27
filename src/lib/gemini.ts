@@ -4,6 +4,7 @@
 
 import { buildPrompt, formatTimecode, type PromptConfig, type PromptContext } from "./prompt";
 import { parseTimestamp } from "./id3";
+import { measureStage, recordTiming } from "./timing";
 
 const API_BASE = "https://generativelanguage.googleapis.com";
 
@@ -150,15 +151,19 @@ export interface SocialPosts {
   newsletter: string;
 }
 
-/** 縦型ショート動画にする候補。バズの入り口はここ。 */
+/** 縦型ショート動画にする候補。評価は編集支援用。 */
 export interface Clip {
   /** "MM:SS" */
   start: string;
   end: string;
   /** 動画の1行目に大きく出す見出し。 */
   hook: string;
-  /** なぜ伸びると思うか。選び直しの判断に使う。 */
+  /** 選定理由。再生数の予測ではない。 */
   why: string;
+  scores?: { interest: number; insight: number; hook: number; empathy: number; completeness: number };
+  socialPost?: string;
+  hashtags?: string[];
+  needsReview?: boolean;
 }
 
 export interface EpisodeMeta {
@@ -178,6 +183,7 @@ export interface TranscriptSegment {
   time: string;
   speaker: string;
   text: string;
+  emphasis?: string[];
 }
 
 /**
@@ -230,7 +236,7 @@ function xhrUpload(
     xhr.onerror = () =>
       reject(
         new Error(
-          "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
+          "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。準備済みの音声は保持しています。",
         ),
       );
     xhr.ontimeout = () => reject(new Error("アップロードがタイムアウトしました"));
@@ -281,17 +287,17 @@ async function uploadFile(
   for (let i = 0; i < RETRY_WAIT_MS.length && TRANSIENT_STATUS.includes(status); i++) {
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
     onStatus?.(`Gemini が混雑しています。${sec}秒待って送信し直します(${i + 1}/${RETRY_WAIT_MS.length})…`);
-    await sleep(RETRY_WAIT_MS[i], signal);
+    await measureStage("retry-wait", () => sleep(RETRY_WAIT_MS[i], signal));
     ({ status, text } = await send());
   }
 
   // 送信も1分あたりの上限に当たることがある。数十MB を上限ひとつで捨てない
   if (status === 429 && !isDailyQuota(text)) {
-    await countdown(
+    await measureStage("retry-wait", () => countdown(
       retryDelayMs(text),
       (left) => onStatus?.(`無料枠の1分あたりの上限です。${left}秒待って送信し直します…`),
       signal,
-    );
+    ));
     ({ status, text } = await send());
   }
 
@@ -301,7 +307,7 @@ async function uploadFile(
     }
     if (status === 413) {
       throw new Error(
-        "音声ファイルが大きすぎてアップロードできませんでした。設定で無音カットを有効にするか、エピソードを分割してください。",
+        "音声ファイルが大きすぎてアップロードできませんでした。エピソードを短い音声に分割して選び直してください。",
       );
     }
     if (TRANSIENT_STATUS.includes(status)) {
@@ -310,7 +316,7 @@ async function uploadFile(
           "数分待ってから「生成だけやり直す」を押してください。",
       );
     }
-    throw new Error(`音声のアップロードに失敗しました (${status}): ${text.slice(0, 200)}`);
+    throw new Error(`音声のアップロードに失敗しました (${status}): ${reasonFrom(redactApiError(text, apiKey))}`);
   }
   const info = JSON.parse(text);
   const file = info.file as UploadedFile | undefined;
@@ -331,7 +337,7 @@ async function waitUntilActive(
     const info = await res.json();
     if (info.state === "ACTIVE") return info.uri as string;
     if (info.state === "FAILED") throw new Error("Gemini側での音声処理に失敗しました");
-    await new Promise((r) => setTimeout(r, 2000));
+    await sleep(2000, signal);
   }
   throw new Error("音声処理がタイムアウトしました");
 }
@@ -370,6 +376,7 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
     if (!c) continue;
     let start = toSeconds(c.start);
     let end = toSeconds(c.end);
+    const originalStart = start, originalEnd = end;
     if (start === null) continue;
     // 終了が無い・逆転している場合は、長さから決め直す
     if (end === null || end <= start) end = start + 45;
@@ -379,7 +386,17 @@ function normalizeClips(raw: unknown, durationSec?: number): Clip[] {
     if (end - start > MAX_CLIP_SEC) end = start + MAX_CLIP_SEC;
     if (end - start < MIN_CLIP_SEC) continue;
 
+    if (out.some(item => item.start === formatTimecode(start) && item.end === formatTimecode(end))) continue;
+    const scores = c.scores as Clip['scores'];
+    const validScores = scores && typeof scores === 'object' &&
+      Object.entries({ interest: 25, insight: 25, hook: 20, empathy: 15, completeness: 15 })
+        .every(([key, max]) => Number.isFinite(scores[key as keyof typeof scores]) &&
+          scores[key as keyof typeof scores] >= 0 && scores[key as keyof typeof scores] <= max);
     out.push({
+      ...(validScores ? { scores: { interest: scores.interest, insight: scores.insight, hook: scores.hook, empathy: scores.empathy, completeness: scores.completeness } } : {}),
+      ...(typeof c.socialPost === 'string' ? { socialPost: c.socialPost.trim() } : {}),
+      ...(Array.isArray(c.hashtags) ? { hashtags: [...new Set(c.hashtags.filter((h): h is string => typeof h === 'string').map(h => '#' + h.replace(/^#+/, '').replace(/\s+/g, '')).filter(h => h.length > 1))].slice(0, 5) } : {}),
+      ...(start !== originalStart || end !== originalEnd ? { needsReview: true } : {}),
       start: formatTimecode(start),
       end: formatTimecode(end),
       hook: typeof c.hook === "string" ? c.hook : "",
@@ -494,12 +511,12 @@ export async function uploadEpisodeAudio(
   signal?: AbortSignal,
 ): Promise<UploadedAudio> {
   onStatus("音声をアップロード中…");
-  const file = await uploadFile(apiKey, mp3, onProgress, signal, onStatus);
+  const file = await measureStage("upload", () => uploadFile(apiKey, mp3, onProgress, signal, onStatus));
 
   let uri = file.uri;
   if (file.state !== "ACTIVE") {
     onStatus("音声を解析待ち…");
-    uri = await waitUntilActive(apiKey, file.name, signal);
+    uri = await measureStage("activation", () => waitUntilActive(apiKey, file.name, signal));
   }
   // Files API の保持期間は48時間。この間は送り直さずに作り直せる
   return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: mp3.byteLength };
@@ -555,23 +572,26 @@ export async function findClips(opts: {
   const prompt = `添付の音声を聴いて、縦型ショート動画(TikTok / Reels / YouTube Shorts)に
 切り出す区間を選んでください。
 
-選ぶ基準(この順に強い):
-1. 笑いが起きている、声が跳ねている
-2. 言い切っている・断言している
-3. 意外な事実や数字が出てくる
-4. 話が急に転換して引きが立つ
+番組 BRIDGE RADIO の価値は「面白さ」と「新しい価値観」。候補を次の基準で内部評価し、総合的に優れた順に返す:
+- 会話の面白さ・自然な掛け合い (25点)
+- 新しい価値観・気づき (25点)
+- 冒頭の引き (20点)
+- 共感や対話を促す内容 (15点)
+- 単体での話の完成度 (15点)
+笑いだけでなく、静かでも考えさせる会話を拾う。長い素材では内容の異なる候補を優先し、同じ話の重複を避ける。点数は編集判断用であり、再生数の予測ではない。
 
 条件:
 - **それ単体で完結して面白い**こと。前後の文脈が無いと意味が通らない箇所は選ばない。
 ${lengthRule}
-- **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。
+- **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。発言の途中で切らず、オチや結論、必要な応答まで含める。文脈を歪める編集や、音声にない内容を見出しにすることは禁止。
 - 候補が1つも思いつかない場合でも、いちばんましな区間を必ず1つは返す。
 - hook は動画の1行目に大きく出す見出し。20文字以内。続きを見たくなる言葉にし、
   答えは動画の中に残す。
-- why は「なぜ伸びると思うか」を20文字程度で。
+- why は選定理由を具体的に20文字程度で。再生数や拡散を予測しない。
+- scores は上記5基準の配点内で採点する。socialPost は実際の会話に基づくSNS投稿文を80文字程度、hashtags は関連するものを3個以内。
 
 次の構造の JSON のみを出力する:
-{"clips": [{"start": "MM:SS", "end": "MM:SS", "hook": string, "why": string}]}`;
+{"clips": [{"start": "MM:SS", "end": "MM:SS", "hook": string, "why": string, "scores": {"interest": number, "insight": number, "hook": number, "empathy": number, "completeness": number}, "socialPost": string, "hashtags": string[]}]}`;
 
   const res = await callWithModelFallback(
     apiKey,
@@ -591,7 +611,7 @@ ${lengthRule}
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "切り抜きの候補");
@@ -661,11 +681,12 @@ export async function transcribeRange(opts: {
 - 数字・固有名詞は聞こえたとおりに漢字/カタカナで書く(「にせんにじゅうご年」ではなく「2025年」)。
 - 句読点を入れる。読点は息継ぎの位置に置く。
 - 聞き取れない箇所は推測で埋めず「(聞き取り不明)」とする。
+- emphasis は各行の中に実在する重要語を最大2個。話者が不明なら「不明」とし、人物を推測しない。
 ${speakers.trim() ? `- 話者は次の呼び名を使う: ${speakers}` : "- 話者は A / B のように区別する。"}
-${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、似た音に聞こえてもこちらを優先する: ${glossary.trim()}` : ""}
+${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組でよく出る言葉なので、音声と一致するときだけ使用し、聞こえない語を補わない: ${glossary.trim()}` : ""}
 
 次の構造の JSON のみを出力する:
-{"segments": [{"time": string, "speaker": string, "text": string}]}`;
+{"segments": [{"time": string, "speaker": string, "text": string, "emphasis": string[]}]}`;
 
   const res = await callWithModelFallback(
     apiKey,
@@ -685,7 +706,7 @@ ${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "字幕の作成", apiKey);
 
   const data = await res.json();
   // 字幕は空でも先に進める。無音の範囲を選んだだけということがある
@@ -693,13 +714,19 @@ ${glossary?.trim() ? `- **次の言葉はこの表記で書く。** この番組
   if (!text.trim()) return [];
   try {
     const parsed = extractJson(text, "字幕") as { segments?: Record<string, unknown>[] };
-    return (parsed.segments ?? [])
-      .filter((s) => s && typeof s.text === "string" && (s.text as string).trim())
+    if (!Array.isArray(parsed.segments)) return [];
+    return parsed.segments
+      .filter((s) => s && typeof s.text === "string" && s.text.trim() &&
+        typeof s.time === 'string' && toSeconds(s.time) !== null &&
+        toSeconds(s.time)! >= startSec && toSeconds(s.time)! < endSec)
       .map((s) => ({
-        time: typeof s.time === "string" ? s.time : "",
-        speaker: typeof s.speaker === "string" ? s.speaker : "",
+        time: s.time as string,
+        speaker: typeof s.speaker === "string" ? s.speaker : "不明",
         text: (s.text as string).trim(),
-      }));
+        emphasis: Array.isArray(s.emphasis) ? [...new Set(s.emphasis.filter((word): word is string =>
+          typeof word === 'string' && word.length > 0 && (s.text as string).includes(word)))].slice(0, 2) : [],
+      })).sort((a, b) => toSeconds(a.time)! - toSeconds(b.time)!);
+
   } catch {
     return [];
   }
@@ -721,13 +748,14 @@ async function callWithModelFallback(
   onModelChanged?: (model: string) => void,
   signal?: AbortSignal,
 ): Promise<Response> {
+  let attempt = 0;
   const call = (id: string) =>
-    fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
+    measureStage("generation-request", () => fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }), ++attempt);
 
   // 混雑は**モデルごとに**起きる。同じモデルを待ち続けるより、空いている
   // モデルへ移るほうが早い(試験版なら特に。割り当てが細く、混雑と
@@ -769,7 +797,7 @@ async function callWithModelFallback(
     }
     const sec = Math.round(RETRY_WAIT_MS[i] / 1000);
     onStatus(`Gemini が混雑しています。${sec}秒待って自動で再試行します(${i + 1}/${RETRY_WAIT_MS.length})…`);
-    await sleep(RETRY_WAIT_MS[i], signal);
+    await measureStage("retry-wait", () => sleep(RETRY_WAIT_MS[i], signal));
     onStatus("再試行中…");
     res = await call(model);
   }
@@ -792,11 +820,11 @@ async function callWithModelFallback(
     if (!isDailyQuota(body)) {
       const moved = await tryAlternatives("上限に達したため");
       if (moved) return moved;
-      await countdown(
+      await measureStage("retry-wait", () => countdown(
         retryDelayMs(body),
         (left) => onStatus(`無料枠の1分あたりの上限です。${left}秒待って自動で試し直します…`),
         signal,
-      );
+      ));
       onStatus("再試行中…");
       res = await call(model);
     }
@@ -861,8 +889,18 @@ function answerFrom(
   );
 }
 
+/** Error text may echo request URLs or credentials. Redact before display, storage or truncation. */
+function redactApiError(body: string, apiKey?: string): string {
+  const exact = apiKey ? body.split(apiKey).join("[redacted]") : body;
+  return exact
+    .replace(/AIza[\w-]{20,}/g, "[redacted]")
+    .replace(/([?&](?:key|api_key)=)[^&\s"<>]+/gi, "$1[redacted]")
+    .replace(/((?:x-goog-api-key|api[_ -]?key)["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, "$1[redacted]");
+}
+
 /** 応答から Google 自身の説明だけを取り出す。JSON でないこともある。 */
 export function reasonFrom(body: string): string {
+  body = redactApiError(body);
   try {
     const parsed = JSON.parse(body) as { error?: { message?: unknown } };
     const message = parsed?.error?.message;
@@ -873,7 +911,8 @@ export function reasonFrom(body: string): string {
   return body.trim().slice(0, 200);
 }
 
-function throwForStatus(status: number, body: string, what: string): never {
+function throwForStatus(status: number, body: string, what: string, apiKey?: string): never {
+  body = redactApiError(body, apiKey);
   if (status === 400 && body.includes("API_KEY_INVALID")) {
     throw new Error("APIキーが無効です。設定画面でキーを確認してください。");
   }
@@ -886,9 +925,9 @@ function throwForStatus(status: number, body: string, what: string): never {
       daily
         ? "無料枠の1日あたりの上限に達しました。しばらく押し直しても戻りません。" +
           "設定画面で別のモデルに替えると、そのモデルぶんの枠を使えます。" +
-          `変換済みMP3はそのまま使えます。(${reasonFrom(body)})`
+          `準備済みの音声はそのまま使えます。(${reasonFrom(body)})`
         : "無料枠の1分あたりの上限に達しました。別のモデルを試し、1分ほど待って自動で投げ直しましたが、" +
-          "まだ上限のままでした。少し間を置いてからお試しください。変換済みMP3はそのまま使えます。",
+          "まだ上限のままでした。少し間を置いてからお試しください。準備済みの音声はそのまま使えます。",
     );
   }
   if (status === 403 || (status === 400 && body.includes("PERMISSION_DENIED"))) {
@@ -899,7 +938,7 @@ function throwForStatus(status: number, body: string, what: string): never {
     throw new Error(
       aboutFile
         ? "送った音声にアクセスできませんでした。保持期限(48時間)が切れている可能性があります。" +
-          "「生成だけやり直す」を押すと送り直します。"
+          "元の音声を選び直して送信してください。"
         : `APIキーが許可されていません (${status})。キーに制限(HTTPリファラーやIPアドレスの指定)が` +
           "掛かっていないか、Google AI Studio で確認してください。作り直すのが早いこともあります。" +
           `Google の説明: ${reasonFrom(body)}`,
@@ -918,10 +957,10 @@ function throwForStatus(status: number, body: string, what: string): never {
           `数分待ってから「生成だけやり直す」を押してください。`
         : `Gemini 側で処理できませんでした(${status})。待ち直しと別のモデルを試しても同じでした。` +
           `設定画面でモデルを替えるか、しばらく置いてからお試しください。`) +
-        "変換済みMP3はそのまま使えます(音声の送り直しも不要です)。",
+        "準備済みの音声はそのまま使えます(有効期限内なら音声の送り直しも不要です)。",
     );
   }
-  throw new Error(`${what}に失敗しました (${status}): ${body.slice(0, 300)}`);
+  throw new Error(`${what}に失敗しました (${status}): ${reasonFrom(body)}`);
 }
 
 /**
@@ -941,13 +980,28 @@ function isShortfall(err: unknown): boolean {
 }
 
 export async function generateEpisodeMeta(opts: GenerateOptions): Promise<EpisodeMeta> {
+  return measureStage("metadata-total", () => generateEpisodeMetaWithRetry(opts));
+}
+
+async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<EpisodeMeta> {
+  const opts: GenerateOptions = {
+    ...options,
+    onModelChanged: (model) => {
+      opts.model = model;
+      options.onModelChanged?.(model);
+    },
+    onUploaded: (audio) => {
+      opts.audio = audio;
+      options.onUploaded?.(audio);
+    },
+  };
   try {
     return await generateEpisodeMetaInner(opts);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     if (err instanceof TypeError && /fetch/i.test(err.message)) {
       throw new Error(
-        "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。変換済みMP3はダウンロード可能です。",
+        "Gemini APIに接続できませんでした。通信環境を確認して再試行してください。準備済みの音声は保持しています。",
       );
     }
 
@@ -973,7 +1027,7 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
         const first = err instanceof Error ? err.message : String(err);
         throw new Error(
           `${first} (項目を減らして自動でもう一度試しましたが、同じでした。` +
-            `変換済みMP3はそのまま使えます)`,
+            `準備済みの音声はそのまま使えます)`,
         );
       }
     }
@@ -987,6 +1041,7 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onUploadProgress, onModelChanged, onUploaded, signal,
   } = opts;
 
+  const startedAt = performance.now();
   let source = audio;
   if (!isAudioUsable(source)) {
     if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
@@ -994,6 +1049,8 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onUploaded?.(source);
   }
 
+  const uploadMs = performance.now() - startedAt;
+  const generationStartedAt = performance.now();
   onStatus("タイトル・説明文を生成中…");
   const res = await callWithModelFallback(
     apiKey,
@@ -1014,12 +1071,20 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     signal,
   );
 
-  if (!res.ok) throwForStatus(res.status, await res.text(), "生成");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "生成", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "生成結果");
   const parsed: unknown = extractJson(text, "生成結果", finishReason);
-  return normalizeMeta(parsed);
+  const result = normalizeMeta(parsed);
+  recordTiming("generation-and-parsing", performance.now() - generationStartedAt, true);
+  // Local diagnostics only: never log audio, API keys, or generated text.
+  console.info("[AI STUDIO] metadata timing", {
+    uploadAndActivationMs: Math.round(uploadMs),
+    generationAndParsingMs: Math.round(performance.now() - generationStartedAt),
+    totalMs: Math.round(performance.now() - startedAt),
+  });
+  return result;
 }
 
 export interface TranscriptOptions {
@@ -1078,7 +1143,7 @@ export async function generateTranscript(opts: TranscriptOptions): Promise<Trans
     signal,
   );
 
-  if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "書き起こし");
@@ -1428,10 +1493,10 @@ ${
         apiKey, model, build(false), false, onStatus, onModelChanged, signal,
       );
     } else {
-      throwForStatus(res.status, body, "お題の提案");
+      throwForStatus(res.status, body, "お題の提案", apiKey);
     }
   }
-  if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "お題");
@@ -1556,7 +1621,7 @@ ${material || "(材料が足りません。番組名から想像してくださ�
     onModelChanged,
     signal,
   );
-  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案");
+  if (!res.ok) throwForStatus(res.status, await res.text(), "絵柄の提案", apiKey);
 
   const data = await res.json();
   const { text, finishReason } = answerFrom(data, "絵柄");

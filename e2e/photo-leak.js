@@ -1,4 +1,5 @@
-// 前の回の写真が、次の回の MP3 に紛れ込まないか。
+// 写真は次の回へ残さず、通常制作の元音声も変更しない。
+// ID3 の互換性は scripts/id3-check.ts が検証する。
 //
 // 写真は「この回の情景」を写したもので、次の回へは持ち越さない約束になっている。
 // IndexedDB の控えは reset で消しているが、画面の外で持っている参照はどうか。
@@ -87,7 +88,7 @@ async function inspect() {
 
 (async () => {
   makeRedPng("red.png");
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const browser = await chromium.launch(require("./browser-options"));
   const ctx = await browser.newContext({ viewport: { width: 390, height: 900 } });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("PAGE ERROR:", e.message));
@@ -126,7 +127,11 @@ async function inspect() {
   await page.waitForTimeout(2500);
   const a = await page.evaluate(inspect);
   console.log("  タグ:", a.frames.join(","), "/ カバーの色:", a.rgb);
-  if (!a.rgb || a.rgb[0] < 150 || a.rgb[1] > 120) fails.push(`A: 写真がカバーに入っていない(${a.rgb})`);
+  if (a.hasId3 || a.bytes !== fs.statSync("speechlike.wav").size) fails.push("A: 元音声が写真のタグ付けで変更された");
+  const artworkPresent = await page.evaluate(() => new Promise(resolve => {
+    const req = indexedDB.open("podcast-br"); req.onsuccess = () => { const db=req.result; const r=db.transaction("assets").objectStore("assets").get("artwork"); r.onsuccess=()=>{db.close();resolve(Boolean(r.result));}; };
+  }));
+  if (!artworkPresent) fails.push("A: 写真が端末に保存されていない");
 
   console.log("\n=== B) 次の回へ進む(写真は入れない) ===");
   which = "B";
@@ -142,19 +147,12 @@ async function inspect() {
   const after = await page.evaluate(inspect);
   console.log("  付け直し後 → タグ:", after.frames.join(",") || "(無し)", "/ カバーの色:", after.rgb);
 
-  if (!after.hasId3) fails.push("B: 付け直しでタグが丸ごと消えた");
-  for (const f of ["TIT2", "CHAP"])
-    if (!after.frames.includes(f)) fails.push(`B: 付け直しで ${f} が消えた`);
-  if (after.rgb && after.rgb[0] > 150 && after.rgb[1] < 120)
-    fails.push(`B: 前の回の写真が入っている(${after.rgb})`);
-
-  console.log("\n=== E) 画面が中身を読み返して見せているか ===");
-  const readback = await page.locator("p.muted").filter({ hasText: "ファイルの中身" }).first()
-    .innerText().catch(() => "(出ていない)");
-  console.log("  表示:", readback.replace(/\s+/g, " ").slice(0, 110));
-  if (!readback.includes("ファイルの中身")) fails.push("E: 中身の読み返しが出ていない");
-  if (!readback.includes("チャプター")) fails.push("E: チャプター数を出していない");
-  if (!readback.includes("カバー")) fails.push("E: カバーの有無を出していない");
+  if (after.hasId3 || after.bytes !== fs.statSync("speechlike.wav").size)
+    fails.push("B: 元音声がタイトル変更で書き換わった");
+  const artworkPresentAfter = await page.evaluate(() => new Promise(resolve => {
+    const req = indexedDB.open("podcast-br"); req.onsuccess = () => { const db=req.result; const r=db.transaction("assets").objectStore("assets").get("artwork"); r.onsuccess=()=>{db.close();resolve(Boolean(r.result));}; };
+  }));
+  if (artworkPresentAfter) fails.push("B: 前の回の写真が残っている");
 
   await browser.close();
   console.log(fails.length ? "\nFAIL:\n- " + fails.join("\n- ") : "\nOK: 写真は次の回へ持ち越されない");

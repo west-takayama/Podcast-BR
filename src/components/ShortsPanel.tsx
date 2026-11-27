@@ -1,3 +1,5 @@
+import { ShortsAudioCache } from "../lib/shortsCache";
+import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import {
@@ -86,6 +88,9 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
   const [shared, setShared] = useState(-1);
 
   const fileRef = useRef<File | null>(null);
+  const sourceAudioRef = useRef<{ mp3: ArrayBuffer; durationSec: number } | null>(null);
+  const sourceCacheRef = useRef(new ShortsAudioCache());
+  const rangeCacheRef = useRef(new ShortsAudioCache());
   const workerRef = useRef<Worker | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // 片付けのために、いま生きている URL を持っておく
@@ -186,7 +191,11 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
           reject(new Error(msg.message));
         }
       };
-      worker.onerror = () => reject(new Error("動画から音声を取り出せませんでした"));
+      worker.onerror = () => {
+        worker.terminate();
+        workerRef.current = null;
+        reject(new Error("動画から音声を取り出せませんでした"));
+      };
       worker.postMessage({
         file,
         // 配信用 MP3 も音量合わせも要らない。AI に聴かせるぶんだけ1回で作る
@@ -204,7 +213,12 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       setError("先に設定画面で Gemini API キーを入力してください");
       return;
     }
+    abortRef.current?.abort();
+    workerRef.current?.terminate();
     fileRef.current = file;
+    sourceAudioRef.current = null;
+    sourceCacheRef.current.clear();
+    rangeCacheRef.current.clear();
     setClips([]);
     setSelected(0);
     setNudges({});
@@ -221,6 +235,15 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     setProgress(0);
     setVideoUnusable(false);
 
+    await findCandidates();
+  };
+
+  const findCandidates = async () => {
+    const file = fileRef.current;
+    if (!file) return;
+    setError("");
+    setPhase(sourceAudioRef.current ? "finding" : "extracting");
+    setStatus(sourceAudioRef.current ? "候補の抽出を再開しています…" : "動画から音声を取り出しています…");
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -228,12 +251,21 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       // 出来ないと分かるのが書き出しの瞬間だと、AI の呼び出し(無料枠)も
       // 範囲の調整も全部やり直しになる。ここで一言出しておけば選び直せる
       const { canUseVideo } = await loadClipLib();
-      if (!(await canUseVideo(file))) setVideoUnusable(true);
+      const usableVideo = await canUseVideo(file);
+      controller.signal.throwIfAborted();
+      if (!usableVideo) setVideoUnusable(true);
 
-      const { mp3, durationSec } = await extractAudio(file);
+      if (!sourceAudioRef.current) sourceAudioRef.current = await extractAudio(file);
+      controller.signal.throwIfAborted();
+      const { mp3, durationSec } = sourceAudioRef.current;
       setPhase("finding");
       setProgress(0);
+      const audio = await sourceCacheRef.current.get("source", settings.apiKey,
+        async () => mp3,
+        bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, controller.signal));
+      controller.signal.throwIfAborted();
       const found = await findClips({
+        audio,
         apiKey: settings.apiKey,
         model: settings.model,
         mp3,
@@ -243,6 +275,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         onModelChanged,
         signal: controller.signal,
       });
+      controller.signal.throwIfAborted();
       setClips(found);
       setPhase("ready");
       setStatus("");
@@ -251,7 +284,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
       setError(noteError("ショート", e, settings.model));
       setPhase(clips.length > 0 ? "ready" : "idle");
     } finally {
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   };
 
@@ -268,8 +301,10 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
     const { startSec, endSec } = rangeOf(i);
     const { extractRangeMp3 } = await loadClipLib();
     setStatus("この区間の音声を取り出しています…");
-    const rangeMp3 = await extractRangeMp3(file, startSec, endSec);
-    const audio = await uploadEpisodeAudio(settings.apiKey, rangeMp3, setStatus, setProgress, signal);
+    const audio = await rangeCacheRef.current.get(JSON.stringify([startSec, endSec]), settings.apiKey,
+      () => extractRangeMp3(file, startSec, endSec),
+      bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, signal));
+    signal.throwIfAborted();
     const raw = await transcribeRange({
       apiKey: settings.apiKey,
       model: settings.model,
@@ -496,6 +531,12 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
         </div>
       )}
 
+      {phase === "idle" && clips.length === 0 && fileRef.current && (
+        <div className="card">
+          <p className="muted">{fileInfo} — 完了した音声処理・有効な送信済み音声を再利用します。</p>
+          <button className="primary" onClick={() => void findCandidates()}>候補の抽出を再開する</button>
+        </div>
+      )}
       {phase === "idle" && clips.length === 0 && (
         <label className="drop card">
           <input
@@ -560,6 +601,7 @@ export default function ShortsPanel({ settings, onModelChanged }: Props) {
                   {fmt(r.startSec)}〜{fmt(r.endSec)}({Math.round(r.endSec - r.startSec)}秒)
                   {c.why ? ` ・ ${c.why}` : ""}
                 </div>
+                <ClipDetails clip={c} />
               </div>
             );
           })}

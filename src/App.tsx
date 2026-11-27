@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   generateEpisodeMeta,
   generateTranscript,
@@ -26,6 +26,7 @@ import { estimateRemainingMs, overallProgress, type Stage } from "./lib/progress
 import { castLine } from "./lib/cast";
 import { clearPlan, loadPlan, planAsText, type Plan } from "./lib/plan";
 import { noteError } from "./lib/errorLog";
+import { measureStage, recordTiming } from "./lib/timing";
 import type { Finding } from "./lib/audio/diagnostics";
 import type { AudioReport } from "./lib/audio/report";
 import type { TrackInfo } from "./lib/encoder.worker";
@@ -100,6 +101,7 @@ export default function App() {
   // 60分の回では変換だけで数分かかるため、レート制限のたびに捨てるのは損が大きい。
   const convertedRef = useRef<{
     mp3: ArrayBuffer;
+    originalAudio?: Blob;
     aiMp3: ArrayBuffer;
     durationSec: number;
     removedSec: number;
@@ -107,9 +109,11 @@ export default function App() {
     fileName: string;
   } | null>(null);
   const workerRef = useRef<Worker | null>(null);
+  const cancelConversionRef = useRef<(() => void) | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mp3UrlRef = useRef("");
   const startedAtRef = useRef(0);
+  const resultReadyAtRef = useRef(0);
   const wakeLockRef = useRef(new ScreenWakeLock());
   // 残り時間がちらつかないよう、指数移動平均でならしてから表示する
   const smoothedRemainingRef = useRef<number | null>(null);
@@ -117,6 +121,12 @@ export default function App() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  const onResultDisplayed = useCallback(() => {
+    if (!resultReadyAtRef.current) return;
+    recordTiming("result-display", performance.now() - resultReadyAtRef.current, true);
+    resultReadyAtRef.current = 0;
+  }, []);
 
   useEffect(() => {
     applyAccent(settings.accentColor);
@@ -176,6 +186,7 @@ export default function App() {
   useEffect(() => {
     const wakeLock = wakeLockRef.current;
     return () => {
+      cancelConversionRef.current?.();
       workerRef.current?.terminate();
       abortRef.current?.abort();
       void wakeLock.stop();
@@ -213,6 +224,7 @@ export default function App() {
     setPhase("idle");
     setError("");
     setMeta(null);
+    resultReadyAtRef.current = 0;
     setOverall(0);
     setRemainingMs(null);
     smoothedRemainingRef.current = null;
@@ -235,6 +247,8 @@ export default function App() {
   };
 
   const cancel = () => {
+    cancelConversionRef.current?.();
+    cancelConversionRef.current = null;
     workerRef.current?.terminate();
     workerRef.current = null;
     abortRef.current?.abort();
@@ -311,10 +325,10 @@ export default function App() {
    */
   const retagMp3 = async (nextMeta: EpisodeMeta, title: string, busy: string) => {
     const converted = convertedRef.current;
-    if (!converted) return;
+    if (!converted || converted.originalAudio) return;
     setBusyText(busy);
     try {
-      const blob = await buildTaggedMp3(
+      const blob = converted.originalAudio ?? await buildTaggedMp3(
         converted.mp3,
         nextMeta,
         title,
@@ -454,6 +468,7 @@ export default function App() {
       return;
     }
     reset();
+    const original = files.length === 1;
     setPhase("running");
     setStage("analyze");
     startedAtRef.current = Date.now();
@@ -463,11 +478,11 @@ export default function App() {
         ? `${files.length}トラック(${totalMb.toFixed(0)} MB)`
         : `${file.name}(${totalMb.toFixed(0)} MB)`,
     );
-    setOutputName(file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3");
+    setOutputName(original ? file.name : file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3");
     void wakeLockRef.current.start();
 
     try {
-      const result = await new Promise<{
+      const result = await measureStage("conversion", () => new Promise<{
         mp3: ArrayBuffer;
         aiMp3: ArrayBuffer;
         durationSec: number;
@@ -485,6 +500,7 @@ export default function App() {
         findings: Finding[];
         tracks?: TrackInfo[];
       }>((resolve, reject) => {
+        cancelConversionRef.current = () => reject(new DOMException("中止しました", "AbortError"));
         const worker = new Worker(new URL("./lib/encoder.worker.ts", import.meta.url), {
           type: "module",
         });
@@ -501,29 +517,32 @@ export default function App() {
         };
         worker.onerror = () => reject(new Error("変換処理でエラーが発生しました"));
         worker.postMessage({
+          purpose: original ? "ai" : undefined,
           file,
           files,
           manualDb,
           measured,
           matchTone,
-          dsp: settings.dsp,
+          dsp: original ? { ...settings.dsp, highPass: false } : settings.dsp,
           mono: settings.mono,
           bitrate: settings.bitrate,
         });
-      });
+      }));
+      cancelConversionRef.current = null;
       workerRef.current?.terminate();
       workerRef.current = null;
 
       convertedRef.current = {
-        mp3: result.mp3,
+        originalAudio: original ? file : undefined,
+        mp3: original ? new ArrayBuffer(0) : result.mp3,
         aiMp3: result.aiMp3,
         durationSec: result.durationSec,
-        removedSec: result.removedSec,
-        pauses: result.pauses,
+        removedSec: result.removedSec ?? 0,
+        pauses: result.pauses ?? [],
         fileName: file.name,
       };
 
-      const report: AudioReport = {
+      const report: AudioReport | null = original ? null : {
         tracks: result.tracks,
         sourceLufs: result.sourceLufs,
         outputLufs: result.outputLufs,
@@ -531,7 +550,7 @@ export default function App() {
         peakDbfs: result.peakDbfs,
         channels: result.channels,
         bitrate: settings.bitrate,
-        removedSec: result.removedSec,
+        removedSec: result.removedSec ?? 0,
         limitedSamples: result.limitedSamples,
         sampleRate: result.sampleRate,
         correctionDb: result.correctionDb,
@@ -541,21 +560,22 @@ export default function App() {
       setAudioReport(report);
 
       // 生成前でもダウンロードできるよう、まずタグ無しで出しておく
-      const publishBlob = new Blob([result.mp3], { type: "audio/mpeg" });
+      const publishBlob = original ? file : new Blob([result.mp3], { type: "audio/mpeg" });
       setMp3Url(URL.createObjectURL(publishBlob));
 
       // ここから先(送信・生成)で中断されても変換をやり直さずに済むよう、
       // 端末に置いておく。60分の回では変換だけで数分かかる。
-      const outName = file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3";
+      const outName = original ? file.name : file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3";
       const record = {
         createdAt: Date.now(),
         fileName: file.name,
         outputName: outName,
         fileInfo: `${file.name}(${(file.size / 1024 / 1024).toFixed(0)} MB)`,
         durationSec: result.durationSec,
-        removedSec: result.removedSec,
-        pauses: result.pauses,
+        removedSec: result.removedSec ?? 0,
+        pauses: result.pauses ?? [],
         mp3: publishBlob,
+        originalAudio: original,
         aiMp3: new Blob([result.aiMp3], { type: "audio/mpeg" }),
         report,
         cast: cast.trim() || undefined,
@@ -564,8 +584,11 @@ export default function App() {
       await savePending(record).catch(() => {});
 
       advance("upload", 0);
-      await runGeneration();
+      await runGeneration(null);
     } catch (err) {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+      cancelConversionRef.current = null;
       void wakeLockRef.current.stop();
       if (err instanceof DOMException && err.name === "AbortError") return;
       setError(noteError("変換と生成", err, settings.model));
@@ -577,7 +600,7 @@ export default function App() {
    * 変換済みの音声から生成だけを行う。失敗しても変換をやり直さずに再試行できる。
    * すでにアップロード済みなら送信も省く。
    */
-  const runGeneration = async (already: UploadedAudio | null = uploaded) => {
+  const runGeneration = async (already: UploadedAudio | null = uploaded, episodeCast = cast) => {
     const converted = convertedRef.current;
     if (!converted) throw new Error("変換結果がありません。もう一度アップロードしてください。");
 
@@ -595,7 +618,7 @@ export default function App() {
           pauses: converted.pauses,
           durationSec: converted.durationSec,
           previousTitles,
-          cast,
+          cast: episodeCast,
         },
         onStatus: (text) => {
           if (text.includes("生成中") || text.includes("モデル")) advance("generate", 0.15, text);
@@ -631,10 +654,9 @@ export default function App() {
 
       const title = generated.titles[0] ?? "";
 
-      // タイトルとチャプターが揃ってから ID3 タグを付ける。
-      // アートワークも埋め込むので、プレイヤーで番組として正しく表示される。
-      // 結果画面を出す前に差し替えないと、タグ無しの MP3 をダウンロードされうる。
-      const blob = await buildTaggedMp3(
+      // 通常制作は元音声をそのまま使い、タグやカバーの描画を待たない。
+      // 従来の合成結果だけタグ付けを維持する。
+      const blob = converted.originalAudio ?? await buildTaggedMp3(
         converted.mp3,
         generated,
         title,
@@ -645,6 +667,7 @@ export default function App() {
         return URL.createObjectURL(blob);
       });
 
+      resultReadyAtRef.current = performance.now();
       setMeta(generated);
       setChosenTitle(title);
       setPhase("done");
@@ -662,9 +685,10 @@ export default function App() {
         meta: generated,
         chosenTitle: title,
         audio: blob,
+        originalAudio: !!converted.originalAudio,
         uploaded: uploadedAudio ?? undefined,
         pauses: converted.pauses,
-        cast: cast.trim() || undefined,
+        cast: episodeCast.trim() || undefined,
       })
         .then(() => {
           // 履歴に入ったので、中断復帰用の控えは用済み
@@ -721,12 +745,13 @@ export default function App() {
     setAudioReport(saved.report);
     setUploaded(saved.uploaded ?? null);
     // 変換前に打ち込んだ出演者を戻す。打ち直させない
-    if (saved.cast) setCast(saved.cast);
+    setCast(saved.cast ?? "");
     void wakeLockRef.current.start();
 
     try {
       convertedRef.current = {
-        mp3: await saved.mp3.arrayBuffer(),
+        mp3: saved.originalAudio ? new ArrayBuffer(0) : await saved.mp3.arrayBuffer(),
+        originalAudio: saved.originalAudio ? saved.mp3 : undefined,
         aiMp3: await saved.aiMp3.arrayBuffer(),
         durationSec: saved.durationSec,
         removedSec: saved.removedSec,
@@ -739,7 +764,7 @@ export default function App() {
       });
       advance("upload", 0);
       // uploaded は setState 直後で反映されていないため、直接渡して送信を省く
-      await runGeneration(saved.uploaded ?? null);
+      await runGeneration(saved.uploaded ?? null, saved.cast ?? "");
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       setError(noteError("中断からの復帰", err, settings.model));
@@ -756,7 +781,7 @@ export default function App() {
   return (
     <>
       <header>
-        <h1>🎙️ Podcast BR</h1>
+        <h1>🎙️ AI STUDIO 2.0</h1>
         <nav className="tabs">
           <button className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
             作成
@@ -813,7 +838,7 @@ export default function App() {
               </button>
               {mp3Url && (
                 <a className="dl" href={mp3Url} download={outputName}>
-                  ⬇️ 変換済み MP3 をダウンロード
+                  ⬇️ 音声をダウンロード
                 </a>
               )}
             </>
@@ -897,7 +922,7 @@ export default function App() {
                     href={pendingUrl}
                     download={pending.outputName}
                   >
-                    ⬇️ MP3 だけ取り出す
+                    ⬇️ 音声だけ取り出す
                   </a>
                 )}
                 <button onClick={discardPending}>破棄</button>
@@ -985,7 +1010,6 @@ export default function App() {
             <label className="drop card">
               <input
                 type="file"
-                multiple
                 accept="audio/*,.wav,.mp3,.m4a,.aac,.mp4,.ogg,.opus,.flac,.caf"
                 onChange={(e) => {
                   const picked = Array.from(e.target.files ?? []);
@@ -1001,12 +1025,22 @@ export default function App() {
               <p className="muted">
                 WAV / MP3 / M4A / AAC など。通話録音もそのまま使えます。
                 <br />
-                整音 → 変換 → タイトル・説明文の生成まで自動で進みます
+                AI用に軽量化 → タイトル・説明文を生成します。元音声は加工しません
                 <br />
-                <strong>人ごとに分かれている場合はまとめて選べます。</strong>
-                それぞれの音量を測って揃えてから1本にします
+                Geminiに送るのは32kbpsのモノラル音声だけです
               </p>
             </label>
+            <details className="card fold">
+              <summary>従来の複数トラック合成（任意）</summary>
+              <p className="muted">人ごとの録音を整音・合成して配信用MP3を作ります。通常の制作では不要です。</p>
+              <input aria-label="合成する音声" type="file" multiple accept="audio/*" style={{ minHeight: 44, maxWidth: "100%" }}
+                onChange={(e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  e.target.value = "";
+                  if (files.length > 1) setPickingTracks(files);
+                  else if (files.length === 1) void handleFile(files[0]);
+                }} />
+            </details>
             </>
           )}
 
@@ -1025,6 +1059,7 @@ export default function App() {
             <>
               <ResultView
                 meta={meta}
+                onDisplayed={onResultDisplayed}
                 chosenTitle={chosenTitle}
                 onChooseTitle={(title) => {
                   setChosenTitle(title);
@@ -1041,6 +1076,7 @@ export default function App() {
                 model={settings.model}
                 onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
                 audioReport={audioReport}
+                originalAudio={!!convertedRef.current?.originalAudio}
                 chapterNote={chapterNote}
                 transcript={transcript}
                 canReuseAudio={isAudioUsable(uploaded)}

@@ -1,3 +1,4 @@
+import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import type { Clip, TranscriptSegment } from "../lib/gemini";
@@ -154,7 +155,7 @@ export default function ClipStudio({
 
   const ext = cap?.mp4 === false ? "webm" : "mp4";
   const mime = ext === "mp4" ? "video/mp4" : "video/webm";
-  const clipName = `${fileName.replace(/\.mp3$/i, "")}-clip${selected + 1}.${ext}`;
+  const clipName = `${fileName.replace(/\.[^.]+$/, "")}-clip${selected + 1}.${ext}`;
   const canShare =
     typeof navigator !== "undefined" &&
     !!navigator.canShare &&
@@ -200,6 +201,7 @@ export default function ClipStudio({
             <div className="muted" style={{ marginTop: 4 }}>
               {fmt(s)}〜{fmt(e)}({Math.round(e - s)}秒){c.why ? ` ・ ${c.why}` : ""}
             </div>
+            <ClipDetails clip={c} />
           </div>
         );
       })}
@@ -257,7 +259,7 @@ export default function ClipStudio({
         </div>
       )}
 
-      {error && <p className="muted">⚠️ {error}</p>}
+      {error && <p role="alert" className="error">⚠️ {error}</p>}
 
       {progress !== null ? (
         <>

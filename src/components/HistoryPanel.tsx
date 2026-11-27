@@ -409,7 +409,8 @@ export default function HistoryPanel({
                   );
                 }}
                 audioUrl={audioUrls[r.id]}
-                fileName={r.fileName.replace(/\.wav$/i, ".mp3")}
+                fileName={r.originalAudio ? r.fileName : r.fileName.replace(/\.[a-z0-9]+$/i, ".mp3")}
+                originalAudio={r.originalAudio}
                 showName={showName}
                 accentColor={accentColor}
                 promptConfig={promptConfig}

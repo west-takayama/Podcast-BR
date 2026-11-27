@@ -8,7 +8,8 @@
 ## 1. これは何か
 
 **スマホだけでポッドキャストの投稿準備を終わらせる道具**です。収録した音声を1つ選ぶと、
-整音して MP3 にし、タイトル・説明文・チャプター・ハッシュタグ・切り抜き候補まで作ります。
+AI用の軽量音声を作り、タイトル・説明文・チャプター・ハッシュタグ・切り抜き候補を生成します。
+元音声は加工せず履歴に残します。従来の整音・配信用MP3生成は任意の複数トラック合成だけです。
 できた文章を Spotify for Creators にコピペすれば投稿できます。
 
 使っているのは**ひとりの運営者**（ポッドキャスト番組の制作者）です。毎回この道具で作業します。
@@ -32,11 +33,16 @@
 
 ---
 
+## AI STUDIO 2.0 開発ブランチ
+
+現在の仕様・検証結果・測定条件・本番公開前の確認は [AI_STUDIO_V2.md](./AI_STUDIO_V2.md) を参照。
+`PendingConversion.mp3` は互換性のため名前を維持していますが、`originalAudio: true` の場合は元ファイルです。拡張子・MIME・バイト列を変えずに扱ってください。
+
 ## 3. 最初にやること
 
 ```bash
 npm ci
-npm test          # 部品の検証。5本、427項目。終了コードで見ること
+npm test          # 部品と回帰の検証。7本。終了コードで見ること
 npm run build
 npm run dev       # 開発サーバー
 ```
@@ -59,9 +65,9 @@ pip install mutagen
 ### 画面ごしの検証
 
 ```bash
-npm i -D playwright && npx playwright install chromium   # 1回だけ
+npx playwright install chromium   # システムChromiumがない環境で1回だけ
 npm run build
-npm run e2e        # 9本、10〜20分
+npm run e2e        # 10本、所要時間は端末による
 npm run e2e -- patrol-ui   # 1つだけ
 ```
 
@@ -171,7 +177,7 @@ e2e/                   画面ごしの検証（npm run e2e）
 
 ---
 
-## 8. 引き継ぎ時点の状態
+## 8. 旧main引き継ぎ時点の状態（以下は過去の記録）
 
 - `npm test` 終了コード 0（5本・427項目）
 - `npm run e2e` 9本すべて通過

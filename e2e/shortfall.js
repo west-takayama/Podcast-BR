@@ -33,7 +33,7 @@ const TRUNCATED = JSON.stringify(FULL, null, 2).slice(
 const busy = JSON.stringify({ error: { code: 503, message: "overloaded", status: "UNAVAILABLE" } });
 
 (async () => {
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const browser = await chromium.launch(require("./browser-options"));
   const ctx = await browser.newContext({
     viewport: { width: 390, height: 900 },
     permissions: ["clipboard-read", "clipboard-write"],
@@ -108,7 +108,7 @@ const busy = JSON.stringify({ error: { code: 503, message: "overloaded", status:
     if (!err) fails.push("B: 通ってしまった");
     if (!/切れ|読めません|含まれていません/.test(err)) fails.push("B: 何が起きたか伝えていない");
     if (!err.includes("自動でもう一度試しました")) fails.push("B: 2回試したことを伝えていない");
-    if (!err.includes("変換済みMP3")) fails.push("B: 変換が無駄でないことを伝えていない");
+    if (!err.includes("準備済みの音声")) fails.push("B: 変換が無駄でないことを伝えていない");
     if (state.slimAsked !== 1) fails.push(`B: 減らした頼み方を何度もしている(${state.slimAsked})`);
     await page.close();
   }

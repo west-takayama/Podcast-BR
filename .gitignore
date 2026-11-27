@@ -9,3 +9,5 @@ e2e/*.wav
 e2e/*.png
 e2e/*.json
 e2e/*.mp3
+
+!e2e/package.json

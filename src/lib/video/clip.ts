@@ -26,6 +26,8 @@ import {
   getFirstEncodableAudioCodec,
   getFirstEncodableVideoCodec,
 } from "mediabunny";
+import { chooseClipCapability, type ClipCapability } from "./capability";
+export type { ClipCapability } from "./capability";
 import type { TranscriptSegment } from "../gemini";
 import { parseTimestamp } from "../id3";
 import { wrapJapanese } from "../image";
@@ -72,30 +74,13 @@ export interface ClipOptions {
  * 落とす。WebM は YouTube には上げられるので、出せないよりはるかにましで、
  * 「この端末では無理です」とだけ言って終わるのは避けたい。
  */
-export interface ClipCapability {
-  videoCodec: "avc" | "vp9" | "vp8";
-  audioCodec: "aac" | "opus";
-  container: "mp4" | "webm";
-  /** MP4 でないと投稿できない先があるため、UI で伝えるために持つ。 */
-  mp4: boolean;
-}
-
 export async function detectCapability(): Promise<ClipCapability | null> {
   if (typeof VideoEncoder === "undefined" || typeof AudioEncoder === "undefined") return null;
   try {
-    const video = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"], {
-      width: CLIP_WIDTH,
-      height: CLIP_HEIGHT,
-    });
-    const audio = await getFirstEncodableAudioCodec(["aac", "opus"]);
-    if (!video || !audio) return null;
-    const mp4 = video === "avc" && audio === "aac";
-    return {
-      videoCodec: video as ClipCapability["videoCodec"],
-      audioCodec: audio as ClipCapability["audioCodec"],
-      container: mp4 ? "mp4" : "webm",
-      mp4,
-    };
+    return await chooseClipCapability(
+      codecs => getFirstEncodableVideoCodec(codecs, { width: CLIP_WIDTH, height: CLIP_HEIGHT }),
+      codecs => getFirstEncodableAudioCodec(codecs),
+    );
   } catch {
     return null;
   }
@@ -131,12 +116,14 @@ interface Caption {
   /** 消す時刻。声が止まったところで消えるようにする。 */
   endSec: number;
   text: string;
+  speaker?: string;
+  emphasis?: string[];
 }
 
-function toCaptions(transcript: TranscriptSegment[] | null | undefined): { atSec: number; text: string }[] {
+function toCaptions(transcript: TranscriptSegment[] | null | undefined) {
   if (!transcript) return [];
   return transcript
-    .map((s) => ({ atSec: (parseTimestamp(s.time) ?? -1) / 1000, text: s.text }))
+    .map((s) => ({ atSec: (parseTimestamp(s.time) ?? -1) / 1000, text: s.text, speaker: s.speaker, emphasis: s.emphasis }))
     .filter((c) => c.atSec >= 0 && c.text)
     .sort((a, b) => a.atSec - b.atSec);
 }
@@ -338,7 +325,7 @@ export function captionsForRange(
   const all = toCaptions(transcript);
 
   // 1行ずつに割る。AI の時刻は「だいたいこの辺」の手がかりとしてだけ持つ
-  const lines: { hint: number; text: string }[] = [];
+  const lines: { hint: number; text: string; speaker?: string; emphasis?: string[] }[] = [];
   for (let i = 0; i < all.length; i++) {
     const seg = all[i];
     const nextAt = all[i + 1]?.atSec ?? seg.atSec + 12;
@@ -348,7 +335,7 @@ export function captionsForRange(
     const span = Math.max(0.8, Math.min(nextAt - seg.atSec, chars / SPEECH_CHARS_PER_SEC));
     let cursor = seg.atSec;
     for (const piece of pieces) {
-      lines.push({ hint: cursor - startSec, text: piece });
+      lines.push({ hint: cursor - startSec, text: piece, speaker: seg.speaker, emphasis: seg.emphasis?.filter(word => piece.includes(word)) });
       cursor += (span * piece.length) / chars;
     }
   }
@@ -376,7 +363,8 @@ export function captionsForRange(
         ? startSec + speechEndAfter(flags, stepSec, at - startSec) + CAPTION_TAIL_SEC
         : Infinity;
     const end = Math.min(nextAt - 0.05, silence, at + CAPTION_MAX_SEC);
-    out.push({ atSec: at, endSec: Math.max(at + 0.4, end), text: lines[i].text });
+    const boundedEnd = Math.min(endSec, nextAt, Math.max(at + 0.4, end));
+    if (boundedEnd > at) out.push({ atSec: at, endSec: boundedEnd, text: lines[i].text, speaker: lines[i].speaker, emphasis: lines[i].emphasis });
   }
   return out;
 }
@@ -815,6 +803,15 @@ function drawFrame(
     const lineHeight = size * 1.36;
     const blockTop = H * 0.63 - (lines.length * lineHeight) / 2;
     ctx.textAlign = "center";
+    if (current.speaker) {
+      ctx.font = `bold ${W * 0.035}px ${FONT_STACK}`;
+      ctx.fillStyle = accent;
+      ctx.strokeStyle = "rgba(8, 8, 8, 0.95)";
+      ctx.lineWidth = 5;
+      ctx.strokeText(current.speaker.slice(0, 24), W / 2, blockTop - lineHeight * 0.65);
+      ctx.fillText(current.speaker.slice(0, 24), W / 2, blockTop - lineHeight * 0.65);
+      ctx.font = `bold ${size}px ${FONT_STACK}`;
+    }
     for (let i = 0; i < lines.length; i++) {
       const ly = blockTop + i * lineHeight;
       // 背景がどんな写真でも読めるよう、縁取りしてから塗る
@@ -822,7 +819,7 @@ function drawFrame(
       ctx.strokeStyle = "rgba(8, 8, 8, 0.85)";
       ctx.lineJoin = "round";
       ctx.strokeText(lines[i], W / 2, ly);
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = current.emphasis?.some(word => lines[i].includes(word)) ? "#ffe680" : "#ffffff";
       ctx.fillText(lines[i], W / 2, ly);
     }
     ctx.textAlign = "left";

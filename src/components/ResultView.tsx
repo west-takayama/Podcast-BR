@@ -14,9 +14,11 @@ import type { PromptConfig } from "../lib/prompt";
 
 interface Props {
   meta: EpisodeMeta;
+  onDisplayed?: () => void;
   chosenTitle: string;
   onChooseTitle: (title: string) => void;
   audioUrl?: string;
+  originalAudio?: boolean;
   fileName?: string;
   showName: string;
   accentColor: string;
@@ -440,9 +442,11 @@ function AudioSpec({ report }: { report: AudioReport }) {
 
 export default function ResultView({
   meta,
+  onDisplayed,
   chosenTitle,
   onChooseTitle,
   audioUrl,
+  originalAudio = false,
   fileName,
   showName,
   accentColor,
@@ -466,6 +470,11 @@ export default function ResultView({
   // ここで持たないと、同じ写真を2回読み込ませることになる
   const [background, setBackground] = useState<ImageBitmap | null>(null);
   const [chapterWarning, setChapterWarning] = useState("");
+  useEffect(() => {
+    if (!onDisplayed) return;
+    const frame = requestAnimationFrame(onDisplayed);
+    return () => cancelAnimationFrame(frame);
+  }, [meta, onDisplayed]);
   const chapterText = formatChapters(meta.chapters);
   // 出演者は説明文の頭に必ず置く。再生を押す前に見えるのはここだけなので、
   // AI の書きぶりに任せず、貼り付ける文そのものに入れる
@@ -481,27 +490,6 @@ export default function ResultView({
 
   return (
     <>
-      {audioUrl && (
-        <div className="card">
-          <h2>✅ 投稿素材が完成しました</h2>
-          <p className="muted">
-            Spotify for Creators アプリで新規エピソード作成 → 下のMP3を選択 →
-            各項目をコピーして貼り付けてください。
-          </p>
-          <audio controls src={audioUrl} style={{ width: "100%", marginTop: 8 }} />
-          <a className="dl" href={audioUrl} download={fileName ?? "episode.mp3"}>
-            ⬇️ 変換済み MP3 をダウンロード
-          </a>
-          <Id3Readback url={audioUrl} />
-        </div>
-      )}
-
-      {audioReport && audioReport.findings.length > 0 && (
-        <DiagnosticsPanel findings={audioReport.findings} />
-      )}
-
-      {audioReport && <AudioSpec report={audioReport} />}
-
       <div className="card">
         <Block title="タイトル案">
           {meta.titles.map((t) => (
@@ -567,7 +555,7 @@ export default function ResultView({
                 ? `⚠️ ${chapterWarning}`
                 : chapterNote
                   ? `✓ ${chapterNote}`
-                  : "「00:00 見出し」の形で直せます。MP3 の中身にも入り直します。"
+                  : originalAudio ? "「00:00 見出し」の形で直せます。音声ファイルは変更しません。" : "「00:00 見出し」の形で直せます。"
             }
           />
         )}
@@ -590,6 +578,28 @@ export default function ResultView({
           </Block>
         )}
       </div>
+
+      {audioUrl && (
+        <div className="card">
+          <h2>✅ 投稿素材が完成しました</h2>
+          <p className="muted">
+            Spotify for Creators アプリで新規エピソード作成 → 音声を選択 →
+            各項目をコピーして貼り付けてください。
+          </p>
+          <audio controls src={audioUrl} style={{ width: "100%", marginTop: 8 }} />
+          <a className="dl" href={audioUrl} download={fileName ?? "episode.mp3"}>
+            ⬇️ {originalAudio ? "元の音声" : "変換済み MP3"}をダウンロード
+          </a>
+          {originalAudio ? <p className="muted">元音声をそのまま保持しています。整音・タグ付けは行いません。</p> : <Id3Readback url={audioUrl} />}
+        </div>
+      )}
+
+      {audioReport && audioReport.findings.length > 0 && (
+        <DiagnosticsPanel findings={audioReport.findings} />
+      )}
+
+      {audioReport && <AudioSpec report={audioReport} />}
+
 
       {canReuseAudio && onRegenerate && (
         <div className="card">
