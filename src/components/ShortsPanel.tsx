@@ -889,7 +889,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
           {!hasVideo && (
             <label>
               ショートの背景画像（任意）
-              <input type="file" accept="image/*" onChange={e => {
+              <input type="file" className="shorts-asset-picker" accept="image/*" onChange={e => {
                 setBackground(e.target.files?.[0] ?? null);
                 clips.forEach((_, i) => dropResult(i));
               }} />

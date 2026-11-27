@@ -701,3 +701,4 @@ video.card-preview { background: #000; }
 
 button.primary.shorts-all-generate { background: #ffd400; color: #141414; }
 button.primary.shorts-all-generate:active { background: #e7bc00; }
+.shorts-asset-picker { min-height: 44px; max-width: 100%; }

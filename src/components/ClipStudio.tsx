@@ -72,7 +72,7 @@ export default function ClipStudio({ source, durationSec, episodeId, audioUrl, f
         <p>{originalAudio ? "この回で使った元の音声・動画を選ぶと再開できます。" : "この回の配信用MP3を選ぶと、保存済みの時刻で再開できます。"}</p>
         <label>
           この回の素材を選択
-          <input type="file" accept="audio/*,video/*,.wav,.mp3,.mp4,.mov,.webm"
+          <input type="file" className="shorts-asset-picker" accept="audio/*,video/*,.wav,.mp3,.mp4,.mov,.webm"
             onChange={event => { setPicked(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }} />
         </label>
       </>}
