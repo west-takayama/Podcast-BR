@@ -40,6 +40,8 @@ import ProgressPanel from "./components/ProgressPanel";
 // 設定は、キーを入れていない人が**最初に見る画面**。ここだけは遅延させない。
 // 分けると「読み込み中…」が一瞬挟まる。大きさも 3.6kB(gzip)しかない
 import SettingsPanel from "./components/SettingsPanel";
+import DriveSettings from "./components/DriveSettings";
+import { DriveConnectionProvider } from "./components/DriveConnection";
 
 // 画面ごとに分けて、開いたときに読む。
 //
@@ -64,6 +66,8 @@ export type { AudioReport };
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [driveSetupShortcut, setDriveSetupShortcut] = useState(false);
+  const [settingsReturnTab, setSettingsReturnTab] = useState<Tab>("create");
   const [tab, setTab] = useState<Tab>(() => (loadSettings().apiKey ? "create" : "settings"));
   const [studioVisited, setStudioVisited] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -783,10 +787,16 @@ export default function App() {
     void clearPending().catch(() => {});
   };
 
+  const openSettings = (fromDrive = false) => {
+    if (tab !== "settings") setSettingsReturnTab(tab);
+    setDriveSetupShortcut(fromDrive);
+    setTab("settings");
+  };
+
   return (
-    <>
+    <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 2.3</h1>
+        <h1>🎙️ AI STUDIO 2.3.1</h1>
         <nav className="tabs">
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
             作成
@@ -797,7 +807,7 @@ export default function App() {
           <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
             履歴
           </button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>
+          <button className={tab === "settings" ? "active" : ""} onClick={() => openSettings()}>
             設定
           </button>
         </nav>
@@ -850,7 +860,10 @@ export default function App() {
 
       <Suspense fallback={<Loading />}>
       {tab === "settings" && (
-        <SettingsPanel settings={settings} onChange={setSettings} onClose={() => setTab("create")} />
+        <>
+          <DriveSettings focusHeading={driveSetupShortcut} />
+          <SettingsPanel checkModels={!driveSetupShortcut} settings={settings} onChange={setSettings} onClose={() => setTab(settingsReturnTab)} />
+        </>
       )}
 
       {(tab === "create" || studioVisited) && <div hidden={tab !== "create"}>
@@ -872,7 +885,8 @@ export default function App() {
         />
       )}
 
-      {tab === "history" && (
+      {(tab === "history" || (tab === "settings" && settingsReturnTab === "history")) && (
+        <div hidden={tab !== "history"}>
         <HistoryPanel
           onChooseTitle={(id, title) => {
             updateEpisode(id, { chosenTitle: title });
@@ -897,10 +911,11 @@ export default function App() {
           model={settings.model}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
         />
+        </div>
       )}
 
-      {tab === "legacy" && (
-        <div className="legacy-production">
+      {(tab === "legacy" || (tab === "settings" && settingsReturnTab === "legacy")) && (
+        <div className="legacy-production" hidden={tab !== "legacy"}>
           <button type="button" onClick={() => setTab("create")}>素材選択に戻る</button>
           {/* 前回の変換が生き残っている場合。変換をやり直させないのが目的 */}
           {phase === "idle" && !meta && pending && (
@@ -1112,6 +1127,6 @@ export default function App() {
         </div>
       )}
       </Suspense>
-    </>
+    </DriveConnectionProvider>
   );
 }

@@ -64,6 +64,7 @@ import { listModels, pickDefaultModel, type ModelInfo } from "../lib/gemini";
 
 interface Props {
   settings: Settings;
+  checkModels: boolean;
   /**
    * setState と同じ形にしてある。モデル一覧の取得は非同期で、
    * その間に利用者が別の項目を編集しうるため、更新関数を渡せる必要がある。
@@ -72,13 +73,16 @@ interface Props {
   onClose: () => void;
 }
 
-export default function SettingsPanel({ settings, onChange, onClose }: Props) {
+export default function SettingsPanel({ settings, onChange, onClose, checkModels }: Props) {
+  const [editedKey, setEditedKey] = useState(false);
+  const shouldCheckModels = checkModels || editedKey;
   const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [modelError, setModelError] = useState("");
 
   // モデル一覧はキーを入れた時点で取りに行く。Google 側の廃止でアプリ内の
   // 固定リストが古くなる問題を避けるため、選択肢は常に API の返り値から作る。
   useEffect(() => {
+    if (!shouldCheckModels) return;
     if (!settings.apiKey) {
       setModels(null);
       return;
@@ -114,7 +118,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.apiKey]);
+  }, [settings.apiKey, shouldCheckModels]);
 
   const setPrompt = <K extends keyof Settings["prompt"]>(
     key: K,
@@ -134,7 +138,10 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
           type="password"
           value={settings.apiKey}
           placeholder="AIza..."
-          onChange={(e) => onChange({ ...settings, apiKey: e.target.value.trim() })}
+          onChange={(e) => {
+            setEditedKey(true);
+            onChange({ ...settings, apiKey: e.target.value.trim() });
+          }}
         />
       </label>
       <p className="muted">
@@ -157,7 +164,7 @@ export default function SettingsPanel({ settings, onChange, onClose }: Props) {
           disabled={!models || models.length === 0}
           onChange={(e) => onChange({ ...settings, model: e.target.value })}
         >
-          {models === null && <option>{settings.apiKey ? "取得中…" : "APIキーを入力してください"}</option>}
+          {models === null && <option>{settings.apiKey ? (shouldCheckModels ? "取得中…" : settings.model) : "APIキーを入力してください"}</option>}
           {models
             ?.map((m, i) => (
               <option key={m.id} value={m.id}>

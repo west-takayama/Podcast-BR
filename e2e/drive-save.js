@@ -53,7 +53,9 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     page.on("pageerror", error => errors.push(error.message));
     await page.route("https://accounts.google.com/gsi/client", route => route.fulfill({ contentType: "application/javascript", body: oauthResponse }));
     await page.route("https://apis.google.com/js/api.js", route => route.fulfill({ contentType: "application/javascript", body: pickerResponse }));
+    let geminiRequests = 0;
     await page.route("**/generativelanguage.googleapis.com/**", route => {
+      geminiRequests++;
       const req = route.request();
       if (req.url().includes("/models?")) return route.fulfill({ json: { models: [{ name: "models/gemini-3-flash", supportedGenerationMethods: ["generateContent"] }] } });
       if (req.url().includes("/upload/")) return route.fulfill({ json: { file: { name: "files/mock", uri: "https://mock/audio", state: "ACTIVE" } } });
@@ -149,14 +151,8 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     });
 
     await page.goto(`http://localhost:${port}/`);
-    await page.locator("input[type=password]").fill("AIzaMOCK");
-    await page.getByRole("button", { name: "保存して閉じる" }).click();
-    await page.locator(".production-picker input").setInputFiles("speechlike.wav");
-    await page.getByRole("checkbox", { name: /字幕を入れる/ }).uncheck();
-    await page.getByRole("button", { name: "すべてのショート動画をまとめて生成" }).click();
-    await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
-    await page.getByText("Googleドライブへ保存", { exact: true }).click();
-    await page.getByText("Google接続設定", { exact: true }).click();
+    await page.getByRole("heading", { name: "Google Drive連携" }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: /書き出した動画/ }).count(), 0);
     await page.getByLabel("OAuthクライアントID").fill("fixture.apps.googleusercontent.com");
     await page.getByLabel("Google Cloudプロジェクト番号").fill("123456");
     await page.getByLabel("Picker用ブラウザ制限キー").fill("no-real-key");
@@ -172,6 +168,17 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     permitFolder = true;
     await page.evaluate(id => { window.testFolder = id; }, folder);
     await selectFolder.click();
+    await page.getByRole("status").filter({ hasText: "Google Drive：接続済み・保存先確認済み" }).waitFor();
+    assert.equal(geminiRequests, 0);
+    await page.locator("input[type=password]").fill("AIzaMOCK");
+    await page.getByRole("button", { name: "保存して閉じる" }).click();
+    await page.locator(".production-picker input").setInputFiles("speechlike.wav");
+    await page.getByRole("checkbox", { name: /字幕を入れる/ }).uncheck();
+    await page.getByRole("button", { name: "すべてのショート動画をまとめて生成" }).click();
+    await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
+    await page.getByText("Googleドライブへ保存", { exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "Google Drive：接続済み・保存先確認済み" }).waitFor();
+    assert.equal(await page.getByLabel("OAuthクライアントID").count(), 0);
     const save = page.getByRole("button", { name: "完成動画をまとめてGoogleドライブに保存" });
     await save.click();
     await page.getByText(/完了 1本、失敗 1本/).waitFor();
@@ -207,6 +214,17 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     assert(await latest.isVisible());
     assert.match(await latest.locator("..").innerText(), /保存時の最新版/);
     assert.equal(await save.isDisabled(), true);
+    const nav = page.locator("nav");
+    await nav.getByRole("button", { name: "設定", exact: true }).click();
+    await page.getByRole("button", { name: "Googleとの接続を解除" }).click();
+    await page.getByRole("status").filter({ hasText: "Google Drive：未接続" }).waitFor();
+    await nav.getByRole("button", { name: "作成", exact: true }).click();
+    const beforeShortcut = geminiRequests;
+    await page.getByRole("button", { name: "設定でGoogle Drive連携を開く" }).click();
+    await page.getByRole("heading", { name: "Google Drive連携" }).waitFor();
+    await page.getByRole("button", { name: "Googleに接続", exact: true }).click();
+    await page.getByRole("status").filter({ hasText: "Google Drive：接続済み・保存先確認済み" }).waitFor();
+    assert.equal(geminiRequests, beforeShortcut);
     await page.reload();
     const persisted = await page.evaluate(() => ({
       config: JSON.parse(localStorage.getItem("studio-drive-public-config")),
@@ -214,6 +232,11 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     }));
     assert.deepEqual(persisted.config, { clientId: "fixture.apps.googleusercontent.com", project: "123456", pickerKey: "no-real-key" });
     assert.equal(persisted.tokenStored, false);
+    await page.locator("nav").getByRole("button", { name: "設定", exact: true }).click();
+    assert.equal(await page.getByLabel("OAuthクライアントID").inputValue(), persisted.config.clientId);
+    assert.equal(await page.getByLabel("Google Cloudプロジェクト番号").inputValue(), persisted.config.project);
+    assert.equal(await page.getByLabel("Picker用ブラウザ制限キー").inputValue(), persisted.config.pickerKey);
+    await page.getByRole("status").filter({ hasText: "Google Drive：未接続" }).waitFor();
     assert.deepEqual(errors, []);
     console.log("OK: Drive batch/retry, versioned metadata, saved browser settings, memory-only token");
   } finally {
