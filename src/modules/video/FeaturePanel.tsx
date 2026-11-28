@@ -109,10 +109,12 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
     job.current = controller;
     setStage("音声とH.264・AACの対応を確認中");
     const started = performance.now();
+    let outputStarted = false;
     try {
       await saveMetadata();
       controller.signal.throwIfAborted();
       setConfirm(false); setResult(undefined); release(); setProgress(0);
+      outputStarted = true;
       const { generateLongVideo } = await import("./longVideo");
       const exported = await generateLongVideo({ file: session.edited.file, title: title.trim(), number: number.trim(), cover, height,
         signal: controller.signal, onProgress: fraction => { setProgress(fraction); setStage("本編動画を書き出しています"); } });
@@ -123,7 +125,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
       current.elapsed = performance.now() - started;
       setResult(current);
     } catch (error) {
-      release();
+      if (outputStarted) release();
       if (controller.signal.aborted) setNotice("書き出しを中断しました。");
       else throw error;
     } finally { job.current = undefined; setStage(""); }
