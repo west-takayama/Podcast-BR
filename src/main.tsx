@@ -14,7 +14,7 @@ createRoot(document.getElementById("root")!).render(
 //
 // 新しい版は自動で適用しない。処理の途中で入れ替わると、動いているページが
 // 使う資材が消えて壊れるため、画面に知らせて押してもらってから切り替える。
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
+if (import.meta.env.PROD && import.meta.env.MODE !== "private" && "serviceWorker" in navigator) {
   // このページが読み込まれた時点で、既に前の版に面倒を見てもらっていたか。
   // 初回は「いいえ」で、あとから世話役が着任する(下記)
   const hadController = !!navigator.serviceWorker.controller;

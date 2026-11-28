@@ -1,3 +1,4 @@
+import type { ProductionAsset } from "../core/productionAsset";
 import type { SplitCaptionDraft } from "../lib/captionResponse";
 import DriveSavePanel from "./DriveSavePanel";
 import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
@@ -34,6 +35,8 @@ import type { ClipCapability, CoverCandidate } from "../lib/video/clip";
 const loadClipLib = () => import("../lib/video/clip");
 
 interface Props {
+  productionAsset?: ProductionAsset;
+  onProductionFile?: (file: File) => void;
   settings: Settings;
   previousTitles: string[];
   onModelChanged: (model: string) => void;
@@ -96,7 +99,7 @@ const fmt = (sec: number) =>
  * 音声だけを Gemini に聴かせて面白い区間を選ばせ、映像はその区間を
  * 端末内で切り出す。動画そのものはどこにも送らない。
  */
-export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing }: Props) {
+export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing, productionAsset, onProductionFile }: Props) {
   const [phase, setPhase] = useState<Phase>(existing ? "ready" : "idle");
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
@@ -337,6 +340,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   };
 
   const handleFile = async (file: File) => {
+    onProductionFile?.(file);
     if (!settings.apiKey) {
       setError("先に設定画面で Gemini API キーを入力してください");
       return;
@@ -802,6 +806,15 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         </div>
       )}
 
+      {!existing && !busy && productionAsset && fileRef.current !== productionAsset.file && (
+        <section className="card">
+          <p>共通素材 {productionAsset.file.name}</p>
+          <button type="button" disabled={!settings.apiKey} onClick={() => void handleFile(productionAsset.file)}>
+            共通素材で候補を生成
+          </button>
+          {!settings.apiKey && <p>候補生成には設定でGemini APIキーを登録してください。</p>}
+        </section>
+      )}
       {!existing && phase === "idle" && clips.length === 0 && fileRef.current && (
         <div className="card">
           <p className="muted">{fileInfo} — 完了した音声処理・有効な送信済み音声を再利用します。</p>
