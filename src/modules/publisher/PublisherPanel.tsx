@@ -1,3 +1,5 @@
+import { filterLabels, matchesFilter, type Filter } from "./dashboard";
+import { verifyOnDevice } from "./providerResult";
 import { importReceipt, makeRequest } from "./exchange";
 import { useEffect, useRef, useState } from "react";
 import { useDriveConnection } from "../../components/DriveConnection";
@@ -9,13 +11,14 @@ import { withDeadline } from "../../lib/deadline";
 import { listCandidates, verifiedVideo } from "./drive";
 import {
   accounts, approve, beginHandoff, destinations, draftKey, emptyPublisher, freeLimit, makeDraft, monthOf, planner,
-  proposal, quota, reconcile, type Candidate, type Delivery, type Destination, type Draft, type PublisherState, type Status,
+  proposal, quota, reconcile, fromJst, localDate, visibilityOptions, type Visibility, type Candidate, type Delivery, type Destination, type Draft, type PublisherState, type Status,
 } from "./model";
 import { publisherTransaction } from "./store";
 
 const labels: Record<Status, string> = {
   candidate: "投稿候補", review: "承認待ち", approved: "承認済み", sending: "予約処理中・引き渡し準備済み",
-  scheduled: "予約済み", published: "投稿済み", failed: "失敗・未登録確認済み", cancelled: "取消済み", unknown: "結果不明",
+  draft: "下書き登録済み", processing: "配信処理中", confirmation: "配信確認待ち",
+  scheduled: "予約済み", published: "API配信成功", failed: "失敗・未登録確認済み", cancelled: "取消済み", unknown: "結果不明",
 };
 const date = (at: number) => new Date(at).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
 
@@ -44,6 +47,12 @@ export default function PublisherPanel() {
     const timer = setTimeout(clearPacket, Math.max(0, packet.expiresAt - Date.now()));
     return () => clearTimeout(timer);
   }, [packet]);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [confirmedCount, setConfirmedCount] = useState("");
+  const [deviceIndex, setDeviceIndex] = useState<number>();
+  const [checker, setChecker] = useState("");
+  const [checkNote, setCheckNote] = useState("");
+  const [checkDate, setCheckDate] = useState(() => localDate(Date.now()));
   const [external, setExternal] = useState("");
   const [quotaMonth, setQuotaMonth] = useState(() => monthOf(Date.now()));
   const [result, setResult] = useState<Record<number, string>>({});
@@ -52,6 +61,9 @@ export default function PublisherPanel() {
   const mounted = useRef(true);
   const draft = state.drafts[current];
   const used = quota(state, quotaMonth);
+  const confirmed = state.confirmedQuota?.[quotaMonth];
+  const now = Date.now();
+  const displayed = state.deliveries.map((item, index) => ({ item, index })).filter(({ item }) => matchesFilter(item, filter, now));
 
   const clearPreview = () => {
     if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
@@ -146,7 +158,17 @@ export default function PublisherPanel() {
     <section className="card">
       <h3>無料投稿枠</h3>
       <label>対象月<input type="month" value={quotaMonth} onChange={event => setQuotaMonth(event.target.value)} /></label>
-      <p>{used} / {freeLimit} 件（投稿先ごとに1件として仮集計）</p>
+      <p>{used} / {freeLimit} 件（上限判定用の推定）</p>
+      <p>サービスの確認値 {confirmed ? `${confirmed.count}件 · ${date(confirmed.at)}` : "未確認"}</p>
+      <details><summary>サービスで確認した月間使用数を記録</summary>
+        <label>Metricoolの月間使用数<input type="number" min="0" max="1000" step="1" value={confirmedCount} onChange={e => setConfirmedCount(e.target.value)} /></label>
+        <button type="button" disabled={busy} onClick={() => void run(async () => {
+          const count = Number(confirmedCount);
+          if (!confirmedCount.trim() || !/^\d{4}-(0[1-9]|1[0-2])$/.test(quotaMonth) || !Number.isInteger(count) || count < 0 || count > 1000) throw new Error("Plannerで確認した対象月と件数を入力してください。");
+          await update(data => { (data.confirmedQuota ??= {})[quotaMonth] = { count, at: Date.now() }; });
+          setConfirmedCount("");
+        })}>確認値を保存</button>
+      </details>
       <label>Metricool側で確認した台帳外の枠使用数
         <input type="number" min="0" max="1000" step="1" value={external || String(state.other[quotaMonth] ?? 0)}
           onChange={event => setExternal(event.target.value)} />
@@ -160,7 +182,7 @@ export default function PublisherPanel() {
       <p>無料ルートの追加固定費は0円。{budget ? `月間残予算の目安は ${Math.floor(summarize(budget).remaining / scale).toLocaleString("ja-JP")}円です。` : ""}実際の枠はPlannerで確認してください。</p>
     </section>
     <section className="card">
-      <h3>投稿候補</h3>
+      <h3>投稿候補・承認待ち（{Object.values(state.drafts).filter(item => item.state === "review").length}件）</h3>
       {!Object.keys(state.drafts).length && <p>Driveから候補を取得してください。</p>}
       {Object.entries(state.drafts).map(([key, item]) => <div className="row-buttons" key={key}>
         <label className="check"><input type="checkbox" disabled={busy || item.state !== "review"} checked={selected.includes(key)}
@@ -220,6 +242,16 @@ export default function PublisherPanel() {
               });
             }} />{accounts[network]}</label>
             {copy && <>
+              <label>公開範囲<select aria-label={`公開範囲 · ${accounts[network]}`} value={copy.visibility ?? "public"} onChange={event => {
+                const visibility = event.target.value as Visibility;
+                edit(previous => ({ ...previous, plan: { ...previous.plan, [network]: { ...previous.plan[network]!, visibility } } }));
+              }}>{visibilityOptions[network].map(option => <option key={option} value={option}>
+                {option === "public" ? "一般公開予定" : option === "draft" ? "下書きのみ" : "非公開"}（{option}）
+              </option>)}</select></label>
+              {network === "youtube" && <label className="check"><input type="checkbox" checked={copy.notifySubscribers ?? false} onChange={event => {
+                const notifySubscribers = event.target.checked;
+                edit(previous => ({ ...previous, plan: { ...previous.plan, [network]: { ...previous.plan[network]!, notifySubscribers } } }));
+              }} />登録者へ通知する</label>}
               {network === "youtube" && <>
                 <label>タイトル<input key={current + network + copy.title} defaultValue={copy.title} onBlur={event => {
                   if (copy.title !== event.target.value) change("title", event.target.value);
@@ -255,7 +287,7 @@ export default function PublisherPanel() {
       {handoff && preview && <div className="publisher-network">
         <h4>{accounts[handoff.destination]} の引き渡し</h4>
         <p>{handoff.copy.at.replace("T", " ")}（日本時間）{handoff.destination === "youtube" && ` · 子ども向け ${handoff.audience === "yes" ? "はい" : "いいえ"}`}</p>
-        <p>候補 {handoff.copy.title}</p>
+        <p>候補 {handoff.copy.title} · 公開範囲 {handoff.copy.visibility ?? "public"}</p>
         {handoff.destination === "youtube" && <label>コピー用タイトル<input readOnly value={handoff.copy.title} /></label>}
         <label>コピー用投稿情報<textarea readOnly value={[handoff.copy.text, handoff.copy.hashtags].filter(Boolean).join("\n\n")} /></label>
         <div className="row-buttons">
@@ -297,12 +329,36 @@ export default function PublisherPanel() {
           setReceipt(""); setVerifiedReceipt(false); clearPacket(); setHandoff(undefined);
         })}>結果を取り込む</button>
       </details>
-      {state.deliveries.map((item, index) => <div className="publisher-network" key={index}>
-        <strong>{accounts[item.destination]} · {labels[item.state]}</strong>
+      <label>投稿の表示<select value={filter} onChange={e => setFilter(e.target.value as Filter)}>
+        {Object.entries(filterLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+      </select></label>
+      {!displayed.length && <p>条件に一致する投稿はありません。</p>}
+      {displayed.map(({ item, index }) => <div className="publisher-network" key={index}>
+        <strong>{accounts[item.destination]} · {item.state === "published" && !item.provider ? "投稿済み（手動記録）" : labels[item.state]}</strong>
+        {item.device && <p>実機確認済み · {item.device.by} · {date(item.device.at)}<br />{item.device.note}</p>}
+        {item.provider && <details><summary>APIの記録 · {item.provider.apiState}</summary>
+          <p>投稿ID {item.provider.postId ?? "不明"} · UUID {item.provider.uuid ?? "不明"} · 動画ID {item.provider.videoId ?? "不明"}{item.provider.responseId && ` · 配信応答ID ${item.provider.responseId}`}</p>
+          <p>公開範囲 {item.provider.visibility} · 照合 {date(item.provider.observedAt)}</p>
+          {item.provider.detail && <p>詳細 {item.provider.detail}</p>}
+          <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.provider.raw}</pre>
+        </details>}
+        {["confirmation", "published"].includes(item.state) && <button type="button" disabled={busy} onClick={() => {
+          setDeviceIndex(index); setChecker(""); setCheckNote(""); setCheckDate(localDate(Date.now()));
+        }}>実機確認を記録する</button>}
+        {deviceIndex === index && <div>
+          <label>確認者<input maxLength={80} value={checker} onChange={e => setChecker(e.target.value)} /></label>
+          <label>確認日時（日本時間）<input type="datetime-local" value={checkDate} onChange={e => setCheckDate(e.target.value)} /></label>
+          <label>実機で確認した内容<textarea aria-label="実機で確認した内容" maxLength={500} value={checkNote} onChange={e => setCheckNote(e.target.value)} /></label>
+          <button type="button" disabled={busy} onClick={() => void run(async () => {
+            // Preserve exact time for a confirmation made in the current minute.
+            await update(data => verifyOnDevice(data, index, checker, checkNote, checkDate === localDate(Date.now()) ? Date.now() : fromJst(checkDate)));
+            setDeviceIndex(undefined);
+          })}>実機確認を保存</button>
+        </div>}
         <p>候補の版 {item.versionId.slice(0, 12)} · {item.copy.at.replace("T", " ")} JST</p>
         {item.reference && <p>外部ID {item.reference}</p>}
         {item.note && <p>確認内容 {item.note}</p>}
-        {["sending", "scheduled", "unknown"].includes(item.state) && <>
+        {!item.provider && ["sending", "scheduled", "unknown"].includes(item.state) && <>
           <label>外部IDまたはPlannerで確認した結果<input value={result[index] ?? ""}
             onChange={event => setResult(previous => ({ ...previous, [index]: event.target.value }))} /></label>
           <p>結果不明の場合は、Plannerと投稿先を確認してから未登録・取消を記録してください。</p>
