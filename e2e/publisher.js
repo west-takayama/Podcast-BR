@@ -76,7 +76,7 @@ for (let i = 1; i <= 2; i++) {
     await page.getByRole("button", { name: "選択した候補を一括承認" }).click();
     await page.getByText("選んだ版を承認しました。").waitFor();
     await page.getByText("合成候補1 · 承認済み", { exact: true }).locator("..").getByRole("button").click();
-    const edit = page.getByLabel("投稿文", { exact: true }).first();
+    const edit = page.getByRole("textbox", { name: "投稿文 · Instagram · bridge_radio", exact: true });
     await edit.fill("編集したため再承認が必要");
     await edit.blur();
     await page.getByRole("heading", { name: "合成候補1 · 投稿候補" }).waitFor();

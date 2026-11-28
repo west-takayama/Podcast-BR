@@ -209,7 +209,7 @@ export default function PublisherPanel() {
                   edit(previous => ({ ...previous, audience: value === "yes" || value === "no" ? value : undefined }));
                 }}><option value="">選択してください</option><option value="yes">はい</option><option value="no">いいえ</option></select></label>
               </>}
-              <label>投稿文<textarea defaultValue={copy.text} key={current + network + copy.text} onBlur={event => {
+              <label>投稿文<textarea aria-label={`投稿文 · ${accounts[network]}`} defaultValue={copy.text} key={current + network + copy.text} onBlur={event => {
                 if (copy.text !== event.target.value) change("text", event.target.value);
               }} /></label>
               <label>ハッシュタグ<input defaultValue={copy.hashtags} key={current + network + copy.hashtags} onBlur={event => {
