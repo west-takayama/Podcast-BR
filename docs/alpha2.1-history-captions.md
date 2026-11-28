@@ -13,6 +13,8 @@
 
 ## 回帰試験
 
+合成WAVが未生成なら、先に `(cd e2e && node make-fixtures.js)` を実行する。
+
 `npm run dev -- --host localhost --port 4251 --strictPort` を起動し、`node e2e/history-caption-race.js` を実行する。合成素材の履歴を使い、単独20回と並行4コンテキストで20回の計40回を実行する。全文保存と出演者欄の競合、履歴再読み込み、開いた後の全文更新を検証する。各モードの初回で動画を書き出し、別タブで更新した際に旧動画リンクが消えることを確認する。Geminiの要求は捕捉し、1件でも発生すれば失敗とする。
 
 既存の全体試験は `npm run build` に続けて `npm run e2e` を実行する。
