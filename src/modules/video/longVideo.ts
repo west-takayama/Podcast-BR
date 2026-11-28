@@ -1,7 +1,9 @@
 import { ALL_FORMATS, AudioSampleSink, AudioSampleSource, BlobSource, EncodedPacket, EncodedVideoPacketSource,
   Input, Mp4OutputFormat, Output, StreamTarget, canEncodeAudio } from "mediabunny";
 
-export type VideoResolution = 720 | 1080;
+export type VideoResolution = 360 | 480 | 720;
+const widths: Record<VideoResolution, number> = { 360: 640, 480: 854, 720: 1280 };
+const videoBitrates: Record<VideoResolution, number> = { 360: 350_000, 480: 500_000, 720: 750_000 };
 
 function fittedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, width: number) {
   const lines: string[] = [""];
@@ -15,11 +17,12 @@ function fittedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: n
   lines.forEach((line, index) => ctx.fillText(line, x, y + 62 * index, width));
 }
 
-async function coverFrame(title: string, number: string, cover?: Blob) {
+async function coverFrame(title: string, number: string, height: VideoResolution, cover?: Blob) {
   const canvas = document.createElement("canvas");
-  canvas.width = 1920;
-  canvas.height = 1080;
+  canvas.width = widths[height];
+  canvas.height = height;
   const ctx = canvas.getContext("2d", { alpha: false })!;
+  ctx.scale(canvas.width / 1920, canvas.height / 1080);
   ctx.fillStyle = "#121212";
   ctx.fillRect(0, 0, 1920, 1080);
   ctx.fillStyle = "#ffd400";
@@ -37,20 +40,16 @@ async function coverFrame(title: string, number: string, cover?: Blob) {
       ctx.drawImage(bitmap, 1438 - bitmap.width * factor / 2, 540 - bitmap.height * factor / 2, bitmap.width * factor, bitmap.height * factor);
     }
     ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 52px sans-serif";
+    ctx.font = "bold 60px sans-serif";
     fittedText(ctx, title, 96, 464, bitmap ? 940 : 1600);
   } finally { bitmap?.close(); }
   return canvas;
 }
 
 async function encodeStill(canvas: HTMLCanvasElement, height: VideoResolution) {
-  const width = height === 720 ? 1280 : 1920;
-  const resized = document.createElement("canvas");
-  resized.width = width;
-  resized.height = height;
-  resized.getContext("2d")!.drawImage(canvas, 0, 0, width, height);
+  const width = canvas.width;
   if (typeof VideoEncoder === "undefined") throw new Error("このブラウザーのH.264書き出しに対応していません。");
-  const config: VideoEncoderConfig = { codec: "avc1.420028", width, height, bitrate: 3_000_000, framerate: 1, avc: { format: "avc" } };
+  const config: VideoEncoderConfig = { codec: "avc1.420028", width, height, bitrate: videoBitrates[height], framerate: 1, avc: { format: "avc" } };
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("この端末では選択した画質のH.264を書き出せません。");
   let still: EncodedPacket | undefined;
   let metadata: EncodedVideoChunkMetadata | undefined;
@@ -61,7 +60,7 @@ async function encodeStill(canvas: HTMLCanvasElement, height: VideoResolution) {
   } });
   try {
     encoder.configure(config);
-    const frame = new VideoFrame(resized, { timestamp: 0, duration: 1_000_000 });
+    const frame = new VideoFrame(canvas, { timestamp: 0, duration: 1_000_000 });
     try { encoder.encode(frame, { keyFrame: true }); } finally { frame.close(); }
     await encoder.flush();
     if (issue) throw issue;
@@ -90,12 +89,8 @@ export async function generateLongVideo(args: {
     const bitrate = channels > 1 ? 160000 : 96000;
     const audioConfig = { numberOfChannels: channels, sampleRate, bitrate };
     const nativeAac = await canEncodeAudio("aac", audioConfig);
-    if (!nativeAac) {
-      const { registerAacEncoder } = await import("@mediabunny/aac-encoder");
-      registerAacEncoder();
-      if (!await canEncodeAudio("aac", audioConfig)) throw new Error("この端末ではAAC書き出しが利用できません。");
-    }
-    const { still, metadata } = await encodeStill(await coverFrame(title, number, cover), height);
+    if (!nativeAac) throw new Error("このブラウザーはAAC書き出しに対応していません。編集済み音源は保存されています。対応する端末で本編を書き出してください。");
+    const { still, metadata } = await encodeStill(await coverFrame(title, number, height, cover), height);
     signal.throwIfAborted();
     writer = await handle.createWritable();
     const target = new StreamTarget(new WritableStream({

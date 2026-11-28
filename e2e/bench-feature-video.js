@@ -7,14 +7,16 @@ const { chromium } = require("playwright");
 
 const url = process.env.FEATURE_DEV_URL || "http://localhost:4292";
 const seconds = (process.env.FEATURE_SECONDS || "4").split(",").map(Number);
+const rounds = Number(process.env.FEATURE_ROUNDS || 1);
 const heights = (process.env.FEATURE_HEIGHTS || "720").split(",").map(Number);
 const media = mkdtempSync(join(tmpdir(), "beta4-feature-"));
 async function chromiumRss(session) {
   const { processInfo } = await session.send("SystemInfo.getProcessInfo");
-  return processInfo.reduce((sum, { id }) => {
+  const rss = processInfo.reduce((sum, { id }) => {
     try { return sum + Number(readFileSync(`/proc/${id}/status`, "utf8").match(/^VmRSS:\s+(\d+)/m)?.[1] ?? 0); }
     catch { return sum; }
   }, 0);
+  return { rss, cpuSeconds: processInfo.reduce((sum, process) => sum + process.cpuTime, 0) };
 }
 const execute = (program, args) => {
   const result = spawnSync(program, args, { encoding: "utf8", maxBuffer: 2 ** 24 });
@@ -27,7 +29,7 @@ const execute = (program, args) => {
     const fixture = join(media, duration + ".mp3");
     execute("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", String(duration),
       "-ac", "1", "-b:a", "64k", fixture]);
-    for (const height of heights) {
+    for (let round = 1; round <= rounds; round++) for (const height of heights) {
       const browser = await chromium.launch(require("./browser-options"));
       try {
         const page = await browser.newPage({ viewport: { width: 390, height: 844 }, acceptDownloads: true, serviceWorkers: "block" });
@@ -38,12 +40,16 @@ const execute = (program, args) => {
           return route.abort();
         });
         await page.goto(url);
+        if (process.env.FEATURE_TEST_CODEC === "1") {
+          await page.evaluate(async () => import("/e2e/fixture-aac.ts"));
+        }
         await page.evaluate(() => { const input = document.createElement("input"); input.type = "file"; input.id = "fixture"; document.body.append(input); });
         await page.locator("#fixture").setInputFiles(fixture);
         const cdp = await browser.newBrowserCDPSession();
         const before = await chromiumRss(cdp);
-        let peak = before;
-        const collect = setInterval(() => { void chromiumRss(cdp).then(kib => { peak = Math.max(peak, kib); }).catch(() => {}); }, 500);
+        let peak = before.rss;
+        let cpu = before.cpuSeconds;
+        const collect = setInterval(() => { void chromiumRss(cdp).then(measurement => { peak = Math.max(peak, measurement.rss); cpu = Math.max(cpu, measurement.cpuSeconds); }).catch(() => {}); }, 500);
         let result;
         try {
           result = await page.evaluate(async height => {
@@ -65,7 +71,7 @@ const execute = (program, args) => {
         const video = streams.find(stream => stream.codec_type === "video");
         const audio = streams.find(stream => stream.codec_type === "audio");
         assert.equal(video.height, height);
-        assert.equal(video.width, height * 16 / 9);
+        assert.equal(video.width, height === 480 ? 854 : height * 16 / 9);
         assert.equal(video.codec_name, "h264");
         assert.equal(audio.codec_name, "aac");
         assert.ok(Math.abs(Number(audio.duration) - Number(video.duration)) < 0.12);
@@ -84,8 +90,8 @@ const execute = (program, args) => {
         if (process.env.FEATURE_STILLS) execute("ffmpeg", ["-v", "error", "-y", "-i", path, "-vf", "scale=1920:1080",
           "-frames:v", "1", join(process.env.FEATURE_STILLS, `${duration}s-${height}p.png`)]);
         assert.deepEqual(external, []);
-        console.log(JSON.stringify({ seconds: duration, height, ...result, sourceBytes: readFileSync(fixture).length,
-          audioDeltaDb: audioDeltaDb.map(value => Number(value.toFixed(2))), audioDuration: Number(audio.duration), videoDuration: Number(video.duration), rssBaselineKiB: before, rssPeakKiB: peak, externalRequests: external.length }));
+        console.log(JSON.stringify({ round, seconds: duration, height, ...result, sourceBytes: readFileSync(fixture).length,
+          audioDeltaDb: audioDeltaDb.map(value => Number(value.toFixed(2))), audioDuration: Number(audio.duration), videoDuration: Number(video.duration), rssBaselineKiB: before.rss, rssPeakKiB: peak, cpuSeconds: Math.round((cpu - before.cpuSeconds) * 100) / 100, externalRequests: external.length }));
       } finally { await browser.close(); }
     }
   }

@@ -9,7 +9,7 @@ function walk(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const file = join(directory, entry.name);
     const path = relative(root, file).split("\\").join("/");
-    if (entry.isSymbolicLink() || forbidden.test(path)) {
+    if (entry.isSymbolicLink() || forbidden.test(path) || /aac-encoder|ffmpeg/i.test(path)) {
       throw new Error(`公開成果物に禁止対象が含まれています: ${path}`);
     }
     if (entry.isDirectory()) walk(file);

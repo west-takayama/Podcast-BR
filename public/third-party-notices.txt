@@ -1,0 +1,19 @@
+BRIDGE RADIO AI STUDIO — Third-party notices
+
+Mediabunny 1.51.0, Mozilla Public License 2.0
+License: licenses/mediabunny.txt
+Source: https://github.com/Vanilagy/mediabunny/tree/v1.51.0
+
+@mediabunny/mp3-encoder 1.51.0, Mozilla Public License 2.0
+License: licenses/mediabunny-mp3-encoder.txt
+Source and bridge build instructions:
+https://github.com/Vanilagy/mediabunny/tree/v1.51.0/packages/mp3-encoder
+This encoder uses LAME 3.100 under the GNU Lesser General Public License.
+LAME source and license: https://lame.sourceforge.io/
+https://sourceforge.net/projects/lame/files/lame/3.100/
+https://lame.sourceforge.io/license.txt
+
+React, React DOM, Scheduler and Noble Hashes, MIT
+Licenses: licenses/react.txt, licenses/react-dom.txt,
+licenses/scheduler.txt, licenses/noble-hashes.txt
+Sources: https://github.com/facebook/react and https://github.com/paulmillr/noble-hashes
