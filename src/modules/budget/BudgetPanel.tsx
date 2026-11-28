@@ -14,7 +14,7 @@ const stateNames: Record<LedgerEntry["state"], string> = {
 };
 const purposes: Record<string, string> = {
   analysis: "番組分析", captions: "字幕", spotify: "Spotify文面", transcript: "全文", metadata: "番組情報",
-  topics: "次の回", models: "モデル一覧", upload: "音声送信", activation: "音声準備の確認",
+  topics: "次の回", analytics: "経営分析", models: "モデル一覧", upload: "音声送信", activation: "音声準備の確認",
 };
 const expense = (value: string, allowNegative = false) =>
   value.trim() !== "" && Number.isFinite(Number(value)) && (allowNegative || Number(value) >= 0) && Math.abs(Number(value)) <= 1_000_000;

@@ -1,3 +1,4 @@
+import { captureProduction } from "./productionMetrics";
 /** Local-only diagnostics. Fixed stage names and numbers; never include request/response data. */
 export type TimingStage = 'gemini-usage' | 'upload' | 'activation' | 'generation-request' | 'retry-wait' | 'metadata-total' | 'generation-and-parsing' | 'conversion' | 'result-display' | 'caption-conversion' | 'caption-audio-decode' | 'caption-alignment' | 'video-export' | 'video-audio-decode' | 'drive-save' | 'video-audio-encode' | 'video-draw' | 'video-encode' | 'video-finalize' | 'video-blob' | 'caption-response';
 export type VideoTimingProfile = {
@@ -52,6 +53,7 @@ export function recordTiming(stage: TimingStage, elapsedMs: number, success: boo
     ...(caption === undefined ? {} : { caption: { ...caption } }),
   };
   entries = [...entries.slice(-59), entry];
+  captureProduction(stage, elapsedMs, success);
   console.info('[AI STUDIO] stage timing', entry);
   listeners.forEach(listener => listener());
 }

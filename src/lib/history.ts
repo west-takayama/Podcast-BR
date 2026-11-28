@@ -95,6 +95,26 @@ export async function listEpisodes(): Promise<EpisodeRecord[]> {
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
 
+export async function episodeIndex(): Promise<Pick<EpisodeRecord, "id" | "createdAt">[]> {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(STORE, "readonly");
+      const rows: Pick<EpisodeRecord, "id" | "createdAt">[] = [];
+      const query = transaction.objectStore(STORE).openCursor();
+      query.onsuccess = () => {
+        const cursor = query.result;
+        if (!cursor) return;
+        const { id, createdAt } = cursor.value as EpisodeRecord;
+        rows.push({ id, createdAt });
+        cursor.continue();
+      };
+      transaction.oncomplete = () => resolve(rows);
+      transaction.onabort = () => reject(transaction.error ?? new Error("制作履歴を開けません。"));
+    });
+  } finally { db.close(); }
+}
+
 export const getEpisode = (id: string) => tx<EpisodeRecord | undefined>("readonly", (store) => store.get(id));
 
 export async function readProductionEntry<T>(id: string): Promise<T | undefined> {
