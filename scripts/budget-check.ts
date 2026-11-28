@@ -57,4 +57,14 @@ assert.equal(free.estimate, undefined);
 const freeKnown = beginRequest(state, request, "free-known", at);
 finishRequest(freeKnown, counts, { elapsedMs: 1, status: 200 });
 assert.equal(freeKnown.estimate, 0);
+const changed = emptyBudget();
+changed.settings = { ...changed.settings, ...exchange, mode: "postpaid" };
+const oldQuote = beginRequest(changed, { ...request, model: "gemini-3.8-flash" }, "old-quote", Date.parse("2026-12-31T14:59:59Z"));
+changed.settings.usdJpy = 200;
+const newQuote = beginRequest(changed, { ...request, model: "gemini-3.8-flash" }, "new-quote", Date.parse("2026-12-31T15:00:00Z"));
+assert.ok(newQuote.reserved >= 4 * oldQuote.reserved - 3 && newQuote.reserved <= 4 * oldQuote.reserved);
+finishRequest(oldQuote, { inputTokens: 1_000_000, outputTokens: 1_000_000 }, { elapsedMs: 5, status: 200 });
+assert.ok(Math.abs(oldQuote.estimate! - 519.75 * scale) <= 1);
+assert.notEqual(oldQuote.rateVersion, newQuote.rateVersion);
+
 console.log("OK: modality/cache rates, thinking, FX/tax, JST rollover, estimates, calls and reservations");
