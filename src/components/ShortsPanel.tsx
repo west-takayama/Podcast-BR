@@ -535,6 +535,19 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       setCaptions(prev => ({ ...prev, [i]: cached }));
       return cached;
     }
+    const { prepareCaptionAudio, captionActivityForRange } = await loadClipLib();
+    const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
+    if (archived) {
+      recordGeminiCache("captions");
+      setStatus("保存済み字幕を音声に合わせています…");
+      const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
+      signal.throwIfAborted();
+      const aligned = await measureStage("caption-alignment", async () => alignCues(archived, activity, durationMs));
+      rangeDrafts.current.set(rangeKey, aligned);
+      if (rangeDrafts.current.size > 4) rangeDrafts.current.delete(rangeDrafts.current.keys().next().value!);
+      setCaptions(prev => ({ ...prev, [i]: aligned }));
+      return aligned;
+    }
     const episodeId = existing?.episodeId ?? newEpisodeId.current;
     const sharedDraft = episodeId ? readEpisodeDraft(episodeId, rangeKey) : undefined;
     if (sharedDraft) {
@@ -552,19 +565,6 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         setCaptions(prev => ({ ...prev, [i]: cues }));
         return cues;
       }
-    }
-    const { prepareCaptionAudio, captionActivityForRange } = await loadClipLib();
-    const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
-    if (archived) {
-      recordGeminiCache("captions");
-      setStatus("保存済み字幕を音声に合わせています…");
-      const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
-      signal.throwIfAborted();
-      const aligned = await measureStage("caption-alignment", async () => alignCues(archived, activity, durationMs));
-      rangeDrafts.current.set(rangeKey, aligned);
-      if (rangeDrafts.current.size > 4) rangeDrafts.current.delete(rangeDrafts.current.keys().next().value!);
-      setCaptions(prev => ({ ...prev, [i]: aligned }));
-      return aligned;
     }
     if (!settings.apiKey) throw new Error("保存済みの字幕が区間全体にありません。Gemini APIキーを設定するか、字幕をオフにしてください。");
     setStatus("この区間の音声を取り出しています…");
