@@ -62,12 +62,26 @@ for (let i = 1; i <= 2; i++) {
     await page.getByText("投稿候補 2件を確認しました。").waitFor();
     for (let i = 1; i <= 2; i++) {
       await page.getByText(`合成候補${i} · 投稿候補`, { exact: true }).locator("..").getByRole("button").click();
+      if (i === 1) {
+        media.set("fixture-video-1", Buffer.concat([bytes, Buffer.from("changed")]));
+        await page.getByRole("button", { name: "非公開動画をプレビュー" }).click();
+        await page.getByText(/動画の版が変更されています/).waitFor();
+        assert.equal(await page.locator(".publisher video").count(), 0);
+        media.set("fixture-video-1", bytes);
+      }
       await page.getByLabel("子ども向け").selectOption("no");
       await page.getByRole("button", { name: "承認待ちにする" }).click();
       await page.getByRole("checkbox", { name: `合成候補${i} · 承認待ち` }).check();
     }
     await page.getByRole("button", { name: "選択した候補を一括承認" }).click();
     await page.getByText("選んだ版を承認しました。").waitFor();
+    await page.getByText("合成候補1 · 承認済み", { exact: true }).locator("..").getByRole("button").click();
+    const edit = page.getByLabel("投稿文", { exact: true }).first();
+    await edit.fill("編集したため再承認が必要");
+    await edit.blur();
+    await page.getByRole("heading", { name: "合成候補1 · 投稿候補" }).waitFor();
+    assert.equal(await page.getByRole("button", { name: /引き渡しを準備/ }).count(), 0);
+    await page.getByText("合成候補2 · 承認済み", { exact: true }).locator("..").getByRole("button").click();
     await page.getByRole("button", { name: /引き渡しを準備 · Instagram/ }).click();
     await page.getByRole("link", { name: "承認済み動画を保存" }).waitFor();
     assert.match(await page.getByLabel("コピー用投稿情報").inputValue(), /収録から選んだテスト投稿文/);
