@@ -53,7 +53,7 @@ export default function TimingDiagnostics() {
       `H.264 1080p: ${standard} / ハードウェア優先: ${standardHardware}\n` +
       `H.264 720p: ${light} / ハードウェア優先: ${lightHardware}`);
   };
-  const report = ["AI STUDIO 3.0 α3 処理時間", ...timings.map(entry => {
+  const report = ["AI STUDIO 3.0 β1 処理時間", ...timings.map(entry => {
     const details = [
       entry.success ? "完了" : "未完了",
       entry.attempt === undefined ? "" : `試行 ${entry.attempt}`,

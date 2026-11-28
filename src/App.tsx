@@ -56,6 +56,7 @@ const AudioPanel = lazy(() => import("./modules/audio/AudioPanel"));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel"));
 const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
 const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
+const PublisherPanel = lazy(() => import("./modules/publisher/PublisherPanel"));
 const BudgetPanel = lazy(() => import("./modules/budget/BudgetPanel"));
 const TrackPicker = lazy(() => import("./components/TrackPicker"));
 
@@ -64,7 +65,7 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget";
+type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget" | "publisher";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -839,7 +840,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 α3</h1>
+        <h1>🎙️ AI STUDIO 3.0 β1</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
@@ -851,6 +852,7 @@ export default function App() {
           <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
             履歴
           </button>
+          <button className={tab === "publisher" ? "active" : ""} onClick={() => setTab("publisher")}>投稿</button>
           <button className={tab === "budget" ? "active" : ""} onClick={() => setTab("budget")}>予算</button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => openSettings()}>
             設定
@@ -907,6 +909,7 @@ export default function App() {
 
       <Suspense fallback={<Loading />}>
       {tab === "budget" && <BudgetPanel />}
+      {tab === "publisher" && <PublisherPanel />}
       {tab === "settings" && (
         <>
           <DriveSettings focusHeading={driveSetupShortcut} />

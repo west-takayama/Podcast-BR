@@ -39,7 +39,7 @@ interface DriveFile {
 interface ReservedIds { video: string; manifest: string }
 type Role = keyof ReservedIds;
 
-async function blobDigest(blob: Blob, signal: AbortSignal) {
+export async function blobDigest(blob: Blob, signal: AbortSignal) {
   signal.throwIfAborted();
   let digest = BLOB_DIGESTS.get(blob);
   if (!digest) {
