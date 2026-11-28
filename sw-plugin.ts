@@ -24,7 +24,8 @@ export function serviceWorker(): Plugin {
     name: "podcast-br-sw",
     apply: "build",
     generateBundle(_options, bundle) {
-      const assets = Object.keys(bundle).filter((name) => name !== "index.html" && !/^assets\/AudioPanel-/.test(name));
+      const onDemand = /^assets\/(?:AudioPanel|AnalyticsPanel|FeaturePanel|longVideo)-/;
+      const assets = Object.keys(bundle).filter((name) => name !== "index.html" && !onDemand.test(name));
       // "./" は index.html のこと。ナビゲーションはこの URL で解決される
       const precache = ["./", ...assets, ...STATIC_FILES].sort();
       const version = createHash("sha256").update(precache.join("\n")).digest("hex").slice(0, 12);
@@ -34,7 +35,7 @@ export function serviceWorker(): Plugin {
       // 初めて開いた端末では、裏で 1.9MB ほど先読みしている。回線を分け合うので、
       // 画面が出るまでの時間に響く。整音や切り抜きの重い部品(合わせて 1.5MB)は
       // 押されるまで要らないので、画面まわりを取り終えてから取る。
-      const HEAVY = /(encoder\.worker|clip-|mp3-)/;
+      const HEAVY = /(encoder\.worker|clip-|mp3-|output-)/;
       const first = precache.filter((f) => !HEAVY.test(f));
       const later = precache.filter((f) => HEAVY.test(f));
 

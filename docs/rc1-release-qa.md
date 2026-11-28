@@ -18,7 +18,7 @@
 
 360p（640×360）を初期値にする。480p（854×480）と720pは視認性を確認して選べる。画面に合わせて1枚を描き、AVCのキーフレームを1回だけエンコードして2秒間隔で再利用する。構成上の有効フレームレートは長尺で約0.5fps。映像のエンコーダー設定値は順に350/500/750 kbps。実ファイルの平均値は素材とキーフレームサイズによる。音声は映像設定と独立し、従来どおりAAC 96 kbps（モノラル）または160 kbps（ステレオ）、サンプリング周波数を維持する。MP3/WAVをAACにする1回の変換に限定し、EQ・ラウドネス調整は入れない。
 
-制作はローカルで進み、完成ファイルはOPFSへ逐次書き込む。容量不足や未対応のAACは理由を表示して中断する。Chromeでの長尺QAでは試験専用のソフトウェアAACを使用。正式候補のビルドはネイティブAACのみ。iPhone SafariのネイティブAACとWebCodecs対応を受入時に確認する。YouTubeの一般向け推奨フレームレートは低フレームレートを保証しないため、隔離試験後のアップロード検証は別途承認を得る。[YouTube 推奨設定](https://support.google.com/youtube/answer/1722171) · [Safari 26 WebKit](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/)
+AUDIOの入口、ANALYTICS、本編の画面と生成モジュールは初回利用時に取得する。起動時のService Workerの先読みから外し、利用後は通常のキャッシュ制御に従う。制作はローカルで進み、完成ファイルはOPFSへ逐次書き込む。容量不足や未対応のAACは理由を表示して中断する。Chromeでの長尺QAでは試験専用のソフトウェアAACを使用。正式候補のビルドはネイティブAACのみ。iPhone SafariのネイティブAACとWebCodecs対応を受入時に確認する。YouTubeの一般向け推奨フレームレートは低フレームレートを保証しないため、隔離試験後のアップロード検証は別途承認を得る。[YouTube 推奨設定](https://support.google.com/youtube/answer/1722171) · [Safari 26 WebKit](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/)
 
 ## セキュリティ・ライセンス
 

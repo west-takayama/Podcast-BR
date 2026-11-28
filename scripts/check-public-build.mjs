@@ -19,7 +19,7 @@ function walk(directory) {
   }
 }
 walk(root);
-if (/AudioPanel-/.test(readFileSync(join(root, "sw.js"), "utf8"))) {
-  throw new Error("AUDIOの入口がサービスワーカーで先読みされています。");
+if (/(?:AudioPanel|AnalyticsPanel|FeaturePanel|longVideo)-/.test(readFileSync(join(root, "sw.js"), "utf8"))) {
+  throw new Error("必要時に読むモジュールがサービスワーカーで先読みされています。");
 }
 console.log("OK: public build audio, private directories, source maps and prefetch checks");
