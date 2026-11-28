@@ -15,13 +15,22 @@ export type Candidate = {
   candidateId: string; versionId: string; videoId: string; manifestId: string; filename: string; mime: string;
   title: string; description: string; hashtags: string[]; startMs: number; endMs: number;
 };
-export type Copy = { title: string; text: string; hashtags: string; at: string };
+export type Visibility = "public" | "private" | "SELF_ONLY" | "draft";
+export type Copy = { title: string; text: string; hashtags: string; at: string; visibility?: Visibility; notifySubscribers?: boolean };
+export const visibilityOptions: Record<Destination, Visibility[]> = {
+  instagram: ["public", "draft"], tiktok: ["public", "SELF_ONLY"], youtube: ["public", "private"],
+};
+export type ProviderResult = {
+  postId?: string; uuid?: string; videoId?: string; responseId?: string; apiState: string; detail?: string; raw: string;
+  visibility: Visibility; scheduledAt: string; observedAt: number; approval: string; draft?: boolean; autoPublish?: boolean; notifySubscribers?: boolean;
+};
+export type DeviceCheck = { by: string; at: number; note: string };
 export type Plan = Partial<Record<Destination, Copy>>;
-export type Status = "candidate" | "review" | "approved" | "sending" | "scheduled" | "published" | "failed" | "cancelled" | "unknown";
+export type Status = "candidate" | "review" | "approved" | "sending" | "scheduled" | "published" | "failed" | "cancelled" | "unknown" | "draft" | "processing" | "confirmation";
 export type Delivery = { requestId?: string; candidateId: string; versionId: string; digest: string; destination: Destination; copy: Copy; audience?: Draft["audience"];
-  state: Status; resultObservedAt?: number; reference?: string; at: number; note?: string };
+  state: Status; provider?: ProviderResult; providerProgress?: Status; receiptFingerprint?: string; device?: DeviceCheck; resultObservedAt?: number; reference?: string; at: number; note?: string };
 export type Draft = { candidate: Candidate; plan: Plan; state: "candidate" | "review" | "approved"; audience?: "yes" | "no" };
-export type PublisherState = { drafts: Record<string, Draft>; deliveries: Delivery[]; audit: (Delivery & { recordedAt: number })[]; other: Record<string, number> };
+export type PublisherState = { drafts: Record<string, Draft>; deliveries: Delivery[]; audit: (Delivery & { recordedAt: number })[]; other: Record<string, number>; confirmedQuota?: Record<string, { count: number; at: number }> };
 export const emptyPublisher = (): PublisherState => ({ drafts: {}, deliveries: [], audit: [], other: {} });
 export const draftKey = (candidate: Pick<Candidate, "candidateId" | "versionId">) => candidate.candidateId + ":" + candidate.versionId;
 
@@ -56,6 +65,7 @@ export function validate(draft: Draft, now: number) {
   if (!selected.length) throw new Error("投稿先を選んでください。");
   for (const network of selected) {
     const copy = draft.plan[network]!;
+    if (!visibilityOptions[network].includes(copy.visibility ?? "public")) throw new Error("媒体に対応する公開範囲を選んでください。");
     if (!(fromJst(copy.at) > now)) throw new Error("日本時間で将来の予約日時を指定してください。");
     if (network === "youtube" && (!copy.title.trim() || copy.title.length > 100 || !draft.audience)) {
       throw new Error("YouTubeのタイトル（100文字以内）と子ども向け設定を確認してください。");
@@ -75,7 +85,14 @@ export function approve(state: PublisherState, keys: string[], now: number) {
 
 const active = (delivery: Delivery) => delivery.state !== "failed" && delivery.state !== "cancelled";
 export function quota(state: PublisherState, month: string) {
-  return (state.other[month] ?? 0) + state.deliveries.filter(item => active(item) && monthOf(fromJst(item.copy.at)) === month).length;
+  const eligible = state.deliveries.filter(item => active(item) && item.copy.visibility !== "draft" &&
+    item.state !== "draft" && monthOf(fromJst(item.copy.at)) === month);
+  const local = (state.other[month] ?? 0) + eligible.length;
+  const confirmed = state.confirmedQuota?.[month];
+  if (!confirmed) return local;
+  const newer = eligible.filter(item => (["sending", "unknown", "processing", "confirmation"].includes(item.state) ||
+      (item.provider?.observedAt ?? item.resultObservedAt ?? item.at) > confirmed.at)).length;
+  return Math.max(local, confirmed.count + newer);
 }
 
 export function beginHandoff(state: PublisherState, key: string, network: Destination, digest: string, now: number) {
@@ -88,7 +105,7 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
     (item.digest === digest || item.candidateId === draft.candidate.candidateId))) {
     throw new Error("同じ動画または候補の記録があります。外部結果を確認してください。");
   }
-  if (quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
+  if (copy.visibility !== "draft" && quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
   const item: Delivery = { requestId: crypto.randomUUID(), candidateId: draft.candidate.candidateId, versionId: draft.candidate.versionId,
     destination: network, digest, copy: { ...copy }, audience: draft.audience, state: "sending", at: now };
   state.deliveries.push(item);
@@ -99,13 +116,14 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
 export function reconcile(state: PublisherState, index: number, outcome: "scheduled" | "published" | "failed" | "cancelled" | "unknown",
   evidence: string, now: number, observedAt = now) {
   const item = state.deliveries[index];
-  if (!item || !["sending", "unknown", "scheduled"].includes(item.state)) throw new Error("照合できる投稿記録を選んでください。");
+  if (!item || !["sending", "unknown", "scheduled", "draft", "processing", "confirmation"].includes(item.state)) throw new Error("照合できる投稿記録を選んでください。");
   if (outcome !== "unknown" && !evidence.trim()) throw new Error("外部IDまたは確認した結果を入力してください。");
   if ((outcome === "scheduled" || outcome === "published") && state.deliveries.some((other, i) =>
     i !== index && other.destination === item.destination && other.reference === evidence.trim() && active(other))) {
     throw new Error("この外部IDは登録済みです。");
   }
-  if (outcome === "failed" && item.state === "scheduled") throw new Error("予約の失敗は外部の取消・不存在を確認してから記録してください。");
+  if (outcome === "failed" && ["scheduled", "processing", "confirmation"].includes(item.state)) throw new Error("予約の失敗は外部の取消・不存在を確認してから記録してください。");
+  if (item.provider) throw new Error("API結果がある投稿は結果JSONで照合してください。");
   item.state = outcome;
   item.resultObservedAt = observedAt;
   if (outcome === "scheduled" || outcome === "published") item.reference = evidence.trim().slice(0, 200);

@@ -69,3 +69,69 @@ assert.equal(importReceipt(packets, JSON.stringify(receipt), now), false);
 assert.equal(packets.deliveries[0].reference, "external-fixture");
 assert.throws(() => importReceipt(packets, JSON.stringify({ ...receipt, status: "unknown" }), now), /古い照合/);
 console.log("OK: approved exchange, expiry, matching receipts, replay protection");
+
+const { verifyOnDevice } = await import("../src/modules/publisher/providerResult");
+const { matchesFilter } = await import("../src/modules/publisher/dashboard");
+const { providerReceiptSchema } = await import("../src/modules/publisher/exchange");
+const proof = emptyPublisher();
+const proofDraft = makeDraft(candidate, now);
+proofDraft.plan.youtube!.visibility = "private";
+proofDraft.plan.youtube!.notifySubscribers = false;
+proofDraft.plan.tiktok!.visibility = "SELF_ONLY";
+proofDraft.plan.instagram!.visibility = "draft";
+proofDraft.state = "approved";
+proofDraft.audience = "no";
+proof.drafts[key] = proofDraft;
+const evidenceFor = (network: "youtube" | "tiktok" | "instagram", provider: Record<string, unknown>) => {
+  const item = beginHandoff(proof, key, network, digest, now);
+  const request = makeRequest(proof, item.requestId!, now);
+  const payload = { schema: providerReceiptSchema, brandId, requestId: request.requestId, videoVersion: request.videoVersion,
+    sha256: digest, approval: request.approval, destination: network, observedAt: new Date(now + 2000).toISOString(),
+    provider: { scheduledAt: request.post.publishAt, visibility: request.post.intendedVisibility, ...provider } };
+  return { item, payload, request };
+};
+// Synthetic identifiers; provider states mirror the observations supplied by operations.
+const yt = evidenceFor("youtube", { postId: "mock-youtube", videoId: "mock-clip", apiState: "PUBLISHED",
+  notifySubscribers: false, raw: '{"status":"PUBLISHED","privacy":"private","notifySubscribers":false}' });
+const tt = evidenceFor("tiktok", { postId: "mock-tiktok", responseId: "mock-response", apiState: "AWAITING_CONFIRMATION", detail: "Published",
+  raw: '{"status":"AWAITING_CONFIRMATION","detail":"Published","privacy":"SELF_ONLY"}' });
+const ig = evidenceFor("instagram", { postId: "mock-instagram", apiState: "UNREPORTED", draft: true, autoPublish: false,
+  raw: '{"draft":true,"autoPublish":false}' });
+assert.equal(yt.request.post.notifySubscribers, false);
+assert.equal(ig.request.post.autoPublish, false);
+for (const fixture of [yt, tt, ig]) {
+  assert.equal(importReceipt(proof, JSON.stringify(fixture.payload), now + 2000), true);
+  assert.equal(importReceipt(proof, JSON.stringify(fixture.payload), now + 2000), false);
+}
+assert.equal(yt.item.state, "published");
+assert.equal(yt.item.device, undefined);
+assert.equal(tt.item.state, "confirmation");
+assert.equal(ig.item.state, "draft");
+assert(matchesFilter(tt.item, "waiting", now));
+assert.throws(() => beginHandoff(proof, key, "tiktok", digest, now), /同じ動画/);
+verifyOnDevice(proof, 1, "確認担当", "非公開一覧で確認", now + 4000);
+assert.equal(tt.item.provider?.apiState, "AWAITING_CONFIRMATION");
+assert(matchesFilter(tt.item, "published", now));
+assert(!matchesFilter(tt.item, "waiting", now));
+assert.throws(() => importReceipt(proof, JSON.stringify({ ...tt.payload, observedAt: new Date(now + 1000),
+  provider: { ...tt.payload.provider, apiState: "SCHEDULED" } }), now + 5000), /古い結果/);
+assert.throws(() => importReceipt(proof, JSON.stringify({ ...tt.payload, observedAt: new Date(now + 5000),
+  provider: { ...tt.payload.provider, apiState: "FAILED" } }), now + 5000), /実機確認済み/);
+assert.throws(() => importReceipt(proof, JSON.stringify({ ...ig.payload, observedAt: new Date(now + 8000),
+  provider: { ...ig.payload.provider, draft: false, autoPublish: true, apiState: "PUBLISHED" } }), now + 8000), /下書き/);
+assert.equal(quota(proof, "2026-11"), 2); // Instagram draft is not a published post.
+const otherDraft = { ...makeDraft({ ...candidate, candidateId: "other", versionId: "other-version" }, now), state: "approved" as const, audience: "no" as const };
+otherDraft.plan.youtube!.visibility = "private";
+const otherKey = draftKey(otherDraft.candidate);
+proof.drafts[otherKey] = otherDraft;
+const other = beginHandoff(proof, otherKey, "youtube", "b".repeat(64), now);
+const otherRequest = makeRequest(proof, other.requestId!, now);
+assert.throws(() => importReceipt(proof, JSON.stringify({ ...yt.payload, requestId: otherRequest.requestId, videoVersion: otherRequest.videoVersion,
+  sha256: other.digest, approval: otherRequest.approval }), now + 5000), /同じ外部投稿/);
+proof.confirmedQuota = { "2026-11": { count: 20, at: now + 7000 } };
+const nextDraft = { ...makeDraft({ ...candidate, candidateId: "next" }, now), state: "approved" as const };
+proof.drafts[draftKey(nextDraft.candidate)] = nextDraft;
+assert.throws(() => beginHandoff(proof, draftKey(nextDraft.candidate), "instagram", "a".repeat(64), now + 8000), /無料投稿枠/);
+nextDraft.plan.instagram!.visibility = "draft";
+assert.equal(beginHandoff(proof, draftKey(nextDraft.candidate), "instagram", "a".repeat(64), now + 8000).state, "sending");
+console.log("OK: YouTube private PUBLISHED, TikTok confirmation/device separation, Instagram draft, replay and quota");

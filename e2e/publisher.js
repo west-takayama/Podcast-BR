@@ -71,6 +71,7 @@ for (let i = 1; i <= 2; i++) {
         media.set("fixture-video-1", bytes);
       }
       await page.getByLabel("子ども向け").selectOption("no");
+      if (i === 2) await page.getByLabel("公開範囲 · TikTok · bridgeradio2000", { exact: true }).selectOption("SELF_ONLY");
       await page.getByRole("button", { name: "承認待ちにする" }).click();
       await page.getByRole("checkbox", { name: `合成候補${i} · 承認待ち` }).check();
     }
@@ -111,9 +112,33 @@ for (let i = 1; i <= 2; i++) {
     await page.getByRole("checkbox", { name: "Plannerまたは投稿先で結果を照合済み" }).check();
     await page.getByRole("button", { name: "結果を取り込む", exact: true }).click();
     await page.getByText(/外部ID fixture-reservation/).waitFor();
+    await page.getByRole("button", { name: /引き渡しを準備 · TikTok/ }).click();
+    await page.getByRole("button", { name: "経営本部向けの予約要求JSONを作る" }).click();
+    const [tiktokDownload] = await Promise.all([page.waitForEvent("download"), page.getByRole("link", { name: "予約要求JSONを保存" }).click()]);
+    const tiktok = JSON.parse(readFileSync(await tiktokDownload.path(), "utf8"));
+    assert.equal(tiktok.post.intendedVisibility, "SELF_ONLY");
+    const receipt = {
+      schema: "bridge-radio.publisher.receipt.v2", brandId: "7399385", requestId: tiktok.requestId, approval: tiktok.approval,
+      videoVersion: tiktok.videoVersion, sha256: tiktok.media.sha256, destination: "tiktok", observedAt: new Date().toISOString(),
+      provider: { postId: "fixture-tiktok", responseId: "fixture-response", scheduledAt: tiktok.post.publishAt, visibility: "SELF_ONLY",
+        apiState: "AWAITING_CONFIRMATION", detail: "Published", raw: '{"status":"AWAITING_CONFIRMATION","detail":"Published"}' },
+    };
+    assert.equal(await page.getByLabel("結果JSON", { exact: true }).isVisible(), true);
+    await page.getByLabel("結果JSON", { exact: true }).fill(JSON.stringify(receipt));
+    await page.getByRole("checkbox", { name: "Plannerまたは投稿先で結果を照合済み" }).check();
+    await page.getByRole("button", { name: "結果を取り込む", exact: true }).click();
+    await page.getByText("TikTok · bridgeradio2000 · 配信確認待ち", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "実機確認を記録する" }).click();
+    await page.getByLabel("確認者", { exact: true }).fill("実機担当");
+    await page.getByLabel("実機で確認した内容", { exact: true }).fill("合成の非公開一覧で確認");
+    await page.getByRole("button", { name: "実機確認を保存" }).click();
+    await page.getByText(/実機確認済み · 実機担当/).waitFor();
+    await page.getByLabel("投稿の表示").selectOption("published");
+    await page.getByText("APIの記録 · AWAITING_CONFIRMATION", { exact: true }).waitFor();
     await page.reload();
     await page.getByRole("button", { name: "投稿", exact: true }).click();
     await page.getByText(/外部ID fixture-reservation/).waitFor();
+    await page.getByText(/実機確認済み · 実機担当/).waitFor();
     assert(requests.every(([host, method]) => host === "www.googleapis.com" && method === "GET"));
     if (process.env.PUBLISHER_SCREENSHOT) await page.screenshot({ path: process.env.PUBLISHER_SCREENSHOT, fullPage: true });
     console.log("OK: private Drive, dual approval, verified handoff, unknown/retry, persisted result, no SNS/Gemini calls");
