@@ -169,7 +169,8 @@ export async function updateEpisode(
       const existing = request.result as EpisodeRecord | undefined;
       if (!existing) return;
       const changes = typeof patch === "function" ? patch(existing) : patch;
-      const next = { ...existing, ...changes, id, updatedAt: Date.now() };
+      const updatedAt = "updatedAt" in changes ? changes.updatedAt : Date.now();
+      const next = { ...existing, ...changes, id, updatedAt };
       if ("transcript" in changes) next.transcriptRevision = crypto.randomUUID();
       if ("audio" in changes && !preserveSource) {
         next.sourceRevision = crypto.randomUUID();
@@ -197,7 +198,7 @@ async function pruneAudio(): Promise<void> {
   const all = await listEpisodes();
   const stale = all.slice(MAX_AUDIO_RETAINED).filter((r) => r.audio);
   for (const record of stale) {
-    await updateEpisode(record.id, { audio: undefined }, true);
+    await updateEpisode(record.id, current => ({ audio: undefined, updatedAt: current.updatedAt }), true);
   }
 }
 
@@ -211,7 +212,7 @@ export async function dropAllAudio(): Promise<void> {
   const all = await listEpisodes();
   for (const record of all) {
     if (!record.audio) continue;
-    await updateEpisode(record.id, { audio: undefined }, true);
+    await updateEpisode(record.id, current => ({ audio: undefined, updatedAt: current.updatedAt }), true);
   }
 }
 
