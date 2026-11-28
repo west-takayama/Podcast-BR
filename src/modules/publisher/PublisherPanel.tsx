@@ -1,3 +1,4 @@
+import { importReceipt, makeRequest } from "./exchange";
 import { useEffect, useRef, useState } from "react";
 import { useDriveConnection } from "../../components/DriveConnection";
 import { CANDIDATE_FOLDER_URL } from "../../lib/driveSave";
@@ -28,6 +29,21 @@ export default function PublisherPanel() {
   const [message, setMessage] = useState("");
   const [preview, setPreview] = useState<{ url: string; filename: string; key: string }>();
   const [handoff, setHandoff] = useState<Delivery>();
+  const [packet, setPacket] = useState<{ files: File[]; url: string; expiresAt: number }>();
+  const packetUrl = useRef("");
+  const handoffVideo = useRef<Blob>();
+  const [receipt, setReceipt] = useState("");
+  const [verifiedReceipt, setVerifiedReceipt] = useState(false);
+  const clearPacket = () => {
+    if (packetUrl.current) URL.revokeObjectURL(packetUrl.current);
+    packetUrl.current = "";
+    setPacket(undefined);
+  };
+  useEffect(() => {
+    if (!packet) return;
+    const timer = setTimeout(clearPacket, Math.max(0, packet.expiresAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [packet]);
   const [external, setExternal] = useState("");
   const [quotaMonth, setQuotaMonth] = useState(() => monthOf(Date.now()));
   const [result, setResult] = useState<Record<number, string>>({});
@@ -41,13 +57,15 @@ export default function PublisherPanel() {
     if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
     previewUrl.current = "";
     setPreview(undefined);
+    handoffVideo.current = undefined;
+    clearPacket();
     setHandoff(undefined);
   };
   const refresh = () => publisherTransaction(false, data => data).then(data => { if (mounted.current) setState(data); });
   useEffect(() => {
     mounted.current = true;
     void refresh().catch(() => setMessage("端末の投稿台帳を読み込めません。"));
-    return () => { mounted.current = false; controller.current?.abort(); if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); };
+    return () => { mounted.current = false; controller.current?.abort(); if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); if (packetUrl.current) URL.revokeObjectURL(packetUrl.current); };
   }, []);
   useEffect(() => {
     controller.current?.abort();
@@ -109,6 +127,7 @@ export default function PublisherPanel() {
     signal.throwIfAborted();
     showVideo(blob, draft.candidate);
     setHandoff(item);
+    handoffVideo.current = blob;
     await refresh();
   });
   const selectedForReview = selected.length > 0 && selected.every(key => state.drafts[key]?.state === "review");
@@ -182,6 +201,7 @@ export default function PublisherPanel() {
           const copy = draft.plan[network];
           const change = (key: "title" | "text" | "hashtags" | "at", value: string) => {
             setHandoff(undefined);
+            clearPacket();
             void update(data => {
               const item = data.drafts[current];
               if (!item.plan[network]) return;
@@ -230,6 +250,7 @@ export default function PublisherPanel() {
         });
         setSelected(previous => previous.filter(key => key !== current));
         setHandoff(undefined);
+        clearPacket();
       })}>{draft.state === "candidate" ? "承認待ちにする" : "承認・申請を取り消す"}</button>
       {handoff && preview && <div className="publisher-network">
         <h4>{accounts[handoff.destination]} の引き渡し</h4>
@@ -241,11 +262,41 @@ export default function PublisherPanel() {
           <a href={preview.url} download={preview.filename}>承認済み動画を保存</a>
           <a href={planner} target="_blank" rel="noreferrer">Metricool Plannerを開く</a>
         </div>
+        <button type="button" disabled={busy} onClick={() => void run(async () => {
+          const video = handoffVideo.current;
+          if (!video || !handoff.requestId) throw new Error("動画の引き渡しを準備し直してください。");
+          const value = await publisherTransaction(false, data => makeRequest(data, handoff.requestId!, Date.now()));
+          const json = new File([JSON.stringify(value, null, 2)], `publisher-${value.requestId}.json`, { type: "application/json" });
+          clearPacket();
+          const url = URL.createObjectURL(json);
+          packetUrl.current = url;
+          setPacket({ files: [json, new File([video], value.media.filename, { type: video.type })], url, expiresAt: Date.parse(value.expiresAt) });
+        })}>経営本部向けの予約要求JSONを作る</button>
+        {packet && <div className="row-buttons">
+          <a href={packet.url} download={packet.files[0].name}>予約要求JSONを保存</a>
+          {navigator.canShare?.({ files: packet.files }) && <button type="button" onClick={() => {
+            void navigator.share({ files: packet.files }).catch(() => setMessage("共有できませんでした。JSONと動画の個別保存をお試しください。"));
+          }}>動画とJSONを共有</button>}
+        </div>}
+        <p>経営本部へはJSONと動画を添付してください。公開URLの作成は不要です。実予約は別途承認が必要です。</p>
         <p>Plannerで投稿先・時刻・承認を確認して予約し、下の履歴で外部結果を記録してください。</p>
       </div>}
     </section>}
     <section className="card">
       <h3>予約・投稿履歴</h3>
+      <details>
+        <summary>経営本部からの結果JSONを取り込む</summary>
+        <label>結果JSON<textarea aria-label="結果JSON" value={receipt} maxLength={16384} onChange={event => {
+          setReceipt(event.target.value); setVerifiedReceipt(false);
+        }} /></label>
+        <label className="check"><input type="checkbox" checked={verifiedReceipt} onChange={event => setVerifiedReceipt(event.target.checked)} />Plannerまたは投稿先で結果を照合済み</label>
+        <button type="button" disabled={busy || !receipt.trim() || !verifiedReceipt} onClick={() => void run(async () => {
+          const changed = await publisherTransaction(true, data => importReceipt(data, receipt, Date.now()));
+          await refresh();
+          setMessage(changed ? "投稿結果を記録しました。" : "この結果は記録済みです。");
+          setReceipt(""); setVerifiedReceipt(false); clearPacket(); setHandoff(undefined);
+        })}>結果を取り込む</button>
+      </details>
       {state.deliveries.map((item, index) => <div className="publisher-network" key={index}>
         <strong>{accounts[item.destination]} · {labels[item.state]}</strong>
         <p>候補の版 {item.versionId.slice(0, 12)} · {item.copy.at.replace("T", " ")} JST</p>
@@ -260,6 +311,7 @@ export default function PublisherPanel() {
               .map(outcome => <button type="button" disabled={busy} key={outcome} onClick={() => void run(async () => {
                 await update(data => reconcile(data, index, outcome, result[index] ?? "", Date.now()));
                 setHandoff(undefined);
+                clearPacket();
               })}>{labels[outcome]}を記録</button>)}
           </div>
         </>}

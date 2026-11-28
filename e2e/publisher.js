@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
 const { createHash } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const { chromium } = require("playwright");
@@ -94,8 +95,21 @@ for (let i = 1; i <= 2; i++) {
     await page.getByText("Instagram · bridge_radio · 失敗・未登録確認済み", { exact: true }).waitFor();
     await page.getByRole("button", { name: /引き渡しを準備 · Instagram/ }).click();
     await page.getByRole("link", { name: "承認済み動画を保存" }).waitFor();
-    await page.getByLabel("外部IDまたはPlannerで確認した結果").fill("fixture-reservation");
-    await page.getByRole("button", { name: "予約済みを記録" }).click();
+    await page.getByRole("button", { name: "経営本部向けの予約要求JSONを作る" }).click();
+    const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("link", { name: "予約要求JSONを保存" }).click()]);
+    const payload = JSON.parse(readFileSync(await download.path(), "utf8"));
+    assert.equal(payload.media.sha256, hash(bytes));
+    assert.equal(payload.media.driveFileId, "fixture-video-2");
+    assert.equal(payload.destination.network, "instagram");
+    assert.doesNotMatch(JSON.stringify(payload), /publisher-fixture|blob:|https:/);
+    await page.getByText("経営本部からの結果JSONを取り込む", { exact: true }).click();
+    await page.getByLabel("結果JSON", { exact: true }).fill(JSON.stringify({
+      schema: "bridge-radio.publisher.receipt.v1", brandId: "7399385", requestId: payload.requestId,
+      videoVersion: payload.videoVersion, sha256: payload.media.sha256, destination: "instagram",
+      status: "scheduled", observedAt: new Date().toISOString(), evidence: "fixture-reservation",
+    }));
+    await page.getByRole("checkbox", { name: "Plannerまたは投稿先で結果を照合済み" }).check();
+    await page.getByRole("button", { name: "結果を取り込む", exact: true }).click();
     await page.getByText(/外部ID fixture-reservation/).waitFor();
     await page.reload();
     await page.getByRole("button", { name: "投稿", exact: true }).click();

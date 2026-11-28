@@ -18,12 +18,12 @@ export type Candidate = {
 export type Copy = { title: string; text: string; hashtags: string; at: string };
 export type Plan = Partial<Record<Destination, Copy>>;
 export type Status = "candidate" | "review" | "approved" | "sending" | "scheduled" | "published" | "failed" | "cancelled" | "unknown";
-export type Delivery = { candidateId: string; versionId: string; digest: string; destination: Destination; copy: Copy; audience?: Draft["audience"];
-  state: Status; reference?: string; at: number; note?: string };
+export type Delivery = { requestId?: string; candidateId: string; versionId: string; digest: string; destination: Destination; copy: Copy; audience?: Draft["audience"];
+  state: Status; resultObservedAt?: number; reference?: string; at: number; note?: string };
 export type Draft = { candidate: Candidate; plan: Plan; state: "candidate" | "review" | "approved"; audience?: "yes" | "no" };
 export type PublisherState = { drafts: Record<string, Draft>; deliveries: Delivery[]; audit: (Delivery & { recordedAt: number })[]; other: Record<string, number> };
 export const emptyPublisher = (): PublisherState => ({ drafts: {}, deliveries: [], audit: [], other: {} });
-export const draftKey = (candidate: Candidate) => candidate.candidateId + ":" + candidate.versionId;
+export const draftKey = (candidate: Pick<Candidate, "candidateId" | "versionId">) => candidate.candidateId + ":" + candidate.versionId;
 
 // These aggregate best hours were returned by Metricool for 2026-11-29 through 2026-12-04 (JST).
 const hours: Record<Destination, number> = { instagram: 10, tiktok: 10, youtube: 16 };
@@ -89,7 +89,7 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
     throw new Error("同じ動画または候補の記録があります。外部結果を確認してください。");
   }
   if (quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
-  const item: Delivery = { candidateId: draft.candidate.candidateId, versionId: draft.candidate.versionId,
+  const item: Delivery = { requestId: crypto.randomUUID(), candidateId: draft.candidate.candidateId, versionId: draft.candidate.versionId,
     destination: network, digest, copy: { ...copy }, audience: draft.audience, state: "sending", at: now };
   state.deliveries.push(item);
   state.audit.push({ ...item, recordedAt: now });
@@ -97,7 +97,7 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
 }
 
 export function reconcile(state: PublisherState, index: number, outcome: "scheduled" | "published" | "failed" | "cancelled" | "unknown",
-  evidence: string, now: number) {
+  evidence: string, now: number, observedAt = now) {
   const item = state.deliveries[index];
   if (!item || !["sending", "unknown", "scheduled"].includes(item.state)) throw new Error("照合できる投稿記録を選んでください。");
   if (outcome !== "unknown" && !evidence.trim()) throw new Error("外部IDまたは確認した結果を入力してください。");
@@ -107,6 +107,7 @@ export function reconcile(state: PublisherState, index: number, outcome: "schedu
   }
   if (outcome === "failed" && item.state === "scheduled") throw new Error("予約の失敗は外部の取消・不存在を確認してから記録してください。");
   item.state = outcome;
+  item.resultObservedAt = observedAt;
   if (outcome === "scheduled" || outcome === "published") item.reference = evidence.trim().slice(0, 200);
   else item.note = evidence.trim().slice(0, 300);
   state.audit.push({ ...item, recordedAt: now });
