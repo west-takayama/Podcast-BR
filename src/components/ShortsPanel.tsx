@@ -49,6 +49,7 @@ interface Props {
     clips: Clip[];
     durationSec: number;
     episodeId?: string;
+    featureEpisodeId?: string;
     sourceRevision?: string;
     hasVideo: boolean;
     transcript?: TranscriptSegment[] | null;
@@ -129,7 +130,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
   const anonymousId = useRef(crypto.randomUUID());
   const newEpisodeId = useRef<string>();
-  const feature = useFeature(existing ? existing.episodeId ?? anonymousId.current : sessionId ?? newEpisodeId.current);
+  const feature = useFeature(existing ? existing.featureEpisodeId ?? existing.episodeId ?? anonymousId.current : sessionId ?? newEpisodeId.current);
   const canGenerate = !!(feature?.selected && feature.number && feature.title);
   const splitDrafts = useRef(new Map<string, SplitCaptionDraft>());
   const captionOrigins = useRef(new Map<number, string>());
@@ -1031,7 +1032,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         <button type="button" className="primary" disabled={!settings.apiKey} onClick={() => void findCandidates()}>この素材から候補を作る</button>
         {!settings.apiKey && <p>候補を作るにはGemini APIキーを設定してください。</p>}
       </section>}
-      {feature && !busy && <Selection feature={feature} clips={clips} edit={openFeature} suggestedTitle={spotify?.titles[0] ?? ""} />}
+      {feature && !busy && <Selection feature={feature} clips={clips} edit={openFeature} allowExisting={!!existing?.featureEpisodeId} suggestedTitle={spotify?.titles[0] ?? ""} />}
       {batchSummary && <p role="status" className="card">{batchSummary}</p>}
       {clips.length > 0 && !busy && (
         <div className="card">

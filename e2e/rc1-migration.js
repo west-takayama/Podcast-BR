@@ -69,17 +69,17 @@ const server = createServer((req, res) => {
     };
     await page.reload();
     await check();
-    await page.evaluate(() => navigator.serviceWorker.ready.then(() => true));
+    await page.waitForFunction(() => navigator.serviceWorker.controller?.state === "activated");
     async function swap(root) {
       active = root;
-      await page.evaluate(async () => {
-        const current = await navigator.serviceWorker.ready;
-        await current.update();
-      });
       let waiting = false;
-      for (let attempt = 0; !waiting && attempt < 120; attempt++) {
-        waiting = await page.evaluate(async () => Boolean((await navigator.serviceWorker.getRegistration()).waiting));
-        if (!waiting) await new Promise(resolve => setTimeout(resolve, 250));
+      for (let attempt = 0; !waiting && attempt < 90; attempt++) {
+        waiting = await page.evaluate(async retry => {
+          const current = await navigator.serviceWorker.getRegistration();
+          if (retry && !current.waiting && !current.installing) await current.update();
+          return Boolean(current.waiting);
+        }, attempt % 4 === 0);
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 500));
       }
       assert.ok(waiting, "the updated Service Worker must wait for approval");
       await page.evaluate(async () => {
@@ -90,11 +90,12 @@ const server = createServer((req, res) => {
       });
       await page.reload();
       await check();
+      await page.waitForFunction(() => navigator.serviceWorker.controller?.state === "activated");
     }
     await swap(next);
-    await page.getByRole("heading", { name: /RC1/ }).waitFor();
+    await page.getByRole("heading", { name: /3\.0$/ }).waitFor();
     await swap(previous);
-    assert.equal(await page.getByRole("heading", { name: /RC1/ }).count(), 0);
-    console.log("OK actual v2.4.1 → RC1 → v2.4.1 same-origin Service Worker, database v3, synthetic audio bytes and settings preserved");
+    assert.equal(await page.getByRole("heading", { name: /3\.0$/ }).count(), 0);
+    console.log("OK actual v2.4.1 → 3.0 → v2.4.1 same-origin Service Worker, database v3, synthetic audio bytes and settings preserved");
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => server.close());

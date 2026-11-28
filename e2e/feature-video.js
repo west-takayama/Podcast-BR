@@ -37,11 +37,20 @@ const audio = execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=
     }));
     await render.click();
     await page.getByText(/端末の空き容量が足りません/).waitFor();
+    await page.evaluate(() => Object.defineProperty(navigator.storage, "getDirectory", { configurable: true, value: undefined }));
+    await render.click();
+    await page.getByText(/動画の保存領域に対応していません/).waitFor();
+    await page.getByRole("button", { name: "編集済み音源をそのまま保存" }).waitFor();
     await page.evaluate(() => { delete navigator.storage.getDirectory; });
     await render.click();
     if (process.env.FEATURE_TEST_CODEC !== "1") {
       await page.getByText(/AAC書き出しに対応していません/).waitFor();
       assert.equal(await page.locator("video").count(), 0);
+      const download = page.waitForEvent("download");
+      await page.getByRole("button", { name: "編集済み音源をそのまま保存" }).click();
+      const backup = await download;
+      assert.equal(backup.suggestedFilename(), "edited.mp3");
+      assert.deepEqual(require("node:fs").readFileSync(await backup.path()), audio);
       assert.deepEqual(remote, []);
       console.log("OK without native AAC the source remains and no fallback is loaded");
       return;

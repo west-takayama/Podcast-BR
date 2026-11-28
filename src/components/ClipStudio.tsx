@@ -67,7 +67,7 @@ export default function ClipStudio({ source, durationSec, episodeId, sourceRevis
       settings={settings}
       previousTitles={[]}
       onModelChanged={onModelChanged}
-      existing={{ ...ready, episodeId: picked ? undefined : episodeId, sourceRevision: picked ? undefined : sourceRevision, clips,
+      existing={{ ...ready, featureEpisodeId: episodeId, episodeId: picked ? undefined : episodeId, sourceRevision: picked ? undefined : sourceRevision, clips,
         transcript: picked ? undefined : transcript, uploaded: picked ? undefined : uploaded, background,
         previewUrl: picked ? pickedUrl : audioUrl, onClipsFound }}
     />;

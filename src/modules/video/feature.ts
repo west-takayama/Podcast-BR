@@ -9,6 +9,7 @@ export type Feature = {
   approval?: { digest: string; at: number; file?: string; sourceRevision?: string };
   handoff?: "pending" | "unknown" | "scheduled" | "published";
   youtubeId?: string;
+  linkedPublication?: true;
   publishedAt?: number;
   relatedShorts?: string[];
 };
@@ -22,8 +23,10 @@ export function youtubeId(value: string) {
   if (youtubePattern.test(text)) return text;
   try {
     const url = new URL(text);
-    if (url.protocol === "https:" && ["www.youtube.com", "youtube.com"].includes(url.hostname) && url.pathname === "/watch") {
-      const id = url.searchParams.get("v");
+    if (url.protocol === "https:" && !url.username && !url.password && !url.port) {
+      const id = ["www.youtube.com", "youtube.com", "m.youtube.com"].includes(url.hostname) && url.pathname === "/watch"
+        ? url.searchParams.get("v")
+        : url.hostname === "youtu.be" ? url.pathname.slice(1).replace(/\/$/, "") : null;
       if (id && youtubePattern.test(id)) return id;
     }
   } catch { /* invalid URL */ }
@@ -45,8 +48,19 @@ export function parseShortParent(value: unknown): ShortParent | undefined {
   return { episodeId: parent.episodeId, title: parent.title, number: parent.number };
 }
 
+export function linkPublishedFeature(row: Feature, all: Record<string, Feature>, parent: ShortParent, video: string, at: number, now: number): Feature {
+  if (row.episodeId !== parent.episodeId || !row.selected || row.handoff || row.approval) throw new Error("選抜、承認、または既存の配信結果を確認してください。");
+  const checked = parseShortParent(parent)!;
+  const id = youtubeId(video);
+  if (!Number.isFinite(at) || at <= 0 || at > now) throw new Error("すでに公開された日本時間を指定してください。");
+  if (Object.values(all).some(entry => entry.episodeId !== row.episodeId && entry.youtubeId === id)) {
+    throw new Error("このYouTube本編は別の回に登録済みです。");
+  }
+  return { ...row, ...checked, youtubeId: id, publishedAt: at, handoff: "published", linkedPublication: true };
+}
+
 export function canHandoffShort(parent: ShortParent, feature: Feature | undefined, scheduled: number, now: number) {
-  if (feature?.episodeId !== parent.episodeId || !feature.selected || !feature.approval ||
+  if (feature?.episodeId !== parent.episodeId || !feature.selected || (!feature.approval && !feature.linkedPublication) ||
     feature.handoff !== "published" || !feature.youtubeId || !youtubePattern.test(feature.youtubeId) ||
     !feature.publishedAt || feature.publishedAt > now || !Number.isFinite(scheduled) || scheduled <= feature.publishedAt ||
     feature.title !== parent.title || feature.number !== parent.number) {

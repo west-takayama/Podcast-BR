@@ -74,6 +74,10 @@ const execute = (program, args) => {
         assert.equal(video.width, height === 480 ? 854 : height * 16 / 9);
         assert.equal(video.codec_name, "h264");
         assert.equal(audio.codec_name, "aac");
+        if (process.env.FEATURE_EXPECT_FPS) {
+          assert.equal(video.r_frame_rate, process.env.FEATURE_EXPECT_FPS + "/1");
+          execute("ffmpeg", ["-v", "error", "-xerror", "-i", path, "-an", "-t", "8", "-f", "null", "-"]);
+        }
         assert.ok(Math.abs(Number(audio.duration) - Number(video.duration)) < 0.12);
         assert.ok(Math.abs(duration - Number(audio.duration)) < 0.12);
         const at = Math.max(0, duration - 2);

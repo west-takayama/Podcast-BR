@@ -18,6 +18,7 @@ const ALL = [
   "audio-entry",
   "publisher",
   "analytics",
+  "archived-publication",
   "unified-production",
   "shorts-batch",
   "shared-shorts-paths",
