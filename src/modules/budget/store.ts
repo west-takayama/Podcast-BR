@@ -63,7 +63,7 @@ export const reserveRequest = (info: RequestInfo) =>
 export const settleRequest = (id: string, counts: UsageCounts, result: RequestResult) =>
   updateBudget(state => {
     const entry = state.entries.find(item => item.id === id && item.state === "pending");
-    if (entry) finishRequest(entry, counts, result);
+    if (entry) finishRequest(entry, counts, result, Date.now());
   });
 
 export const dropUnsentRequest = (id: string) =>

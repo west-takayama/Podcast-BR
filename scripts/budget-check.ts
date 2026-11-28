@@ -67,4 +67,14 @@ finishRequest(oldQuote, { inputTokens: 1_000_000, outputTokens: 1_000_000 }, { e
 assert.ok(Math.abs(oldQuote.estimate! - 519.75 * scale) <= 1);
 assert.notEqual(oldQuote.rateVersion, newQuote.rateVersion);
 
+const overlap = emptyBudget();
+overlap.settings = { ...overlap.settings, ...exchange, mode: "prepaid", balance: { at, amount: 1_000 * scale } };
+const inFlight = beginRequest(overlap, request, "overlap", at - 5);
+recordActual(overlap, "2026-11", 111, at - 2, at);
+overlap.settings.balance = { at: at - 2, amount: 1_000 * scale };
+finishRequest(inFlight, { inputTokens: 1_000, outputTokens: 5 }, { elapsedMs: 10, status: 200 }, at);
+assert.equal(summarize(overlap, at).total, 111 * scale + inFlight.estimate!);
+assert.equal(summarize(overlap, at).balanceRemaining, 1_000 * scale - inFlight.estimate!);
+
+
 console.log("OK: modality/cache rates, thinking, FX/tax, JST rollover, estimates, calls and reservations");

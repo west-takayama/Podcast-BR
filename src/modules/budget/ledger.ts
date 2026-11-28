@@ -28,6 +28,7 @@ export type LedgerEntry = Omit<RequestInfo, "requestKey"> & UsageCounts & {
   reserved: number;
   estimate?: number;
   elapsedMs?: number;
+  finishedAt?: number;
   status?: number;
   success?: boolean;
   error?: string;
@@ -65,17 +66,18 @@ export function summarize(state: BudgetState, now = Date.now()) {
   // Pending requests never expire automatically, even across month boundaries.
   const pending = state.entries.filter(entry => entry.state === "pending")
     .reduce((sum, entry) => sum + entry.reserved, 0);
+  const latestActivity = (entry: LedgerEntry) => entry.finishedAt ?? entry.at;
   const outstanding = (entry: LedgerEntry) => entry.state === "unknown" &&
-    entry.at > (state.actual[entry.month]?.through ?? -1);
+    latestActivity(entry) > (state.actual[entry.month]?.through ?? -1);
   const unknown = state.entries.filter(outstanding).reduce((sum, entry) => sum + entry.reserved, 0);
   const operating = state.operating.filter(item => japanMonth(item.at) === month).reduce((sum, item) => sum + item.amount, 0);
-  const sinceActual = current.filter(entry => actual && entry.at > actual.through)
+  const sinceActual = current.filter(entry => actual && latestActivity(entry) > actual.through)
     .reduce((sum, entry) => sum + (entry.estimate ?? 0), 0);
   const basis = actual ? Math.max(estimated, actual.amount + sinceActual) : estimated;
   const total = basis + operating + pending + unknown;
   const balance = state.settings.balance;
   const balanceRemaining = balance && Math.max(0, balance.amount - state.entries
-    .filter(entry => entry.state === "pending" || outstanding(entry) || entry.at > balance.at)
+    .filter(entry => entry.state === "pending" || outstanding(entry) || latestActivity(entry) > balance.at)
     .reduce((sum, entry) => sum + (entry.state === "unknown" || entry.state === "pending" ? entry.reserved : entry.estimate ?? 0), 0));
   return { month, current, estimated, today, operating, pending, unknown, actual, total,
     remaining: Math.max(0, limit - total), warned: total >= warning, balanceRemaining,
@@ -111,9 +113,9 @@ export function beginRequest(state: BudgetState, info: RequestInfo, id: string, 
 }
 
 export type RequestResult = { elapsedMs: number; status?: number; error?: string; billing?: "none" | "input-only" };
-export function finishRequest(entry: LedgerEntry, counts: UsageCounts, result: RequestResult) {
+export function finishRequest(entry: LedgerEntry, counts: UsageCounts, result: RequestResult, finishedAt = entry.at) {
   const { billing, ...observation } = result;
-  Object.assign(entry, counts, observation);
+  Object.assign(entry, counts, observation, { finishedAt });
   delete entry.requestKey;
   entry.success = entry.status !== undefined && entry.status >= 200 && entry.status < 300 && !entry.error;
   if (!entry.model || billing === "none" || (entry.status !== undefined && entry.status >= 400 && entry.status <= 599)) {
