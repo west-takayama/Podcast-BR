@@ -119,8 +119,11 @@ assert.throws(() => importReceipt(proof, JSON.stringify({ ...tt.payload, observe
   provider: { ...tt.payload.provider, apiState: "FAILED" } }), now + 5000), /実機確認済み/);
 assert.throws(() => importReceipt(proof, JSON.stringify({ ...ig.payload, observedAt: new Date(now + 8000),
   provider: { ...ig.payload.provider, draft: false, autoPublish: true, apiState: "PUBLISHED" } }), now + 8000), /下書き/);
+assert.equal(quota(proof, "2026-11"), 2); // Instagram draft is not a published post.
 proof.confirmedQuota = { "2026-11": { count: 20, at: now + 7000 } };
 const nextDraft = { ...makeDraft({ ...candidate, candidateId: "next" }, now), state: "approved" as const };
 proof.drafts[draftKey(nextDraft.candidate)] = nextDraft;
 assert.throws(() => beginHandoff(proof, draftKey(nextDraft.candidate), "instagram", "a".repeat(64), now + 8000), /無料投稿枠/);
+nextDraft.plan.instagram!.visibility = "draft";
+assert.equal(beginHandoff(proof, draftKey(nextDraft.candidate), "instagram", "a".repeat(64), now + 8000).state, "sending");
 console.log("OK: YouTube private PUBLISHED, TikTok confirmation/device separation, Instagram draft, replay and quota");

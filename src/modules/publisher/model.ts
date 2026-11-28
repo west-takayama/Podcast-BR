@@ -85,11 +85,12 @@ export function approve(state: PublisherState, keys: string[], now: number) {
 
 const active = (delivery: Delivery) => delivery.state !== "failed" && delivery.state !== "cancelled";
 export function quota(state: PublisherState, month: string) {
-  const local = (state.other[month] ?? 0) + state.deliveries.filter(item => active(item) && monthOf(fromJst(item.copy.at)) === month).length;
+  const eligible = state.deliveries.filter(item => active(item) && item.copy.visibility !== "draft" &&
+    item.state !== "draft" && monthOf(fromJst(item.copy.at)) === month);
+  const local = (state.other[month] ?? 0) + eligible.length;
   const confirmed = state.confirmedQuota?.[month];
   if (!confirmed) return local;
-  const newer = state.deliveries.filter(item => active(item) && monthOf(fromJst(item.copy.at)) === month &&
-    (["sending", "unknown", "processing", "confirmation"].includes(item.state) ||
+  const newer = eligible.filter(item => (["sending", "unknown", "processing", "confirmation"].includes(item.state) ||
       (item.provider?.observedAt ?? item.resultObservedAt ?? item.at) > confirmed.at)).length;
   return Math.max(local, confirmed.count + newer);
 }
@@ -104,7 +105,7 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
     (item.digest === digest || item.candidateId === draft.candidate.candidateId))) {
     throw new Error("同じ動画または候補の記録があります。外部結果を確認してください。");
   }
-  if (quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
+  if (copy.visibility !== "draft" && quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
   const item: Delivery = { requestId: crypto.randomUUID(), candidateId: draft.candidate.candidateId, versionId: draft.candidate.versionId,
     destination: network, digest, copy: { ...copy }, audience: draft.audience, state: "sending", at: now };
   state.deliveries.push(item);

@@ -60,4 +60,4 @@ Firestoreや外部コールバックによる自動照合は行わない。取�
 
 ## 無料枠と運用
 
-MetricoolはFreeを月20投稿までと案内している。サービス側の当月の実消費は今回取得していない。画面は担当者が確認した値と、その日時、上限判定用の推定を分ける。推定ではSNS別に数え、下書きと処理中・結果不明も保守的に保持する。確認値以後の処理も加えて上限を守る。取消・下書き・一括へのサービス側の細かな計数はPlannerで照合する。総予算は既存の2,000円。投稿管理にGemini通信、動画の新規エンコード、SNSへの追加送信を行う経路は追加していない。 [Metricool公式料金](https://metricool.com/pricing/) · [MCPの条件](https://help.metricool.com/en/article/mcp-limits-and-plan-requirements-h72jg/)
+Metricoolの公式FAQはFreeの公開済み投稿を暦月ごとに20件までとし、SNSごとに数え、下書きは公開までは対象外としている。公式MCPガイドは予約についても月20件の制約を案内する。β1.2は公開を予定する依頼の作成前に枠を保守的に確保する。下書き限定は推定枠から除き、同じ候補の重複防止は維持する。処理中・結果不明は推定枠に残す。サービス側の当月の実消費は今回取得していない。画面は担当者の確認値と日時、上限判定用の推定を分ける。画面の月区切りは日本時間であり、Planner側の表示と照合する。総予算は既存の2,000円。投稿管理にGemini通信、動画の新規エンコード、SNSへの追加送信を行う経路は追加していない。 [Freeの計数規則](https://help.metricool.com/main-differences-between-free-and-paid-plans-bl0v9) · [MCPの条件](https://help.metricool.com/mcp-limits-and-plan-requirements-h72jg)
