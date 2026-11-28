@@ -7,7 +7,7 @@ const jstDay = at => new Date(at + 32_400_000).toISOString().slice(0, 10);
 (async () => {
   const browser = await chromium.launch(require("./browser-options"));
   try {
-    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 }, acceptDownloads: true, serviceWorkers: "block" });
     const remote = [];
     const errors = [];
     const chunks = [];
