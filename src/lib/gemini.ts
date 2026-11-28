@@ -1,4 +1,5 @@
-import { geminiFetch, observeGeminiRequest, type GeminiPurpose } from "../adapters/geminiObservability";
+import { BudgetError } from "../modules/budget/ledger";
+import { checkGeminiBudget, geminiFetch, isPaidGeminiConfigured, observeGeminiRequest, validateGeminiResponse, type GeminiPurpose } from "../adapters/geminiObservability";
 import { captionSchema, CaptionResponseError, parseCaptionResponse, splitCaptionWav, type SplitCaptionDraft } from "./captionResponse";
 import type { CaptionCue } from "./video/captionAlignment";
 // Gemini API(無料枠)との連携。
@@ -205,6 +206,8 @@ export interface UploadedAudio {
 }
 
 export interface GenerateOptions {
+  episodeId?: string;
+  operationId?: string;
   apiKey: string;
   model: string;
   /** 音声を送る場合。すでにアップロード済みなら audio を渡す。 */
@@ -285,16 +288,17 @@ async function uploadFile(
   signal?: AbortSignal,
   onStatus?: (status: string) => void,
   mimeType: AudioMime = "audio/mpeg",
+  episodeId?: string,
 ): Promise<UploadedFile> {
   let attempt = 0;
-  const send = () => observeGeminiRequest({ purpose: "upload", attempt: ++attempt, audioBytes: mp3.byteLength }, () =>
+  const send = () => observeGeminiRequest({ purpose: "upload", attempt: ++attempt, audioBytes: mp3.byteLength, episodeId }, () =>
     xhrUpload(
       `${API_BASE}/upload/v1beta/files?key=${apiKey}&uploadType=media`,
       mp3,
       onProgress,
       signal,
       mimeType,
-    ));
+    ), signal);
 
   let { status, text } = await send();
   // 送信も混雑で弾かれることがある。数十MB を捨てずに待って投げ直す
@@ -344,9 +348,10 @@ async function waitUntilActive(
   apiKey: string,
   fileName: string,
   signal?: AbortSignal,
+  episodeId?: string,
 ): Promise<string> {
   for (let i = 0; i < 90; i++) {
-    const res = await geminiFetch({ purpose: "activation" }, `${API_BASE}/v1beta/${fileName}?key=${apiKey}`, { signal });
+    const res = await geminiFetch({ purpose: "activation", episodeId }, `${API_BASE}/v1beta/${fileName}?key=${apiKey}`, { signal });
     if (!res.ok) throw new Error(`ファイル状態の確認に失敗しました (${res.status})`);
     const info = await res.json();
     if (info.state === "ACTIVE") return info.uri as string;
@@ -524,14 +529,16 @@ export async function uploadEpisodeAudio(
   onProgress?: (fraction: number) => void,
   signal?: AbortSignal,
   mimeType: AudioMime = "audio/mpeg",
+  episodeId?: string,
 ): Promise<UploadedAudio> {
+  if (!apiKey.trim() || !bytes.byteLength) throw new Error("APIキーと空でない音声を確認してください。");
   onStatus("音声をアップロード中…");
-  const file = await measureStage("upload", () => uploadFile(apiKey, bytes, onProgress, signal, onStatus, mimeType));
+  const file = await measureStage("upload", () => uploadFile(apiKey, bytes, onProgress, signal, onStatus, mimeType, episodeId));
 
   let uri = file.uri;
   if (file.state !== "ACTIVE") {
     onStatus("音声を解析待ち…");
-    uri = await measureStage("activation", () => waitUntilActive(apiKey, file.name, signal));
+    uri = await measureStage("activation", () => waitUntilActive(apiKey, file.name, signal, episodeId));
   }
   // Files API の保持期間は48時間。この間は送り直さずに作り直せる
   return { uri, name: file.name, expiresAt: Date.now() + 48 * 3600 * 1000, bytes: bytes.byteLength, ...(mimeType === "audio/wav" ? { mimeType } : {}) };
@@ -544,6 +551,7 @@ export async function uploadEpisodeAudio(
  * エピソード生成の一式ではなく候補だけを取りに行く(その分速く、枠も食わない)。
  */
 export async function findClips(opts: {
+  episodeId?: string;
   apiKey: string;
   model: string;
   mp3?: ArrayBuffer;
@@ -558,14 +566,15 @@ export async function findClips(opts: {
   signal?: AbortSignal;
 }): Promise<Clip[]> {
   const {
-    apiKey, model, mp3, audio, durationSec,
+    apiKey, model, mp3, audio, durationSec, episodeId,
     onStatus, onUploadProgress, onModelChanged, onUploaded, onEpisodeFacts, signal,
   } = opts;
 
+  await checkGeminiBudget("analysis", model, true);
   let source = audio;
   if (!isAudioUsable(source)) {
     if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
-    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal);
+    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal, undefined, episodeId);
     onUploaded?.(source);
   }
 
@@ -617,39 +626,42 @@ ${onEpisodeFacts ? "clips を先に返し、episodeFacts には短い候補だ�
     onStatus,
     onModelChanged,
     signal,
-    "analysis",
+    "analysis", { episodeId, hasAudio: true },
   );
   if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出", apiKey);
 
-  const data = await res.json();
-  const { text, finishReason } = answerFrom(data, "切り抜きの候補");
-  const parsed = extractJson(text, "切り抜きの候補", finishReason) as { clips?: unknown; episodeFacts?: unknown };
-  onEpisodeFacts?.(Array.isArray(parsed.episodeFacts)
-    ? parsed.episodeFacts.filter((fact): fact is string => typeof fact === "string" && !!fact.trim())
-      .slice(0, 12).map(fact => fact.trim().slice(0, 350))
-    : []);
-  const clips = normalizeClips(parsed.clips, total || undefined);
-  if (clips.length > 0) return clips;
+  return validateGeminiResponse(res, async () => {
+    const data = await res.json();
+    const { text, finishReason } = answerFrom(data, "切り抜きの候補");
+    const parsed = extractJson(text, "切り抜きの候補", finishReason) as { clips?: unknown; episodeFacts?: unknown };
+    onEpisodeFacts?.(Array.isArray(parsed.episodeFacts)
+      ? parsed.episodeFacts.filter((fact): fact is string => typeof fact === "string" && !!fact.trim())
+        .slice(0, 12).map(fact => fact.trim().slice(0, 350))
+      : []);
+    const clips = normalizeClips(parsed.clips, total || undefined);
+    if (clips.length > 0) return clips;
 
-  // ここまで来たら AI の答えは使えない。それでも行き止まりにはしない。
-  // 音声があるのだから、全体(長ければ先頭30秒)を候補として出す。
-  if (total >= MIN_CLIP_SEC) {
-    return [
-      {
-        start: "00:00",
-        end: formatTimecode(Math.min(total, 30)),
-        needsReview: true,
-        hook: "冒頭から",
-        why: "AIが選べなかったため、先頭から仮に取っています",
-      },
-    ];
-  }
-  throw new Error(
-    `切り出せる区間がありませんでした(動画が短すぎます。${MIN_CLIP_SEC}秒以上の動画をお使いください)。`,
-  );
+    // ここまで来たら AI の答えは使えない。それでも行き止まりにはしない。
+    // 音声があるのだから、全体(長ければ先頭30秒)を候補として出す。
+    if (total >= MIN_CLIP_SEC) {
+      return [
+        {
+          start: "00:00",
+          end: formatTimecode(Math.min(total, 30)),
+          needsReview: true,
+          hook: "冒頭から",
+          why: "AIが選べなかったため、先頭から仮に取っています",
+        },
+      ];
+    }
+    throw new Error(
+      `切り出せる区間がありませんでした(動画が短すぎます。${MIN_CLIP_SEC}秒以上の動画をお使いください)。`,
+    );
+  });
 }
 
 export async function generateSpotifyCopy(opts: {
+  episodeId?: string;
   apiKey: string;
   model: string;
   facts: string[];
@@ -679,16 +691,18 @@ ${facts.length ? `音声から確認した事実: ${JSON.stringify(facts)}` : "�
     const res = await callWithModelFallback(apiKey, model, {
       contents: [{ parts }],
       generationConfig: { response_mime_type: "application/json", temperature: 0.5 },
-    }, () => {}, onModelChanged, signal, "spotify");
+    }, () => {}, onModelChanged, signal, "spotify", { episodeId: opts.episodeId, hasAudio: facts.length === 0 });
     if (!res.ok) throwForStatus(res.status, await res.text(), "Spotify用文章の生成", apiKey);
-    const answer = answerFrom(await res.json(), "Spotify用文章");
-    const data = extractJson(answer.text, "Spotify用文章", answer.finishReason) as Partial<EpisodeMeta> | null;
-    const titles = Array.isArray(data?.titles)
-      ? [...new Set(data.titles.filter(t => typeof t === "string").map(t => t.trim()).filter(Boolean))].slice(0, 3)
-      : [];
-    const description = typeof data?.description === "string" ? data.description.trim() : "";
-    if (!titles.length || !description) throw new Error("Spotify用タイトルまたは説明文が不足しています。再試行してください。");
-    return { titles, description: [description, config.fixedFooter.trim()].filter(Boolean).join("\n\n") };
+    return validateGeminiResponse(res, async () => {
+      const answer = answerFrom(await res.json(), "Spotify用文章");
+      const data = extractJson(answer.text, "Spotify用文章", answer.finishReason) as Partial<EpisodeMeta> | null;
+      const titles = Array.isArray(data?.titles)
+        ? [...new Set(data.titles.filter(t => typeof t === "string").map(t => t.trim()).filter(Boolean))].slice(0, 3)
+        : [];
+      const description = typeof data?.description === "string" ? data.description.trim() : "";
+      if (!titles.length || !description) throw new Error("Spotify用タイトルまたは説明文が不足しています。再試行してください。");
+      return { titles, description: [description, config.fixedFooter.trim()].filter(Boolean).join("\n\n") };
+    });
   });
 }
 
@@ -712,6 +726,7 @@ export function useDirectCaptionAudio(durationMs: number): boolean {
 }
 
 export async function transcribeRange(opts: {
+  episodeId?: string;
   apiKey: string;
   model: string;
   audio: UploadedAudio | { wav: ArrayBuffer };
@@ -722,7 +737,9 @@ export async function transcribeRange(opts: {
   getWav?: () => Promise<ArrayBuffer>;
   splitDrafts?: SplitCaptionDraft;
 }): Promise<CaptionCue[]> {
-  const { apiKey, model, audio, durationMs, glossary, onStatus, signal, getWav, splitDrafts } = opts;
+  const { apiKey, model, audio, durationMs, glossary, onStatus, signal, getWav, splitDrafts, episodeId } = opts;
+  const operationId = crypto.randomUUID();
+  if (!apiKey.trim() || !Number.isFinite(durationMs) || durationMs <= 0 || ("wav" in audio && !audio.wav.byteLength)) throw new Error("字幕を作る音声とAPIキーを確認してください。");
   return withDeadline(signal, 75_000, async deadline => {
     let activeModel = splitDrafts?.model ?? model;
     let structured = splitDrafts?.structured ?? true;
@@ -746,7 +763,7 @@ export async function transcribeRange(opts: {
         const encoded = part.inline_data?.data;
         const audioBytes = encoded === undefined ? undefined
           : Math.floor((encoded.length - (encoded.endsWith("==") ? 2 : Number(encoded.endsWith("=")))) * 3 / 4);
-        const res = await geminiFetch({ purpose: "captions", model: activeModel, attempt: request, audioBytes },
+        const res = await geminiFetch({ purpose: "captions", model: activeModel, attempt: request, audioBytes, hasAudio: true, episodeId, operationId },
           `${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
           method: "POST", signal: deadline,
           headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
@@ -782,7 +799,7 @@ ${glossary?.trim() ? `音声と一致するときだけ使う表記: ${glossary.
           }
           throw new CaptionRequestError("http", `Geminiの字幕生成に失敗しました（${res.status}）。APIキーと利用権限を確認してください。`);
         }
-        const cues = parseCaptionResponse(body, length, diagnostic);
+        const cues = await validateGeminiResponse(res, () => parseCaptionResponse(body, length, diagnostic));
         success = true;
         return cues;
       } catch (error) {
@@ -790,6 +807,7 @@ ${glossary?.trim() ? `音声と一致するときだけ使う表記: ${glossary.
           diagnostic.issue = deadline.reason?.name === "TimeoutError" ? "timeout" : "cancelled";
           deadline.throwIfAborted();
         }
+        if (error instanceof BudgetError) throw error;
         if (error instanceof CaptionResponseError || error instanceof CaptionRequestError) {
           diagnostic.issue = error.issue;
           throw error;
@@ -887,15 +905,19 @@ async function callWithModelFallback(
   onModelChanged: ((model: string) => void) | undefined,
   signal: AbortSignal | undefined,
   purpose: GeminiPurpose,
+  budget: { episodeId?: string; hasAudio?: boolean; usesTools?: boolean; operationId?: string } = {},
 ): Promise<Response> {
+  if (!apiKey.trim() || !model.trim()) throw new Error("GeminiのAPIキーとモデルを確認してください。");
+  const operationId = budget.operationId ?? crypto.randomUUID();
+  const serialized = JSON.stringify(body);
   let attempt = 0;
   const call = (id: string) => {
     ++attempt;
-    return measureStage("generation-request", () => geminiFetch({ purpose, model: id, attempt }, `${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
+    return measureStage("generation-request", () => geminiFetch({ ...budget, purpose, model: id, attempt, operationId }, `${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: serialized,
     }), attempt);
   };
 
@@ -918,7 +940,10 @@ async function callWithModelFallback(
     }
     for (const alt of alternatives) {
       onStatus(`${model} が${reason} ${alt} で試します…`);
-      const retried = await call(alt).catch(() => null);
+      const retried = await call(alt).catch(error => {
+        if (error instanceof BudgetError) throw error;
+        return null;
+      });
       if (retried?.ok) {
         onModelChanged?.(alt);
         return retried;
@@ -1128,6 +1153,7 @@ export async function generateEpisodeMeta(opts: GenerateOptions): Promise<Episod
 async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<EpisodeMeta> {
   const opts: GenerateOptions = {
     ...options,
+    operationId: crypto.randomUUID(),
     onModelChanged: (model) => {
       opts.model = model;
       options.onModelChanged?.(model);
@@ -1162,6 +1188,7 @@ async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<E
           context: { ...(opts.context ?? {}), slim: true },
         });
       } catch (retryErr) {
+        if (retryErr instanceof BudgetError) throw retryErr;
         if (retryErr instanceof DOMException && retryErr.name === "AbortError") throw retryErr;
         // 二度目も駄目なら、**最初の理由**を伝える。二度目の事情を出すと
         // 何が起きたのか分からなくなる。
@@ -1180,14 +1207,15 @@ async function generateEpisodeMetaWithRetry(options: GenerateOptions): Promise<E
 async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeMeta> {
   const {
     apiKey, model, mp3, audio, config, context, onStatus,
-    onUploadProgress, onModelChanged, onUploaded, signal,
+    onUploadProgress, onModelChanged, onUploaded, signal, episodeId, operationId,
   } = opts;
 
   const startedAt = performance.now();
+  await checkGeminiBudget("metadata", model, true);
   let source = audio;
   if (!isAudioUsable(source)) {
     if (!mp3) throw new Error("音声がありません。もう一度アップロードしてください。");
-    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal);
+    source = await uploadEpisodeAudio(apiKey, mp3, onStatus, onUploadProgress, signal, undefined, episodeId);
     onUploaded?.(source);
   }
 
@@ -1211,26 +1239,29 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onStatus,
     onModelChanged,
     signal,
-    "metadata",
+    "metadata", { episodeId, operationId, hasAudio: true },
   );
 
   if (!res.ok) throwForStatus(res.status, await res.text(), "生成", apiKey);
 
-  const data = await res.json();
-  const { text, finishReason } = answerFrom(data, "生成結果");
-  const parsed: unknown = extractJson(text, "生成結果", finishReason);
-  const result = normalizeMeta(parsed);
-  recordTiming("generation-and-parsing", performance.now() - generationStartedAt, true);
-  // Local diagnostics only: never log audio, API keys, or generated text.
-  console.info("[AI STUDIO] metadata timing", {
-    uploadAndActivationMs: Math.round(uploadMs),
-    generationAndParsingMs: Math.round(performance.now() - generationStartedAt),
-    totalMs: Math.round(performance.now() - startedAt),
+  return validateGeminiResponse(res, async () => {
+    const data = await res.json();
+    const { text, finishReason } = answerFrom(data, "生成結果");
+    const parsed: unknown = extractJson(text, "生成結果", finishReason);
+    const result = normalizeMeta(parsed);
+    recordTiming("generation-and-parsing", performance.now() - generationStartedAt, true);
+    // Local diagnostics only: never log audio, API keys, or generated text.
+    console.info("[AI STUDIO] metadata timing", {
+      uploadAndActivationMs: Math.round(uploadMs),
+      generationAndParsingMs: Math.round(performance.now() - generationStartedAt),
+      totalMs: Math.round(performance.now() - startedAt),
+    });
+    return result;
   });
-  return result;
 }
 
 export interface TranscriptOptions {
+  episodeId?: string;
   apiKey: string;
   model: string;
   audio: UploadedAudio;
@@ -1284,24 +1315,26 @@ export async function generateTranscript(opts: TranscriptOptions): Promise<Trans
     onStatus,
     onModelChanged,
     signal,
-    "transcript",
+    "transcript", { episodeId: opts.episodeId, hasAudio: true },
   );
 
   if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし", apiKey);
 
-  const data = await res.json();
-  const { text, finishReason } = answerFrom(data, "書き起こし");
-  const parsed = extractJson(text, "書き起こし", finishReason) as { segments?: unknown };
-  const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
-  const cleaned = (segments as Record<string, unknown>[])
-    .filter((s) => s && typeof s.text === "string" && s.text.trim())
-    .map((s) => ({
-      time: typeof s.time === "string" ? s.time : "",
-      speaker: typeof s.speaker === "string" ? s.speaker : "",
-      text: (s.text as string).trim(),
-    }));
-  if (cleaned.length === 0) throw new Error("書き起こしが得られませんでした。");
-  return cleaned;
+  return validateGeminiResponse(res, async () => {
+    const data = await res.json();
+    const { text, finishReason } = answerFrom(data, "書き起こし");
+    const parsed = extractJson(text, "書き起こし", finishReason) as { segments?: unknown };
+    const segments = Array.isArray(parsed.segments) ? parsed.segments : [];
+    const cleaned = (segments as Record<string, unknown>[])
+      .filter((s) => s && typeof s.text === "string" && s.text.trim())
+      .map((s) => ({
+        time: typeof s.time === "string" ? s.time : "",
+        speaker: typeof s.speaker === "string" ? s.speaker : "",
+        text: (s.text as string).trim(),
+      }));
+    if (cleaned.length === 0) throw new Error("書き起こしが得られませんでした。");
+    return cleaned;
+  });
 }
 
 /** 書き起こしを貼り付けやすい平文にする。 */
@@ -1389,7 +1422,7 @@ async function callTopics(
   // 検索を使うときは JSON 強制と併用できないモデルがあるため、
   // 形の指定を外して、本文から JSON を取り出す
   if (useSearch) body.tools = [{ google_search: {} }];
-  return callWithModelFallback(apiKey, model, body, onStatus, onModelChanged, signal, "topics");
+  return callWithModelFallback(apiKey, model, body, onStatus, onModelChanged, signal, "topics", { usesTools: useSearch });
 }
 
 /** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */
@@ -1560,7 +1593,7 @@ export async function suggestTopics(opts: {
   const { apiKey, model, digest, stats, config, onStatus, onModelChanged, signal } = opts;
   const count = opts.count ?? 6;
   const today = opts.today ?? new Date();
-  const wantSearch = opts.useSearch !== false;
+  const wantSearch = opts.useSearch !== false && !(await isPaidGeminiConfigured());
   onStatus("これまでの回を読んでいます…");
 
   const background = [
@@ -1642,34 +1675,36 @@ ${
   }
   if (!res.ok) throwForStatus(res.status, await res.text(), "お題の提案", apiKey);
 
-  const data = await res.json();
-  const { text, finishReason } = answerFrom(data, "お題");
+  return validateGeminiResponse(res, async () => {
+    const data = await res.json();
+    const { text, finishReason } = answerFrom(data, "お題");
 
-  // 検索を使った応答は JSON の形を強制できないため、本文から取り出す
-  const parsed = extractJson(text, "お題", finishReason);
-  const sources = searched ? groundingSources(data) : [];
+    // 検索を使った応答は JSON の形を強制できないため、本文から取り出す
+    const parsed = extractJson(text, "お題", finishReason);
+    const sources = searched ? groundingSources(data) : [];
 
-  const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
-    .map((raw) => {
-      const o = (raw ?? {}) as Record<string, unknown>;
-      return {
-        title: typeof o.title === "string" ? o.title.trim() : "",
-        why: typeof o.why === "string" ? o.why.trim() : "",
-        angles: asStrings(o.angles, 5),
-        hook: typeof o.hook === "string" ? o.hook.trim() : "",
-        related: asStrings(o.related, 4),
-      };
-    })
-    .filter((i) => i.title);
+    const ideas = (Array.isArray(parsed.ideas) ? parsed.ideas : [])
+      .map((raw) => {
+        const o = (raw ?? {}) as Record<string, unknown>;
+        return {
+          title: typeof o.title === "string" ? o.title.trim() : "",
+          why: typeof o.why === "string" ? o.why.trim() : "",
+          angles: asStrings(o.angles, 5),
+          hook: typeof o.hook === "string" ? o.hook.trim() : "",
+          related: asStrings(o.related, 4),
+        };
+      })
+      .filter((i) => i.title);
 
-  if (ideas.length === 0) throw new Error("お題が返りませんでした。もう一度お試しください。");
+    if (ideas.length === 0) throw new Error("お題が返りませんでした。もう一度お試しください。");
 
-  return {
-    patterns: asStrings(parsed.patterns, 6),
-    gaps: asStrings(parsed.gaps, 5),
-    ideas,
-    sources: sources.length > 0 ? sources : undefined,
-    // 出典が1つも返らなければ、実際には調べていない。そう見せない
-    searched: searched && sources.length > 0,
-  };
+    return {
+      patterns: asStrings(parsed.patterns, 6),
+      gaps: asStrings(parsed.gaps, 5),
+      ideas,
+      sources: sources.length > 0 ? sources : undefined,
+      // 出典が1つも返らなければ、実際には調べていない。そう見せない
+      searched: searched && sources.length > 0,
+    };
+  });
 }

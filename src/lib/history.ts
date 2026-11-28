@@ -227,6 +227,7 @@ export async function dropAllAudio(): Promise<void> {
  * Blob なら実体をディスクに持てるうえ、そのまま再生や添付に使える。
  */
 export interface PendingConversion {
+  episodeId?: string;
   id: typeof PENDING_KEY;
   createdAt: number;
   fileName: string;

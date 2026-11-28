@@ -1,7 +1,7 @@
 import { originalKey, readProductionCheckpoint, saveProductionCheckpoint, type ProductionSession } from "../core/productionSession";
 import { findClips, generateSpotifyCopy, type EpisodeAnalysis } from "../modules/editorial/analysis";
 import { captionRangeKey, sourceClipRange, type ShortVideo } from "../modules/shorts/checkpoint";
-import { recordGeminiCache } from "../adapters/geminiObservability";
+import { checkGeminiBudget, recordGeminiCache } from "../adapters/geminiObservability";
 import type { SplitCaptionDraft } from "../lib/captionResponse";
 import DriveSavePanel from "./DriveSavePanel";
 import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
@@ -315,14 +315,17 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     try {
       const recent = await listEpisodes().then(rows => rows.filter(row => row.id !== newEpisodeId.current).slice(0, 8).map(row => row.chosenTitle || row.meta.titles[0]).filter(Boolean)).catch(() => previousTitles);
       controller.signal.throwIfAborted();
+      const episodeId = newEpisodeId.current;
+      await checkGeminiBudget("spotify", model, !analysis.facts.length);
       let audio = analysis.audio;
       if (!analysis.facts.length && !isAudioUsable(audio)) {
         const prepared = sourceAudioRef.current ?? await extractAudio(analysis.file, controller.signal);
         sourceAudioRef.current = prepared;
         audio = await sourceCacheRef.current.get("source", settings.apiKey, async () => prepared.mp3,
-          bytes => uploadEpisodeAudio(settings.apiKey, bytes, () => {}, undefined, controller.signal));
+          bytes => uploadEpisodeAudio(settings.apiKey, bytes, () => {}, undefined, controller.signal, undefined, episodeId));
       }
       const copy = await generateSpotifyCopy({
+        episodeId,
         apiKey: settings.apiKey,
         model,
         facts: analysis.facts,
@@ -450,8 +453,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
           return [i, { ...result, url }];
         })));
       }
-      recordGeminiCache("analysis");
-      if (analysis.copy) recordGeminiCache("spotify");
+      recordGeminiCache("analysis", production.id);
+      if (analysis.copy) recordGeminiCache("spotify", production.id);
       setPhase("ready");
     } catch {
       setError("端末に保存した制作を再開できませんでした。原音を選び直せます。");
@@ -478,6 +481,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       setHasVideo(decodable);
       setVideoUnusable(video && !decodable);
 
+      const episodeId = existing?.episodeId ?? newEpisodeId.current;
+      await checkGeminiBudget("analysis", settings.model, true);
       const reusable = existing?.uploaded;
       if (!isAudioUsable(reusable) && !sourceAudioRef.current) {
         sourceAudioRef.current = await measureStage("conversion", () => extractAudio(file, controller.signal));
@@ -489,11 +494,12 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       setProgress(0);
       const audio = isAudioUsable(reusable) ? reusable! : await sourceCacheRef.current.get("source", settings.apiKey,
         async () => mp3!,
-        bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, controller.signal));
+        bytes => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, setProgress, controller.signal, undefined, episodeId));
       controller.signal.throwIfAborted();
       let facts: string[] = [];
       let model = settings.model;
       const found = await findClips({
+        episodeId,
         audio,
         apiKey: settings.apiKey,
         model: settings.model,
@@ -546,7 +552,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const { archived, origin } = existing ? await historyCaptionPlan(startSec, endSec, signal) : { archived: null, origin: "range" };
     const draft = captions[i];
     if (draft && (!existing || captionOrigins.current.get(i) === origin)) {
-      recordGeminiCache("captions");
+      recordGeminiCache("captions", existing?.episodeId ?? newEpisodeId.current);
       return draft;
     }
     const commit = (cues: CaptionCue[]) => {
@@ -567,7 +573,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       if (latest.origin !== origin) throw new Error("履歴の字幕が更新されました。もう一度お試しください。");
     };
     if (archived) {
-      recordGeminiCache("captions");
+      recordGeminiCache("captions", existing?.episodeId ?? newEpisodeId.current);
       const { captionActivityForRange } = await loadClipLib();
       setStatus("保存済み字幕を音声に合わせています…");
       const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
@@ -581,7 +587,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const cached = rangeDrafts.current.get(rangeKey)
       ?? (episodeId && sourceId ? readEpisodeDraft(episodeId, sourceId, rangeKey) : undefined);
     if (cached) {
-      recordGeminiCache("captions");
+      recordGeminiCache("captions", existing?.episodeId ?? newEpisodeId.current);
       return commit(cached);
     }
     if (existing?.episodeId && existing.sourceRevision) {
@@ -590,7 +596,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       const cues = saved?.shorts?.ranges.find(([key]) => key === rangeKey)?.[1];
       if (cues) {
         await verifyHistory();
-        recordGeminiCache("captions");
+        recordGeminiCache("captions", existing?.episodeId ?? newEpisodeId.current);
         saveEpisodeDraft(existing.episodeId, existing.sourceRevision, rangeKey, cues);
         return commit(cues);
       }
@@ -610,6 +616,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       return prepared.wav;
     };
     const model = settings.captionModel || settings.model;
+    await checkGeminiBudget("captions", model, true);
     const splitKey = JSON.stringify([rangeKey, model, settings.prompt.glossary]);
     let parts = splitDrafts.current.get(splitKey);
     if (!parts) {
@@ -621,10 +628,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const audio = parts.model || useDirectCaptionAudio(durationMs)
       ? { wav: await getWav() }
       : await rangeCacheRef.current.get(rangeKey, settings.apiKey, extract, bytes =>
-        withDeadline(signal, 45_000, deadline => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, undefined, deadline, "audio/wav")));
+        withDeadline(signal, 45_000, deadline => uploadEpisodeAudio(settings.apiKey, bytes, setStatus, undefined, deadline, "audio/wav", episodeId)));
     signal.throwIfAborted();
     const raw = await transcribeRange({
-      apiKey: settings.apiKey, model, audio, durationMs, glossary: settings.prompt.glossary,
+      episodeId, apiKey: settings.apiKey, model, audio, durationMs, glossary: settings.prompt.glossary,
       onStatus: setStatus, signal, getWav, splitDrafts: parts,
     });
     splitDrafts.current.delete(splitKey);
