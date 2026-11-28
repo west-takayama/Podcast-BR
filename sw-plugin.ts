@@ -24,7 +24,7 @@ export function serviceWorker(): Plugin {
     name: "podcast-br-sw",
     apply: "build",
     generateBundle(_options, bundle) {
-      const assets = Object.keys(bundle).filter((name) => name !== "index.html");
+      const assets = Object.keys(bundle).filter((name) => name !== "index.html" && !/^assets\/AudioPanel-/.test(name));
       // "./" は index.html のこと。ナビゲーションはこの URL で解決される
       const precache = ["./", ...assets, ...STATIC_FILES].sort();
       const version = createHash("sha256").update(precache.join("\n")).digest("hex").slice(0, 12);

@@ -1,3 +1,4 @@
+import { createProductionAsset, type ProductionAsset } from "./core/productionAsset";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   generateEpisodeMeta,
@@ -49,6 +50,7 @@ import { DriveConnectionProvider } from "./components/DriveConnection";
 // キャッシュから出しているときでも、この時間は毎回かかる。
 // 最初に要るのは「音声を選ぶ」ところだけで、残りは押されてからで間に合う。
 const ResultView = lazy(() => import("./components/ResultView"));
+const AudioPanel = lazy(() => import("./modules/audio/AudioPanel"));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel"));
 const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
 const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
@@ -59,12 +61,13 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "create" | "legacy" | "next" | "history" | "settings";
+type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
 
 export default function App() {
+  const [productionAsset, setProductionAsset] = useState<ProductionAsset>();
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [driveSetupShortcut, setDriveSetupShortcut] = useState(false);
   const [settingsReturnTab, setSettingsReturnTab] = useState<Tab>("create");
@@ -796,8 +799,9 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 2.4.1</h1>
+        <h1>🎙️ AI STUDIO 3.0 α1</h1>
         <nav className="tabs">
+          <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
             作成
           </button>
@@ -866,8 +870,14 @@ export default function App() {
         </>
       )}
 
+      {tab === "audio" && <AudioPanel asset={productionAsset}
+        onImport={file => setProductionAsset(createProductionAsset(file))}
+        onCreate={() => setTab("create")} />}
+
       {(tab === "create" || studioVisited) && <div hidden={tab !== "create"}>
         <ShortsPanel
+          productionAsset={productionAsset}
+          onProductionFile={file => setProductionAsset(current => current?.file === file ? current : createProductionAsset(file))}
           settings={settings}
           previousTitles={previousTitles}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}
