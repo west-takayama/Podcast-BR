@@ -1,11 +1,12 @@
+const { selectEpisode, scores } = require("./select-episode");
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 const { openLegacy } = require("./legacy-production");
 
 const port = process.argv[2] || 4218;
 const clips = [
-  { start: "00:00", end: "00:05", hook: "冒頭の候補", why: "確認用", socialPost: "最初の投稿", hashtags: ["#冒頭"] },
-  { start: "00:05", end: "00:10", hook: "二番目の候補", why: "確認用", socialPost: "二番目の投稿", hashtags: ["#二番目"] },
+  { start: "00:00", end: "00:05", hook: "冒頭の候補", scores, why: "確認用", socialPost: "最初の投稿", hashtags: ["#冒頭"] },
+  { start: "00:05", end: "00:10", hook: "二番目の候補", scores, why: "確認用", socialPost: "二番目の投稿", hashtags: ["#二番目"] },
 ];
 const meta = { titles: ["共有フローの回"], description: "テスト用", chapters: [], clips };
 const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }] });
@@ -56,7 +57,7 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
     await openLegacy(page);
     await page.locator(".legacy-production .drop input").setInputFiles("speechlike.wav");
 
-    const all = () => page.getByRole("button", { name: "すべてのショート動画をまとめて生成" });
+    const all = () => page.getByRole("button", { name: "推奨ショート動画をまとめて生成" });
     const verifyTopButton = async () => {
       await page.getByRole("checkbox", { name: "冒頭の候補を一括生成に含める" }).waitFor();
       await all().waitFor();
@@ -89,6 +90,7 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
     await preview.evaluate(audio => { audio.currentTime = 1; });
     await page.getByLabel("表示中の字幕").getByText("たそ").waitFor();
     await verifyTopButton();
+    await selectEpisode(page);
     await all().click();
     await checkExports();
     assert.deepEqual(uploads, ["audio/mpeg", "audio/wav", "audio/wav"], "legacy uses its already picked source and only sends needed ranges");
@@ -96,6 +98,7 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
 
     await page.getByRole("button", { name: "履歴", exact: true }).click();
     await page.locator(".history-main").filter({ hasText: "共有フローの回" }).click();
+    await selectEpisode(page);
     await all().click();
     await checkExports();
     assert.equal(uploads.length, 3, "switching from legacy to history reuses the same episode's drafts");
@@ -116,6 +119,7 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
     assert.equal(await page.getByRole("textbox", { name: "字幕 1", exact: true }).inputValue(), "履歴の字幕その一");
     await page.getByRole("button", { name: "Aを新しい出演者に割り当て" }).click();
     await page.getByRole("textbox", { name: "出演者 1 の名前" }).fill("主宰者");
+    await selectEpisode(page);
     await all().click();
     await checkExports();
     assert.equal(uploads.length, 3, "saved audio and transcript require no new uploads");
@@ -152,6 +156,7 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
       db.close();
       return record?.meta.clips?.length === 2;
     });
+    await selectEpisode(page);
     await all().click();
     await checkExports();
     assert.equal(uploads.length, 3);

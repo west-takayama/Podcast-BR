@@ -1,3 +1,4 @@
+const { selectEpisode, scores } = require("./select-episode");
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
@@ -38,8 +39,8 @@ const pickerResponse = `
 `;
 const candidates = {
   clips: [
-    { start: 0, end: 5, hook: "短編一", socialPost: "投稿の本文一", hashtags: ["#短編一"] },
-    { start: 6, end: 11, hook: "短編二", socialPost: "投稿の本文二", hashtags: ["#短編二"] },
+    { start: 0, end: 5, hook: "短編一", scores, socialPost: "投稿の本文一", hashtags: ["#短編一"] },
+    { start: 6, end: 11, hook: "短編二", scores, socialPost: "投稿の本文二", hashtags: ["#短編二"] },
   ],
   episodeFacts: ["素材について話しました。"],
 };
@@ -129,8 +130,12 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
           assert.equal(manifest.status, "pending_owner_approval");
           assert.deepEqual(manifest.hashtags, [`#${manifest.title}`]);
           assert(files.has(manifest.video.driveFileId));
-          assert.equal(manifest.description, uploadedManifests.length === 2 ? "投稿文を改訂" :
-            manifest.title === "短編一" ? "投稿の本文一" : "投稿の本文二");
+          const copy = uploadedManifests.length === 2 ? "投稿文を改訂" :
+            manifest.title === "短編一" ? "投稿の本文一" : "投稿の本文二";
+          assert.equal(manifest.description, copy + "\n\n本編 #42「合成回の本編」");
+          assert.equal(manifest.parent.title, "合成回の本編");
+          assert.equal(manifest.parent.number, "42");
+          assert.match(manifest.parent.episodeId, /^[0-9a-f-]{36}$/);
           assert.equal(manifest.video.mimeType, files.get(manifest.video.driveFileId).metadata.mimeType);
           uploadedManifests.push(manifest);
           if (failFirstManifest) {
@@ -174,7 +179,8 @@ const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringi
     await page.getByRole("button", { name: "保存して閉じる" }).click();
     await page.locator(".production-picker input").setInputFiles("speechlike.wav");
     await page.getByRole("checkbox", { name: /字幕を入れる/ }).uncheck();
-    await page.getByRole("button", { name: "すべてのショート動画をまとめて生成" }).click();
+    await selectEpisode(page);
+    await page.getByRole("button", { name: "推奨ショート動画をまとめて生成" }).click();
     await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
     await page.getByText("Googleドライブへ保存", { exact: true }).click();
     await page.getByRole("status").filter({ hasText: "Google Drive：接続済み・保存先確認済み" }).waitFor();

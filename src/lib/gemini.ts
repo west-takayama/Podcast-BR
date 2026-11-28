@@ -582,7 +582,7 @@ export async function findClips(opts: {
 
   const total = durationSec && durationSec > 0 ? durationSec : 0;
   const lengthRule = `- 30秒前後を推奨。通常20〜40秒、最大60秒。自然な発言の区切りを優先。
-${total ? `- 全体は ${formatTimecode(total)}。素材の終端を越えない。短い素材は20秒未満でも、自然に完結する候補を1つ返す。` : ""}`;
+${total ? `- 全体は ${formatTimecode(total)}。素材の終端を越えない。短い素材でも、自然に完結する区間がある場合だけ返す。` : ""}`;
 
   const prompt = `添付の音声を聴いて、縦型ショート動画(TikTok / Reels / YouTube Shorts)に
 切り出す区間を選んでください。
@@ -599,7 +599,7 @@ ${total ? `- 全体は ${formatTimecode(total)}。素材の終端を越えない
 - **それ単体で完結して面白い**こと。前後の文脈が無いと意味が通らない箇所は選ばない。
 ${lengthRule}
 - **冒頭2秒で引きが立つ位置から始める。** 前置きや「えー」から始めない。発言の途中で切らず、オチや結論、必要な応答まで含める。文脈を歪める編集や、音声にない内容を見出しにすることは禁止。
-- 候補が1つも思いつかない場合でも、いちばんましな区間を必ず1つは返す。
+- 品質基準を満たす候補がなければ、空配列 clips: [] を返す。件数を満たすための候補は作らない。
 - hook は動画の1行目に大きく出す見出し。20文字以内。続きを見たくなる言葉にし、
   答えは動画の中に残す。
 - why は選定理由を具体的に20文字程度で。再生数や拡散を予測しない。
@@ -639,7 +639,7 @@ ${onEpisodeFacts ? "clips を先に返し、episodeFacts には短い候補だ�
         .slice(0, 12).map(fact => fact.trim().slice(0, 350))
       : []);
     const clips = normalizeClips(parsed.clips, total || undefined);
-    if (clips.length > 0) return clips;
+    if (clips.length > 0 || (Array.isArray(parsed.clips) && parsed.clips.length === 0)) return clips;
 
     // ここまで来たら AI の答えは使えない。それでも行き止まりにはしない。
     // 音声があるのだから、全体(長ければ先頭30秒)を候補として出す。

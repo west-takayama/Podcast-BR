@@ -1,3 +1,4 @@
+import { parseShortParent } from "../video/feature";
 import { blobDigest, CANDIDATE_FOLDER_ID, DriveSaveError, versionIdentity } from "../../lib/driveSave";
 import type { Candidate } from "./model";
 
@@ -36,7 +37,7 @@ export function parseCandidate(manifest: unknown, file: FileInfo, movie: FileInf
     throw new Error("Driveの動画と投稿情報の対応を確認できません。");
   }
   return { candidateId, versionId, manifestId: file.id, videoId: movie.id, title: value.title, description: value.description,
-    hashtags: value.hashtags, filename: movie.name, mime: movie.mimeType, startMs: range.startMs, endMs: range.endMs };
+    hashtags: value.hashtags, parent: parseShortParent(value.parent), filename: movie.name, mime: movie.mimeType, startMs: range.startMs, endMs: range.endMs };
 }
 
 export async function listCandidates(token: string, signal: AbortSignal) {

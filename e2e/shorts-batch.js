@@ -1,3 +1,4 @@
+const { selectEpisode } = require("./select-episode");
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
@@ -105,6 +106,8 @@ const candidates = {
     const start = page.getByRole("button", { name: "選択した動画をまとめて生成" });
     const outputs = page.locator(".clip-result");
     await box(5).waitFor();
+    await selectEpisode(page);
+    await page.getByRole("button", { name: "全選択" }).click();
     await page.getByRole("button", { name: "全解除" }).click();
     assert(await start.isDisabled());
     assert.equal(await page.getByRole("checkbox", { name: /一括生成に含める/, checked: true }).count(), 0);

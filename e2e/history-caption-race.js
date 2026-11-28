@@ -1,3 +1,4 @@
+const { selectEpisode, scores } = require("./select-episode");
 // Run against Vite dev so the fixture and the app use the same IndexedDB implementation.
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
@@ -21,11 +22,11 @@ async function verify(browser, round, underLoad) {
       await route.fulfill({ json: { error: { message: "Fixture expects no requests" } }, status: 500 });
     });
     await page.goto(base);
-    await page.evaluate(async ({ audio, oldRange }) => {
+    await page.evaluate(async ({ audio, oldRange, scores }) => {
       const { saveEpisode } = await import("/src/lib/history.ts");
       const { saveProductionCheckpoint } = await import("/src/core/productionSession.ts");
       const file = new File([Uint8Array.from(atob(audio), value => value.charCodeAt(0))], "synth.wav", { type: "audio/wav" });
-      const clip = { start: "00:00", end: "00:05", hook: "候補", why: "テスト" };
+      const clip = { start: "00:00", end: "00:05", hook: "候補", why: "テスト", scores };
       await saveEpisode({ id: "test-episode", sourceRevision: "raw-one", fileName: file.name, audio: file,
         durationSec: 36, removedSec: 0, originalAudio: true, createdAt: Date.now(),
         chosenTitle: "字幕の試験", meta: { titles: ["字幕の試験"], description: "合成素材", clips: [clip], hashtags: [], chapters: [], keywords: [], showNotes: "", transcriptSummary: "" } });
@@ -33,7 +34,7 @@ async function verify(browser, round, underLoad) {
         captions: {}, nudges: {}, speakers: [], speakerLinks: {}, videos: {}, withCaptions: true, resolution: 720,
         ranges: [["[0,5]", [{ startMs: 800, endMs: 1800, speakerId: "B", text: oldRange, emphasis: [], needsReview: false }]]],
       } });
-    }, { audio, oldRange });
+    }, { audio, oldRange, scores });
     const openHistory = async () => {
       await page.getByRole("button", { name: "履歴", exact: true }).click();
       await page.locator(".history-main").filter({ hasText: "字幕の試験" }).click();
@@ -68,7 +69,8 @@ async function verify(browser, round, underLoad) {
     await page.getByRole("textbox", { name: "字幕 1", exact: true }).waitFor({ state: "detached" });
     await showCaptions(freshFull);
     if (round === 0) {
-      await page.getByRole("button", { name: /すべてのショート動画をまとめて生成/ }).click();
+      await selectEpisode(page);
+      await page.getByRole("button", { name: /推奨ショート動画をまとめて生成/ }).click();
       await page.getByRole("heading", { name: /書き出した動画\(1本\)/ }).waitFor({timeout: 90_000});
       assert.equal(await page.locator(".clip-result a[download]").count(), 1);
       const writer = await context.newPage();
