@@ -115,8 +115,10 @@ const archived = archivedCaptionCues(transcript, 12, 15, 40);
 assert.deepEqual(archived?.map(cue => [cue.startMs, cue.endMs, cue.speakerId, cue.needsReview]), [[250, null, "B", true]]);
 assert.equal(archivedCaptionCues(transcript.slice(0, 2), 12, 25, 40), null, "truncated transcript must not replace short transcription");
 assert.equal(archivedCaptionCues(transcript, 19, 24, 40), null, "no stored utterance in this range");
-saveEpisodeDraft("archived-test", "[12,15]", archived!);
-assert.equal(readEpisodeDraft("archived-test", "[12,15]"), archived);
-assert.equal(readEpisodeDraft("other-episode", "[12,15]"), undefined);
-assert.equal(readEpisodeDraft("archived-test", "[13,15]"), undefined);
+saveEpisodeDraft("archived-test", "original", "[12,15]", archived!);
+assert.equal(readEpisodeDraft("archived-test", "original", "[12,15]"), archived);
+assert.equal(readEpisodeDraft("other-episode", "original", "[12,15]"), undefined);
+assert.equal(readEpisodeDraft("archived-test", "original", "[13,15]"), undefined);
 console.log("archived captions and exact-range episode cache: OK");
+
+assert.equal(readEpisodeDraft("archived-test", "replacement", "[12,15]"), undefined);
