@@ -1,3 +1,4 @@
+import { geminiFetch, observeGeminiRequest, type GeminiPurpose } from "../adapters/geminiObservability";
 import { captionSchema, CaptionResponseError, parseCaptionResponse, splitCaptionWav, type SplitCaptionDraft } from "./captionResponse";
 import type { CaptionCue } from "./video/captionAlignment";
 // Gemini API(無料枠)との連携。
@@ -93,7 +94,7 @@ export interface ModelInfo {
  * 一覧はキーごとに変わるため、その端末のキーで毎回引き直す。
  */
 export async function listModels(apiKey: string, signal?: AbortSignal): Promise<ModelInfo[]> {
-  const res = await fetch(`${API_BASE}/v1beta/models?key=${apiKey}&pageSize=200`, { signal });
+  const res = await geminiFetch({ purpose: "models" }, `${API_BASE}/v1beta/models?key=${apiKey}&pageSize=200`, { signal });
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 400 && body.includes("API_KEY_INVALID")) {
@@ -285,14 +286,15 @@ async function uploadFile(
   onStatus?: (status: string) => void,
   mimeType: AudioMime = "audio/mpeg",
 ): Promise<UploadedFile> {
-  const send = () =>
+  let attempt = 0;
+  const send = () => observeGeminiRequest({ purpose: "upload", attempt: ++attempt, audioBytes: mp3.byteLength }, () =>
     xhrUpload(
       `${API_BASE}/upload/v1beta/files?key=${apiKey}&uploadType=media`,
       mp3,
       onProgress,
       signal,
       mimeType,
-    );
+    ));
 
   let { status, text } = await send();
   // 送信も混雑で弾かれることがある。数十MB を捨てずに待って投げ直す
@@ -344,7 +346,7 @@ async function waitUntilActive(
   signal?: AbortSignal,
 ): Promise<string> {
   for (let i = 0; i < 90; i++) {
-    const res = await fetch(`${API_BASE}/v1beta/${fileName}?key=${apiKey}`, { signal });
+    const res = await geminiFetch({ purpose: "activation" }, `${API_BASE}/v1beta/${fileName}?key=${apiKey}`, { signal });
     if (!res.ok) throw new Error(`ファイル状態の確認に失敗しました (${res.status})`);
     const info = await res.json();
     if (info.state === "ACTIVE") return info.uri as string;
@@ -615,6 +617,7 @@ ${onEpisodeFacts ? "clips を先に返し、episodeFacts には短い候補だ�
     onStatus,
     onModelChanged,
     signal,
+    "analysis",
   );
   if (!res.ok) throwForStatus(res.status, await res.text(), "切り抜きの抽出", apiKey);
 
@@ -650,7 +653,7 @@ export async function generateSpotifyCopy(opts: {
   apiKey: string;
   model: string;
   facts: string[];
-  audio: UploadedAudio;
+  audio?: UploadedAudio;
   config: PromptConfig;
   previousTitles: string[];
   onModelChanged?: (model: string) => void;
@@ -667,15 +670,16 @@ export async function generateSpotifyCopy(opts: {
 直近タイトル: ${JSON.stringify(previousTitles.slice(0, 8))}
 ${facts.length ? `音声から確認した事実: ${JSON.stringify(facts)}` : "添付の音声を聞いて根拠を確認する。"}
 形式: {"titles": ["タイトル"], "description": "概要欄"}`;
+  if (!facts.length && !audio) throw new Error("根拠の音声を準備してください。");
   const parts = [
-    ...(facts.length ? [] : [{ file_data: { mime_type: "audio/mpeg", file_uri: audio.uri } }]),
+    ...(!facts.length && audio ? [{ file_data: { mime_type: "audio/mpeg", file_uri: audio.uri } }] : []),
     { text: prompt },
   ];
   return measureStage("metadata-total", async () => {
     const res = await callWithModelFallback(apiKey, model, {
       contents: [{ parts }],
       generationConfig: { response_mime_type: "application/json", temperature: 0.5 },
-    }, () => {}, onModelChanged, signal);
+    }, () => {}, onModelChanged, signal, "spotify");
     if (!res.ok) throwForStatus(res.status, await res.text(), "Spotify用文章の生成", apiKey);
     const answer = answerFrom(await res.json(), "Spotify用文章");
     const data = extractJson(answer.text, "Spotify用文章", answer.finishReason) as Partial<EpisodeMeta> | null;
@@ -739,7 +743,11 @@ export async function transcribeRange(opts: {
       let status: number | undefined;
       let success = false;
       try {
-        const res = await fetch(`${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
+        const encoded = part.inline_data?.data;
+        const audioBytes = encoded === undefined ? undefined
+          : Math.floor((encoded.length - (encoded.endsWith("==") ? 2 : Number(encoded.endsWith("=")))) * 3 / 4);
+        const res = await geminiFetch({ purpose: "captions", model: activeModel, attempt: request, audioBytes },
+          `${API_BASE}/v1beta/models/${activeModel}:generateContent`, {
           method: "POST", signal: deadline,
           headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
           body: JSON.stringify({
@@ -876,17 +884,20 @@ async function callWithModelFallback(
   model: string,
   body: unknown,
   onStatus: (status: string) => void,
-  onModelChanged?: (model: string) => void,
-  signal?: AbortSignal,
+  onModelChanged: ((model: string) => void) | undefined,
+  signal: AbortSignal | undefined,
+  purpose: GeminiPurpose,
 ): Promise<Response> {
   let attempt = 0;
-  const call = (id: string) =>
-    measureStage("generation-request", () => fetch(`${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
+  const call = (id: string) => {
+    ++attempt;
+    return measureStage("generation-request", () => geminiFetch({ purpose, model: id, attempt }, `${API_BASE}/v1beta/models/${id}:generateContent?key=${apiKey}`, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }), ++attempt);
+    }), attempt);
+  };
 
   // 混雑は**モデルごとに**起きる。同じモデルを待ち続けるより、空いている
   // モデルへ移るほうが早い(試験版なら特に。割り当てが細く、混雑と
@@ -1200,6 +1211,7 @@ async function generateEpisodeMetaInner(opts: GenerateOptions): Promise<EpisodeM
     onStatus,
     onModelChanged,
     signal,
+    "metadata",
   );
 
   if (!res.ok) throwForStatus(res.status, await res.text(), "生成", apiKey);
@@ -1272,6 +1284,7 @@ export async function generateTranscript(opts: TranscriptOptions): Promise<Trans
     onStatus,
     onModelChanged,
     signal,
+    "transcript",
   );
 
   if (!res.ok) throwForStatus(res.status, await res.text(), "書き起こし", apiKey);
@@ -1376,7 +1389,7 @@ async function callTopics(
   // 検索を使うときは JSON 強制と併用できないモデルがあるため、
   // 形の指定を外して、本文から JSON を取り出す
   if (useSearch) body.tools = [{ google_search: {} }];
-  return callWithModelFallback(apiKey, model, body, onStatus, onModelChanged, signal);
+  return callWithModelFallback(apiKey, model, body, onStatus, onModelChanged, signal, "topics");
 }
 
 /** 本文から JSON を取り出す。``` で囲まれていたり前後に文が付くことがある。 */

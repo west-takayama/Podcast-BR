@@ -6,7 +6,7 @@ const { join } = require("node:path");
 const { chromium } = require("playwright");
 
 const port = process.argv[2] || 4218;
-const answer = data => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }] });
+const answer = data => ({ usageMetadata: { promptTokenCount: 123, candidatesTokenCount: 45, thoughtsTokenCount: 6, cachedContentTokenCount: 0 }, candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }] });
 const candidates = {
   clips: [
     { start: "00:00", end: "00:05", hook: "最初の候補", why: "理由", socialPost: "ショート用の投稿文", hashtags: ["#対話"] },
@@ -66,6 +66,7 @@ const candidates = {
         const picker = page.locator(".production-picker input[type=file]");
         await picker.waitFor({ state: "attached" });
         assert.equal(await picker.count(), 1);
+        const coldStarted = performance.now();
         await picker.setInputFiles(source);
         await page.getByRole("heading", { name: /ショートの候補/ }).waitFor();
         await page.getByText("文章を準備中です。ショートの編集を進められます。").waitFor();
@@ -167,6 +168,31 @@ const candidates = {
         await page.getByText("Spotify確認用", { exact: true }).waitFor();
         await page.getByRole("button", { name: "履歴", exact: true }).click();
         await page.locator(".history-main").filter({ hasText: "Spotify確認用" }).waitFor();
+        const coldMs = Math.round(performance.now() - coldStarted);
+        const networkCalls = requestCount();
+        const audioBytes = uploads.reduce((total, upload) => total + upload.bytes.length, 0);
+        await page.getByRole("button", { name: "作成", exact: true }).click();
+        await page.getByRole("button", { name: "設定", exact: true }).click();
+        const diagnostics = page.getByText(/処理時間の診断/).first();
+        await diagnostics.click();
+        const report = await page.getByRole("textbox", { name: "処理時間の記録" }).first().inputValue();
+        assert.match(report, /推論トークン 6/);
+        assert.doesNotMatch(report, /AIzaMOCK|https:\/\/mock|収録機材を使います|Spotify確認用/);
+        await page.reload();
+        const resume = page.getByRole("button", { name: "保存した制作を再開する" });
+        await resume.waitFor();
+        const started = performance.now();
+        await resume.click();
+        await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor();
+        const resumeMs = Math.round(performance.now() - started);
+        await page.getByText("Spotify確認用", { exact: true }).waitFor();
+        await page.getByRole("button", { name: /次の候補/ }).click();
+        await previewAtFirst();
+        await namesAtStart.getByText("進行", { exact: true }).waitFor();
+        assert.equal(await person(2).inputValue(), "たそ");
+        assert.equal(requestCount(), networkCalls, "reopening restores analysis, captions, names and video blobs offline");
+        assert.equal(await page.locator("video.card-preview").count(), 2);
+        console.log(`MOCK ${source === video ? "video" : "audio"}: cold workflow ${coldMs} ms, ${networkCalls} requests, audio upload ${audioBytes} bytes; resume 0 requests, 0 upload bytes, ${resumeMs} ms`);
         assert.deepEqual(errors, []);
       } finally {
         await ctx.close();

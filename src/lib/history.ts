@@ -81,9 +81,9 @@ function tx<T>(
       new Promise<T>((resolve, reject) => {
         const transaction = db.transaction(storeName, mode);
         const req = fn(transaction.objectStore(storeName));
-        req.onsuccess = () => resolve(req.result);
+        transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error("履歴の操作を中断しました")); };
         req.onerror = () => reject(req.error ?? new Error("履歴の操作に失敗しました"));
-        transaction.oncomplete = () => db.close();
+        transaction.oncomplete = () => { db.close(); resolve(req.result); };
       }),
   );
 }
@@ -93,8 +93,44 @@ export async function listEpisodes(): Promise<EpisodeRecord[]> {
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export async function saveEpisode(record: EpisodeRecord): Promise<void> {
-  await tx("readwrite", (s) => s.put({ updatedAt: Date.now(), ...record }));
+export const getEpisode = (id: string) => tx<EpisodeRecord | undefined>("readonly", (store) => store.get(id));
+
+export async function readProductionEntry<T>(id: string): Promise<T | undefined> {
+  const row = await tx<{ value: T } | undefined>("readonly", (store) => store.get(id), ASSET_STORE);
+  return row?.value;
+}
+
+export const writeProductionEntry = (id: string, value: unknown) =>
+  tx("readwrite", (store) => store.put({ id, value }), ASSET_STORE);
+
+async function writeStores(names: string | string[], write: (transaction: IDBTransaction) => void) {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(names, "readwrite");
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error("端末に保存できませんでした")); };
+    write(transaction);
+  });
+}
+
+export function writeProductionSource(id: string, file: File, activeKey: string, active: unknown) {
+  return writeStores(ASSET_STORE, transaction => {
+    const store = transaction.objectStore(ASSET_STORE);
+    store.put({ id, value: file });
+    store.put({ id: activeKey, value: active });
+  });
+}
+
+export async function saveEpisode(record: EpisodeRecord, stagedAudioKey?: string): Promise<void> {
+  const row = { updatedAt: Date.now(), ...record };
+  if (stagedAudioKey) {
+    await writeStores([STORE, ASSET_STORE], transaction => {
+      transaction.objectStore(STORE).put(row);
+      transaction.objectStore(ASSET_STORE).delete(stagedAudioKey);
+    });
+  } else {
+    await tx("readwrite", (store) => store.put(row));
+  }
   await pruneAudio();
 }
 
