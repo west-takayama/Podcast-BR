@@ -92,9 +92,9 @@ const server = createServer((req, res) => {
       await check();
     }
     await swap(next);
-    await page.getByRole("heading", { name: /RC1/ }).waitFor();
+    await page.getByRole("heading", { name: /3\.0$/ }).waitFor();
     await swap(previous);
-    assert.equal(await page.getByRole("heading", { name: /RC1/ }).count(), 0);
-    console.log("OK actual v2.4.1 → RC1 → v2.4.1 same-origin Service Worker, database v3, synthetic audio bytes and settings preserved");
+    assert.equal(await page.getByRole("heading", { name: /3\.0$/ }).count(), 0);
+    console.log("OK actual v2.4.1 → 3.0 → v2.4.1 same-origin Service Worker, database v3, synthetic audio bytes and settings preserved");
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => server.close());

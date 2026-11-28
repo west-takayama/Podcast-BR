@@ -29,7 +29,7 @@ export type ProviderResult = {
 export type DeviceCheck = { by: string; at: number; note: string };
 export type Plan = Partial<Record<Destination, Copy>>;
 export type Status = "candidate" | "review" | "approved" | "sending" | "scheduled" | "published" | "failed" | "cancelled" | "unknown" | "draft" | "processing" | "confirmation";
-export type Delivery = { requestId?: string; candidateId: string; versionId: string; digest: string; destination: Destination; copy: Copy; audience?: Draft["audience"];
+export type Delivery = { sourceRange?: { episodeId: string; startMs: number; endMs: number }; requestId?: string; candidateId: string; versionId: string; digest: string; destination: Destination; copy: Copy; audience?: Draft["audience"];
   state: Status; provider?: ProviderResult; providerProgress?: Status; receiptFingerprint?: string; device?: DeviceCheck; resultObservedAt?: number; reference?: string; at: number; note?: string };
 export type Draft = { candidate: Candidate; plan: Plan; state: "candidate" | "review" | "approved"; audience?: "yes" | "no" };
 export type PublisherState = { drafts: Record<string, Draft>; deliveries: Delivery[]; audit: (Delivery & { recordedAt: number })[]; other: Record<string, number>; confirmedQuota?: Record<string, { count: number; at: number }> };
@@ -105,13 +105,22 @@ export function beginHandoff(state: PublisherState, key: string, network: Destin
   if (!copy) throw new Error("承認済みの投稿先を選んでください。");
   validate({ ...draft, plan: { [network]: copy } }, now);
   if (draft.candidate.parent) canHandoffShort(draft.candidate.parent, feature, fromJst(copy.at), now);
-  if (state.deliveries.some(item => item.destination === network && active(item) &&
-    (item.digest === digest || item.candidateId === draft.candidate.candidateId))) {
+  const sourceRangeOf = (candidate?: Candidate) => candidate?.parent ? {
+    episodeId: candidate.parent.episodeId, startMs: candidate.startMs, endMs: candidate.endMs,
+  } : undefined;
+  const sourceRange = sourceRangeOf(draft.candidate);
+  if (state.deliveries.some(item => {
+    if (item.destination !== network || !active(item)) return false;
+    if (item.digest === digest || item.candidateId === draft.candidate.candidateId) return true;
+    const previous = item.sourceRange ?? sourceRangeOf(state.drafts[draftKey(item)]?.candidate);
+    return !!sourceRange && previous?.episodeId === sourceRange.episodeId &&
+      previous.startMs === sourceRange.startMs && previous.endMs === sourceRange.endMs;
+  })) {
     throw new Error("同じ動画または候補の記録があります。外部結果を確認してください。");
   }
   if (copy.visibility !== "draft" && quota(state, monthOf(fromJst(copy.at))) >= freeLimit) throw new Error("その月の無料投稿枠の目安に達しました。");
   const item: Delivery = { requestId: crypto.randomUUID(), candidateId: draft.candidate.candidateId, versionId: draft.candidate.versionId,
-    destination: network, digest, copy: { ...copy }, audience: draft.audience, state: "sending", at: now };
+    destination: network, digest, ...(sourceRange ? { sourceRange } : {}), copy: { ...copy }, audience: draft.audience, state: "sending", at: now };
   state.deliveries.push(item);
   state.audit.push({ ...item, recordedAt: now });
   return item;

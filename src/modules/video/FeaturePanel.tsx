@@ -28,6 +28,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
   const [stage, setStage] = useState("");
   const [progress, setProgress] = useState(0);
   const [notice, setNotice] = useState("");
+  const [codecUnavailable, setCodecUnavailable] = useState(false);
   const [related, setRelated] = useState("");
   const job = useRef<AbortController>();
   const resultRef = useRef<Result>();
@@ -84,7 +85,8 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
 
   const run = async (action: () => Promise<unknown>) => {
     setNotice("");
-    try { await action(); } catch (error) { setNotice(error instanceof DOMException && error.name === "QuotaExceededError"
+    try { await action(); } catch (error) {
+      if (error instanceof DOMException && error.name === "NotSupportedError") setCodecUnavailable(true); setNotice(error instanceof DOMException && error.name === "QuotaExceededError"
       ? "端末の空き容量が足りません。空き容量を確保してから再試行してください。編集済み音源は保存されています。"
       : error instanceof Error ? error.message : "処理に失敗しました。"); }
   };
@@ -107,6 +109,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
   }
   async function generate() {
     if (!session?.edited || job.current) return;
+    setCodecUnavailable(false);
     const controller = new AbortController();
     job.current = controller;
     setStage("音声とH.264・AACの対応を確認中");
@@ -146,6 +149,15 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
         <button onClick={() => void run(saveMetadata)}>回番号・タイトル・予定を保存</button>
         <button className="primary" disabled={!session?.edited} onClick={() => void run(generate)}>YouTube本編を書き出す</button>
       </fieldset>
+      {codecUnavailable && session?.edited && <button type="button" onClick={() => {
+        const audio = session.edited!.file;
+        const url = URL.createObjectURL(audio);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = audio.name;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }}>編集済み音源をそのまま保存</button>}
       {stage && <div role="status"><p>{stage}</p>{progress > 0 && <progress max={1} value={progress} />}<button onClick={() => job.current?.abort()}>中断</button></div>}
       {result && !locked && <div>
         <video controls preload="metadata" width="100%" src={result.url} />

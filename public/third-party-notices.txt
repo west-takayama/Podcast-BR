@@ -9,9 +9,12 @@ License: licenses/mediabunny-mp3-encoder.txt
 Source and bridge build instructions:
 https://github.com/Vanilagy/mediabunny/tree/v1.51.0/packages/mp3-encoder
 This encoder uses LAME 3.100 under the GNU Lesser General Public License.
+Local license: licenses/lame-3.100.txt
 LAME source and license: https://lame.sourceforge.io/
 https://sourceforge.net/projects/lame/files/lame/3.100/
 https://lame.sourceforge.io/license.txt
+Corresponding upstream archive mirror: https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz
+SHA-256: ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
 
 React, React DOM, Scheduler and Noble Hashes, MIT
 Licenses: licenses/react.txt, licenses/react-dom.txt,

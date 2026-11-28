@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'">
+<title>AI STUDIO iPhoneコーデック確認</title>
+<style>
+body{background:#121212;color:#fff;font:1rem/1.6 system-ui;margin:24px;max-width:36rem}
+button{padding:12px;background:#ffd400;border:0;border-radius:8px;font:inherit;color:#161000}
+pre{white-space:pre-wrap}
+</style>
+<h1>iPhoneの書き出し確認</h1>
+<p>無音と静止画でSafariのエンコーダーを試します。アカウント接続、撮影、音声送信はありません。</p>
+<button id="run">端末で確認する</button>
+<pre role="status" id="result"></pre>
+<script>
+const button = document.querySelector("#run");
+const result = document.querySelector("#result");
+async function check(label, validate) {
+  try {
+    await validate();
+    result.textContent += label + " — 成功\n";
+  } catch (error) {
+    result.textContent += label + " — 利用不可（" + (error?.name || "Error") + "）\n";
+  }
+}
+async function encode(Encoder, config, makeSample) {
+  if (!(await Encoder.isConfigSupported(config)).supported) throw new DOMException("", "NotSupportedError");
+  let encoded = 0;
+  let failure;
+  const encoder = new Encoder({ output() { encoded++; }, error(error) { failure = error; } });
+  try {
+    encoder.configure(config);
+    const frame = makeSample();
+    try { encoder.encode(frame); } finally { frame.close(); }
+    await encoder.flush();
+    if (failure || !encoded) throw failure || new Error("OutputMissing");
+  } finally { if (encoder.state !== "closed") encoder.close(); }
+}
+button.addEventListener("click", async () => {
+  button.disabled = true;
+  result.textContent = "安全な接続 — " + (isSecureContext ? "はい" : "いいえ") + "\n";
+  try {
+    await check("H.264 360p／24fps", async () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640; canvas.height = 360;
+      canvas.getContext("2d").fillRect(0, 0, 640, 360);
+      await encode(VideoEncoder, { codec: "avc1.420028", width: 640, height: 360, framerate: 24, bitrate: 350000,
+        latencyMode: "realtime", avc: { format: "avc" } },
+        () => new VideoFrame(canvas, { timestamp: 0, duration: 41667 }));
+    });
+    for (const channels of [1, 2]) {
+      await check("AAC " + channels + "ch／44.1kHz", () => encode(AudioEncoder,
+        { codec: "mp4a.40.2", sampleRate: 44100, numberOfChannels: channels, bitrate: channels === 1 ? 96000 : 160000 },
+        () => new AudioData({ data: new Float32Array(2048 * channels), format: "f32-planar", numberOfFrames: 2048,
+          sampleRate: 44100, numberOfChannels: channels, timestamp: 0 })));
+    }
+    await check("保存領域へのアクセス", () => navigator.storage.getDirectory());
+  } finally { button.disabled = false; }
+});
+</script>
+</html>
