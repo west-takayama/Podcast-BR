@@ -1,3 +1,4 @@
+import { BudgetNotice } from "./modules/budget/BudgetNotice";
 import { restoreProductionSession, saveProductionSource, selectOriginal, type ProductionSession } from "./core/productionSession";
 import { createProductionAsset } from "./core/productionAsset";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
@@ -55,6 +56,7 @@ const AudioPanel = lazy(() => import("./modules/audio/AudioPanel"));
 const HistoryPanel = lazy(() => import("./components/HistoryPanel"));
 const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
 const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
+const BudgetPanel = lazy(() => import("./modules/budget/BudgetPanel"));
 const TrackPicker = lazy(() => import("./components/TrackPicker"));
 
 /** 読み込み中の置き場所。一瞬で終わるので、飛び跳ねない高さだけ確保する。 */
@@ -62,7 +64,7 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings";
+type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -138,6 +140,7 @@ export default function App() {
   // 生成が失敗しても変換をやり直さずに済むよう、変換結果を保持しておく。
   // 60分の回では変換だけで数分かかるため、レート制限のたびに捨てるのは損が大きい。
   const convertedRef = useRef<{
+    episodeId: string;
     mp3: ArrayBuffer;
     originalAudio?: Blob;
     aiMp3: ArrayBuffer;
@@ -409,6 +412,7 @@ export default function App() {
       const controller = new AbortController();
       abortRef.current = controller;
       const raw = await generateEpisodeMeta({
+        episodeId,
         apiKey: settings.apiKey,
         model: settings.model,
         audio: uploaded!,
@@ -449,6 +453,7 @@ export default function App() {
       const controller = new AbortController();
       abortRef.current = controller;
       const segments = await generateTranscript({
+        episodeId,
         apiKey: settings.apiKey,
         model: settings.model,
         audio: uploaded!,
@@ -571,7 +576,9 @@ export default function App() {
       workerRef.current?.terminate();
       workerRef.current = null;
 
+      const id = crypto.randomUUID();
       convertedRef.current = {
+        episodeId: id,
         originalAudio: original ? file : undefined,
         mp3: original ? new ArrayBuffer(0) : result.mp3,
         aiMp3: result.aiMp3,
@@ -606,6 +613,7 @@ export default function App() {
       // 端末に置いておく。60分の回では変換だけで数分かかる。
       const outName = original ? file.name : file.name.replace(/\.[a-z0-9]+$/i, "") + ".mp3";
       const record = {
+        episodeId: id,
         createdAt: Date.now(),
         fileName: file.name,
         outputName: outName,
@@ -647,7 +655,9 @@ export default function App() {
       const controller = new AbortController();
       abortRef.current = controller;
       let uploadedAudio: UploadedAudio | null = already;
+      const id = converted.episodeId;
       const raw = await generateEpisodeMeta({
+        episodeId: id,
         apiKey: settings.apiKey,
         model: settings.model,
         mp3: converted.aiMp3,
@@ -713,7 +723,6 @@ export default function App() {
       setPhase("done");
       window.scrollTo({ top: 0 });
 
-      const id = crypto.randomUUID();
       setEpisodeId(id);
       // 履歴保存の失敗(容量不足など)で結果表示まで巻き添えにしない
       saveEpisode({
@@ -789,7 +798,10 @@ export default function App() {
     void wakeLockRef.current.start();
 
     try {
+      const id = saved.episodeId ?? crypto.randomUUID();
+      if (!saved.episodeId) await patchPending({ episodeId: id }).catch(() => {});
       convertedRef.current = {
+        episodeId: id,
         mp3: saved.originalAudio ? new ArrayBuffer(0) : await saved.mp3.arrayBuffer(),
         originalAudio: saved.originalAudio ? saved.mp3 : undefined,
         aiMp3: await saved.aiMp3.arrayBuffer(),
@@ -827,7 +839,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 α2</h1>
+        <h1>🎙️ AI STUDIO 3.0 α3</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
@@ -839,11 +851,14 @@ export default function App() {
           <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
             履歴
           </button>
+          <button className={tab === "budget" ? "active" : ""} onClick={() => setTab("budget")}>予算</button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => openSettings()}>
             設定
           </button>
         </nav>
       </header>
+
+      {tab !== "budget" && <BudgetNotice open={() => setTab("budget")} />}
 
       {applyUpdate && (
         <div className="update">
@@ -891,6 +906,7 @@ export default function App() {
       )}
 
       <Suspense fallback={<Loading />}>
+      {tab === "budget" && <BudgetPanel />}
       {tab === "settings" && (
         <>
           <DriveSettings focusHeading={driveSetupShortcut} />

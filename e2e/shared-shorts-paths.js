@@ -104,15 +104,9 @@ const response = data => ({ candidates: [{ content: { parts: [{ text: JSON.strin
     await page.getByRole("button", { name: "作成", exact: true }).click();
     await openLegacy(page);
     await page.getByRole("button", { name: "書き起こしを作る" }).click();
-    await page.waitForFunction(async () => {
-      const db = await new Promise(resolve => { const req = indexedDB.open("podcast-br"); req.onsuccess = () => resolve(req.result); });
-      const records = await new Promise(resolve => {
-        const req = db.transaction("episodes").objectStore("episodes").getAll();
-        req.onsuccess = () => resolve(req.result);
-      });
-      db.close();
-      return records.some(record => record.transcript?.length >= 3);
-    });
+    // The completion UI is rendered after the history write commits. Playwright's
+    // poller treats a returned Promise as truthy even when it later resolves false.
+    await page.getByText(/3件の発言/).waitFor();
     await page.reload();
     await page.getByRole("button", { name: "履歴", exact: true }).click();
     await page.locator(".history-main").filter({ hasText: "共有フローの回" }).click();

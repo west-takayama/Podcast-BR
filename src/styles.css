@@ -707,3 +707,10 @@ button.primary.shorts-all-generate:active { background: #e7bc00; }
 .drive-settings a { display: inline-flex; align-items: center; min-height: 44px; }
 .drive-settings fieldset a { display: flex; width: fit-content; }
 .drive-settings input { font-size: 16px; }
+
+.budget-panel dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; }
+.budget-panel dd { margin: 0; text-align: right; max-width: 12em; }
+.budget-panel label { display: block; margin-block: 12px; }
+.budget-rows { padding-inline-start: 1.5em; }
+.budget-rows li { margin-block: 12px; overflow-wrap: anywhere; }
+.tabs { flex-wrap: wrap; }
