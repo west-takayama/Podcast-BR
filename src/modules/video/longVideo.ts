@@ -51,7 +51,7 @@ async function coverFrame(title: string, number: string, height: VideoResolution
 async function encodeStill(canvas: HTMLCanvasElement, height: VideoResolution) {
   const width = canvas.width;
   const unsupported = () => new DOMException("この端末では選択した画質のH.264を書き出せません。", "NotSupportedError");
-  if (typeof VideoEncoder === "undefined") throw unsupported();
+  if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") throw unsupported();
   const config: VideoEncoderConfig = { codec: "avc1.420028", width, height, bitrate: videoBitrates[height], framerate: fps,
     latencyMode: "realtime", avc: { format: "avc" } };
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw unsupported();
@@ -89,6 +89,8 @@ export async function generateLongVideo(args: {
 }) {
   const { file, title, number, cover, height, signal, onProgress } = args;
   signal.throwIfAborted();
+  const storageUnsupported = () => new DOMException("このブラウザーは動画の保存領域に対応していません。編集済み音源は保存されています。", "NotSupportedError");
+  if (typeof navigator.storage?.getDirectory !== "function") throw storageUnsupported();
   const dir = await navigator.storage.getDirectory();
   const name = `studio-feature-${crypto.randomUUID()}.mp4`;
   const handle = await dir.getFileHandle(name, { create: true });
@@ -96,6 +98,7 @@ export async function generateLongVideo(args: {
   let finished = false;
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
   try {
+    if (typeof handle.createWritable !== "function") throw storageUnsupported();
     const track = await input.getPrimaryAudioTrack();
     if (!track || !await track.canDecode()) throw new Error("編集済みのMP3またはWAVを読み込めません。");
     const [channels, sampleRate] = await Promise.all([track.getNumberOfChannels(), track.getSampleRate()]);

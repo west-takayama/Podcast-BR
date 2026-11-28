@@ -37,6 +37,10 @@ const audio = execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=
     }));
     await render.click();
     await page.getByText(/端末の空き容量が足りません/).waitFor();
+    await page.evaluate(() => Object.defineProperty(navigator.storage, "getDirectory", { configurable: true, value: undefined }));
+    await render.click();
+    await page.getByText(/動画の保存領域に対応していません/).waitFor();
+    await page.getByRole("button", { name: "編集済み音源をそのまま保存" }).waitFor();
     await page.evaluate(() => { delete navigator.storage.getDirectory; });
     await render.click();
     if (process.env.FEATURE_TEST_CODEC !== "1") {
