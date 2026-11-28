@@ -5,8 +5,9 @@ import { parseAudioEntry } from "./entry";
 
 const KEY = "studio-alpha-audio-entry";
 
-export default function AudioPanel({ asset, onImport, onCreate }: {
-  asset?: ProductionAsset;
+export default function AudioPanel({ original, edited, onImport, onCreate }: {
+  original?: ProductionAsset;
+  edited?: ProductionAsset;
   onImport: (file: File) => void;
   onCreate: () => void;
 }) {
@@ -42,8 +43,9 @@ export default function AudioPanel({ asset, onImport, onCreate }: {
         setMessage("本編を取り込みました。");
       }} />
     </label> : <p>完成音声の取り込みは認証付きの統合環境で行います。</p>}
-    {asset && <div>
-      <p>選択中の本編・素材 {asset.file.name}</p>
+    {(original || edited) && <div>
+      {original && <p>分析・ショート用の原音 {original.file.name}</p>}
+      {edited && <p>取り込み済みの編集済み本編 {edited.file.name}</p>}
       <button type="button" onClick={onCreate}>制作画面で確認する</button>
     </div>}
     {message && <p role="status">{message}</p>}

@@ -63,6 +63,8 @@ const meta = { titles: ['元音声を保持する回'], description: '生成し�
     });
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.getByRole('button', { name: '設定', exact: true }).click();
+    // Model discovery runs after a debounce and otherwise races the diagnostics reset.
+    await page.getByRole('combobox', { name: 'モデル', exact: true }).locator('option[value="gemini-3.5-flash"]').waitFor({state:'attached'});
     await page.getByText(/処理時間の診断/).click();
     const diagnostic = page.getByRole('textbox', { name: '処理時間の記録' });
     const report = await diagnostic.inputValue();

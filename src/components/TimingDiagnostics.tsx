@@ -2,6 +2,7 @@ import { useState, useSyncExternalStore } from "react";
 import { clearTimings, getTimings, subscribeToTimings, type TimingStage } from "../lib/timing";
 
 const labels: Record<TimingStage, string> = {
+  "gemini-usage": "Gemini利用",
   "caption-response": "字幕応答",
   "caption-conversion": "字幕用音声の準備",
   "caption-audio-decode": "字幕照合用の音声デコード",
@@ -52,12 +53,18 @@ export default function TimingDiagnostics() {
       `H.264 1080p: ${standard} / ハードウェア優先: ${standardHardware}\n` +
       `H.264 720p: ${light} / ハードウェア優先: ${lightHardware}`);
   };
-  const report = ["AI STUDIO 3.0 α1 処理時間", ...timings.map(entry => {
+  const report = ["AI STUDIO 3.0 α2 処理時間", ...timings.map(entry => {
     const details = [
       entry.success ? "完了" : "未完了",
       entry.attempt === undefined ? "" : `試行 ${entry.attempt}`,
       entry.status === undefined ? "" : `HTTP ${entry.status}`,
       entry.errorType ?? "",
+      entry.gemini ? [entry.gemini.purpose, entry.gemini.model, entry.gemini.source === "cache" ? "再利用・送信なし" : "通信",
+        entry.gemini.inputTokens === undefined ? "" : `入力トークン ${entry.gemini.inputTokens}`,
+        entry.gemini.outputTokens === undefined ? "" : `出力トークン ${entry.gemini.outputTokens}`,
+        entry.gemini.thinkingTokens === undefined ? "" : `推論トークン ${entry.gemini.thinkingTokens}`,
+        entry.gemini.cachedTokens === undefined ? "" : `キャッシュ済トークン ${entry.gemini.cachedTokens}`,
+        entry.gemini.audioBytes === undefined ? "" : `音声 ${entry.gemini.audioBytes} B（符号化前）`].filter(Boolean).join(" · ") : "",
       entry.caption ? [entry.caption.model, entry.caption.structure, entry.caption.issue, entry.caption.finish,
         entry.caption.inputTokens === undefined ? "" : `入力トークン ${entry.caption.inputTokens}`,
         entry.caption.outputTokens === undefined ? "" : `出力トークン ${entry.caption.outputTokens}`].filter(Boolean).join(" · ") : "",

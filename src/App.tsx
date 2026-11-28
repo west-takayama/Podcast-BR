@@ -1,4 +1,5 @@
-import { createProductionAsset, type ProductionAsset } from "./core/productionAsset";
+import { restoreProductionSession, saveProductionSource, selectOriginal, type ProductionSession } from "./core/productionSession";
+import { createProductionAsset } from "./core/productionAsset";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   generateEpisodeMeta,
@@ -67,7 +68,35 @@ type Phase = "idle" | "running" | "done";
 export type { AudioReport };
 
 export default function App() {
-  const [productionAsset, setProductionAsset] = useState<ProductionAsset>();
+  const [production, setProduction] = useState<ProductionSession>();
+  const productionRef = useRef<ProductionSession>();
+  const [productionError, setProductionError] = useState("");
+  const sourceWrites = useRef(Promise.resolve());
+  useEffect(() => {
+    let active = true;
+    void restoreProductionSession().then(saved => {
+      if (active && !productionRef.current && saved) {
+        productionRef.current = saved;
+        setProduction(saved);
+      }
+    }).catch(() => { if (active) setProductionError("端末に保存した制作を読み出せませんでした。"); });
+    return () => { active = false; };
+  }, []);
+
+  const changeProductionSource = (file: File, role: "original" | "edited") => {
+    const current = productionRef.current;
+    const next = role === "original" ? selectOriginal(current, file)
+      : { ...current, id: current?.id ?? crypto.randomUUID(), edited: createProductionAsset(file) };
+    if (next !== current) {
+      productionRef.current = next;
+      setProduction(next);
+      setProductionError("");
+      sourceWrites.current = sourceWrites.current.then(() => saveProductionSource(next, role)).catch(() => {
+        setProductionError("素材を端末に保存できませんでした。この画面が開いている間は制作を続けられます。");
+      });
+    }
+    return { session: next, saved: sourceWrites.current };
+  };
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [driveSetupShortcut, setDriveSetupShortcut] = useState(false);
   const [settingsReturnTab, setSettingsReturnTab] = useState<Tab>("create");
@@ -349,7 +378,7 @@ export default function App() {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(blob);
       });
-      if (episodeId) await updateEpisode(episodeId, { audio: blob });
+      if (episodeId) await updateEpisode(episodeId, { audio: blob }, true);
     } catch {
       // 付け直しに失敗しても、元の MP3 はそのまま使える
     } finally {
@@ -428,9 +457,11 @@ export default function App() {
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         signal: controller.signal,
       });
-      abortRef.current = null;
+      controller.signal.throwIfAborted();
+      if (episodeId) await updateEpisode(episodeId, { transcript: segments });
+      controller.signal.throwIfAborted();
+      if (abortRef.current === controller) abortRef.current = null;
       setTranscript(segments);
-      if (episodeId) updateEpisode(episodeId, { transcript: segments });
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
         setError(noteError("書き起こし", err, settings.model));
@@ -445,10 +476,7 @@ export default function App() {
     id: string,
     patch: Partial<EpisodeMeta>,
   ): Promise<void> => {
-    const all = await listEpisodes();
-    const target = all.find((r) => r.id === id);
-    if (!target) return;
-    await updateEpisode(id, { meta: { ...target.meta, ...patch } });
+    await updateEpisode(id, current => ({ meta: { ...current.meta, ...patch } }));
   };
 
   /** 編集した本文を履歴に残す。投稿前の手直しを次回以降も参照できるようにする。 */
@@ -799,7 +827,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 α1</h1>
+        <h1>🎙️ AI STUDIO 3.0 α2</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
@@ -870,14 +898,16 @@ export default function App() {
         </>
       )}
 
-      {tab === "audio" && <AudioPanel asset={productionAsset}
-        onImport={file => setProductionAsset(createProductionAsset(file))}
+      {productionError && (tab === "audio" || tab === "create") && <p role="status">{productionError}</p>}
+
+      {tab === "audio" && <AudioPanel original={production?.original} edited={production?.edited}
+        onImport={file => changeProductionSource(file, "edited")}
         onCreate={() => setTab("create")} />}
 
       {(tab === "create" || studioVisited) && <div hidden={tab !== "create"}>
         <ShortsPanel
-          productionAsset={productionAsset}
-          onProductionFile={file => setProductionAsset(current => current?.file === file ? current : createProductionAsset(file))}
+          production={production}
+          onProductionFile={file => changeProductionSource(file, "original")}
           settings={settings}
           previousTitles={previousTitles}
           onModelChanged={(m) => setSettings((prev) => ({ ...prev, model: m }))}

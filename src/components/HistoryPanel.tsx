@@ -402,6 +402,8 @@ export default function HistoryPanel({
                 audioUrl={openAudioUrl?.blob === r.audio ? openAudioUrl?.url : undefined}
                 shortsSource={r.audio}
                 shortsEpisodeId={r.id}
+                shortsSourceRevision={r.sourceRevision}
+                shortsTranscriptRevision={r.transcriptRevision}
                 shortsUploaded={r.uploaded}
                 shortsDuration={r.durationSec}
                 fileName={r.originalAudio ? r.fileName : r.fileName.replace(/\.[a-z0-9]+$/i, ".mp3")}

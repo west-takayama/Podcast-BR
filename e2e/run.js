@@ -111,6 +111,7 @@ function hasPlaywright() {
       out.split("\n").reverse().find((l) => /^(OK|FAIL|見つかったもの|磨きどころ|速い回線)/.test(l)) ??
       "(結果が読めません)";
     console.log(line.slice(0, 110));
+    for (const measurement of out.split("\n").filter(line => line.startsWith("MOCK "))) console.log(`    ${measurement}`);
     if (r.status !== 0) {
       failed.push(name);
       console.log(out.split("\n").filter((l) => l.trim()).slice(-12).map((l) => `    ${l}`).join("\n"));

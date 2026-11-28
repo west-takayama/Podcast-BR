@@ -39,6 +39,8 @@ export interface EpisodeRecord {
   meta: EpisodeMeta;
   chosenTitle: string;
   originalAudio?: boolean;
+  sourceRevision?: string;
+  transcriptRevision?: string;
   audio?: Blob; // 古い履歴では削除されている場合がある
   /** 全文書き起こし。作った回だけ入る。 */
   transcript?: TranscriptSegment[];
@@ -81,9 +83,9 @@ function tx<T>(
       new Promise<T>((resolve, reject) => {
         const transaction = db.transaction(storeName, mode);
         const req = fn(transaction.objectStore(storeName));
-        req.onsuccess = () => resolve(req.result);
+        transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error("履歴の操作を中断しました")); };
         req.onerror = () => reject(req.error ?? new Error("履歴の操作に失敗しました"));
-        transaction.oncomplete = () => db.close();
+        transaction.oncomplete = () => { db.close(); resolve(req.result); };
       }),
   );
 }
@@ -93,18 +95,98 @@ export async function listEpisodes(): Promise<EpisodeRecord[]> {
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export async function saveEpisode(record: EpisodeRecord): Promise<void> {
-  await tx("readwrite", (s) => s.put({ updatedAt: Date.now(), ...record }));
+export const getEpisode = (id: string) => tx<EpisodeRecord | undefined>("readonly", (store) => store.get(id));
+
+export async function readProductionEntry<T>(id: string): Promise<T | undefined> {
+  const row = await tx<{ value: T } | undefined>("readonly", (store) => store.get(id), ASSET_STORE);
+  return row?.value;
+}
+
+export const writeProductionEntry = (id: string, value: unknown) =>
+  tx("readwrite", (store) => store.put({ id, value }), ASSET_STORE);
+
+async function writeStores(names: string | string[], write: (transaction: IDBTransaction) => void) {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(names, "readwrite");
+    transaction.oncomplete = () => { db.close(); resolve(); };
+    transaction.onabort = () => { db.close(); reject(transaction.error ?? new Error("端末に保存できませんでした")); };
+    write(transaction);
+  });
+}
+
+export function writeProductionSource(id: string, file: File, activeKey: string, active: unknown) {
+  return writeStores(ASSET_STORE, transaction => {
+    const store = transaction.objectStore(ASSET_STORE);
+    store.put({ id, value: file });
+    store.put({ id: activeKey, value: active });
+  });
+}
+
+export async function saveEpisode(record: EpisodeRecord, stagedAudioKey?: string): Promise<void> {
+  const row = { updatedAt: Date.now(), ...record };
+  if (stagedAudioKey) {
+    await writeStores([STORE, ASSET_STORE], transaction => {
+      transaction.objectStore(STORE).put(row);
+      transaction.objectStore(ASSET_STORE).delete(stagedAudioKey);
+    });
+  } else {
+    await tx("readwrite", (store) => store.put(row));
+  }
   await pruneAudio();
+}
+
+// A revision event carries only the local episode ID. It invalidates open editors in other tabs.
+const revisionListeners = new Set<(id: string) => void>();
+let revisionChannel: BroadcastChannel | undefined;
+
+function getRevisionChannel() {
+  if (!revisionChannel && typeof window !== "undefined" && typeof BroadcastChannel !== "undefined") {
+    revisionChannel = new BroadcastChannel("podcast-br-episode-revision");
+    revisionChannel.onmessage = ({ data }) => {
+      if (typeof data === "string") revisionListeners.forEach(listener => listener(data));
+    };
+  }
+  return revisionChannel;
+}
+
+export function subscribeEpisodeRevisions(listener: (id: string) => void) {
+  getRevisionChannel();
+  revisionListeners.add(listener);
+  return () => { revisionListeners.delete(listener); };
 }
 
 export async function updateEpisode(
   id: string,
-  patch: Partial<EpisodeRecord>,
+  patch: Partial<EpisodeRecord> | ((existing: EpisodeRecord) => Partial<EpisodeRecord>),
+  preserveSource = false,
 ): Promise<void> {
-  const existing = await tx<EpisodeRecord | undefined>("readonly", (s) => s.get(id));
-  if (!existing) return;
-  await tx("readwrite", (s) => s.put({ ...existing, ...patch, id, updatedAt: Date.now() }));
+  let revisionChanged = false;
+  await writeStores(STORE, transaction => {
+    const store = transaction.objectStore(STORE);
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const existing = request.result as EpisodeRecord | undefined;
+      if (!existing) return;
+      const changes = typeof patch === "function" ? patch(existing) : patch;
+      const updatedAt = "updatedAt" in changes ? changes.updatedAt : Date.now();
+      const next = { ...existing, ...changes, id, updatedAt };
+      if ("transcript" in changes) next.transcriptRevision = crypto.randomUUID();
+      if ("audio" in changes && !preserveSource) {
+        next.sourceRevision = crypto.randomUUID();
+        if (!("transcript" in changes)) {
+          delete next.transcript;
+          delete next.transcriptRevision;
+        }
+      }
+      revisionChanged = "transcript" in changes || ("audio" in changes && !preserveSource);
+      store.put(next);
+    };
+  });
+  if (revisionChanged) {
+    revisionListeners.forEach(listener => listener(id));
+    getRevisionChannel()?.postMessage(id);
+  }
 }
 
 export async function deleteEpisode(id: string): Promise<void> {
@@ -116,8 +198,7 @@ async function pruneAudio(): Promise<void> {
   const all = await listEpisodes();
   const stale = all.slice(MAX_AUDIO_RETAINED).filter((r) => r.audio);
   for (const record of stale) {
-    const { audio: _audio, ...rest } = record;
-    await tx("readwrite", (s) => s.put(rest as EpisodeRecord));
+    await updateEpisode(record.id, current => ({ audio: undefined, updatedAt: current.updatedAt }), true);
   }
 }
 
@@ -131,8 +212,7 @@ export async function dropAllAudio(): Promise<void> {
   const all = await listEpisodes();
   for (const record of all) {
     if (!record.audio) continue;
-    const { audio: _audio, ...rest } = record;
-    await tx("readwrite", (s) => s.put(rest as EpisodeRecord));
+    await updateEpisode(record.id, current => ({ audio: undefined, updatedAt: current.updatedAt }), true);
   }
 }
 

@@ -1,4 +1,7 @@
-import type { ProductionAsset } from "../core/productionAsset";
+import { originalKey, readProductionCheckpoint, saveProductionCheckpoint, type ProductionSession } from "../core/productionSession";
+import { findClips, generateSpotifyCopy, type EpisodeAnalysis } from "../modules/editorial/analysis";
+import { captionRangeKey, sourceClipRange, type ShortVideo } from "../modules/shorts/checkpoint";
+import { recordGeminiCache } from "../adapters/geminiObservability";
 import type { SplitCaptionDraft } from "../lib/captionResponse";
 import DriveSavePanel from "./DriveSavePanel";
 import { readEpisodeDraft, saveEpisodeDraft } from "../lib/video/episodeCaptionCache";
@@ -8,7 +11,7 @@ import SpeakerAssignments from "./SpeakerAssignments";
 import { alignCues, formatCueTime, type CaptionCue, type SpeechSpan } from "../lib/video/captionAlignment";
 import { addSpeaker, displayCues, swapSpeakerNames, type Speaker } from "../lib/video/speakers";
 import CopyButton from "./CopyButton";
-import { listEpisodes, saveEpisode } from "../lib/history";
+import { getEpisode, listEpisodes, saveEpisode } from "../lib/history";
 import { withDeadline } from "../lib/deadline";
 import { measureStage } from "../lib/timing";
 import { ShortsAudioCache } from "../lib/shortsCache";
@@ -16,8 +19,6 @@ import ClipDetails from "./ClipDetails";
 import { useEffect, useRef, useState } from "react";
 import { noteError } from "../lib/errorLog";
 import {
-  findClips,
-  generateSpotifyCopy,
   type EpisodeMeta,
   type UploadedAudio,
   type TranscriptSegment,
@@ -27,7 +28,6 @@ import {
   uploadEpisodeAudio,
   type Clip,
 } from "../lib/gemini";
-import { parseTimestamp } from "../lib/id3";
 import type { Settings } from "../lib/settings";
 import type { ClipCapability, CoverCandidate } from "../lib/video/clip";
 
@@ -35,8 +35,8 @@ import type { ClipCapability, CoverCandidate } from "../lib/video/clip";
 const loadClipLib = () => import("../lib/video/clip");
 
 interface Props {
-  productionAsset?: ProductionAsset;
-  onProductionFile?: (file: File) => void;
+  production?: ProductionSession;
+  onProductionFile?: (file: File) => { session: ProductionSession; saved: Promise<void> };
   settings: Settings;
   previousTitles: string[];
   onModelChanged: (model: string) => void;
@@ -45,6 +45,7 @@ interface Props {
     clips: Clip[];
     durationSec: number;
     episodeId?: string;
+    sourceRevision?: string;
     hasVideo: boolean;
     transcript?: TranscriptSegment[] | null;
     uploaded?: UploadedAudio | null;
@@ -61,17 +62,7 @@ interface Nudge {
   end: number;
 }
 
-interface Result {
-  blob: Blob;
-  url: string;
-  filename: string;
-  title: string;
-  post: string;
-  description: string;
-  hashtags: string[];
-  startMs: number;
-  endMs: number;
-}
+type Result = ShortVideo & { url: string };
 
 interface BatchProgress {
   position: number;
@@ -99,7 +90,7 @@ const fmt = (sec: number) =>
  * 音声だけを Gemini に聴かせて面白い区間を選ばせ、映像はその区間を
  * 端末内で切り出す。動画そのものはどこにも送らない。
  */
-export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing, productionAsset, onProductionFile }: Props) {
+export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing, production, onProductionFile }: Props) {
   const [phase, setPhase] = useState<Phase>(existing ? "ready" : "idle");
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
@@ -112,7 +103,12 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyError, setSpotifyError] = useState("");
   const spotifyRef = useRef<AbortController | null>(null);
-  const analysisRef = useRef<{ file: File; audio: UploadedAudio; facts: string[]; clips: Clip[]; durationSec: number } | null>(null);
+  const analysisRef = useRef<(EpisodeAnalysis & { file: File }) | null>(null);
+  const [sessionId, setSessionId] = useState<string>();
+  const [checkpointError, setCheckpointError] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const sourceSaved = useRef(Promise.resolve());
+  const checkpointWrites = useRef(Promise.resolve());
   const [fileInfo, setFileInfo] = useState(existing?.file.name ?? "");
   const [clips, setClips] = useState<Clip[]>(existing?.clips ?? []);
   const [selected, setSelected] = useState(0);
@@ -129,6 +125,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
   const newEpisodeId = useRef<string>();
   const splitDrafts = useRef(new Map<string, SplitCaptionDraft>());
+  const captionOrigins = useRef(new Map<number, string>());
+  const sourceRevisionRef = useRef<string>();
   const rangeDrafts = useRef(new Map<string, CaptionCue[]>());
   const [results, setResults] = useState<Record<number, Result>>({});
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
@@ -149,6 +147,24 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const urlsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    const analysis = analysisRef.current;
+    const original = production?.original;
+    if (!sessionId || production?.id !== sessionId || !original || analysis?.file !== original.file || clips !== analysis.clips) return;
+    const { facts, durationSec } = analysis;
+    const checkpoint = {
+      revision: original.id,
+      analysis: { facts, clips, durationSec, copy: spotify ?? undefined },
+      shorts: {
+        nudges, captions, ranges: [...rangeDrafts.current], speakers, speakerLinks, withCaptions, resolution,
+        videos: Object.fromEntries(Object.entries(results).map(([i, { url: _url, ...result }]) => [i, result])),
+      },
+    };
+    checkpointWrites.current = checkpointWrites.current
+      .then(() => saveProductionCheckpoint(sessionId, checkpoint))
+      .then(() => setCheckpointError(false), () => setCheckpointError(true));
+  }, [production?.id, production?.original, sessionId, clips, spotify, nudges, captions, speakers, speakerLinks, withCaptions, resolution, results]);
+
+  useEffect(() => {
     loadClipLib()
       .then((m) => m.detectCapability())
       .then(setCap)
@@ -167,17 +183,12 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
   const nudgeOf = (i: number) => nudges[i] ?? ZERO;
 
-  const sourceDuration = () => existing?.durationSec ?? sourceAudioRef.current?.durationSec;
+  const sourceDuration = () => existing?.durationSec ?? sourceAudioRef.current?.durationSec ?? analysisRef.current?.durationSec;
 
   const rangeOf = (i: number) => {
     const c = clips[i];
     if (!c) return { startSec: 0, endSec: 0 };
-    const n = nudgeOf(i);
-    const rawStart = (parseTimestamp(c.start) ?? 0) / 1000;
-    const rawEnd = (parseTimestamp(c.end) ?? (rawStart + 45) * 1000) / 1000;
-    const limit = sourceDuration() ?? rawEnd;
-    const startSec = Math.min(Math.max(0, limit - 5), Math.max(0, rawStart + n.start));
-    return { startSec, endSec: Math.min(limit, startSec + 90, Math.max(startSec + 5, rawEnd + n.end)) };
+    return sourceClipRange(c, nudgeOf(i), sourceDuration());
   };
 
   /** その候補の書き出し済み動画を捨てる。範囲や字幕を変えたら作り直しになるため。 */
@@ -302,31 +313,40 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     setSpotifyBusy(true);
     setSpotifyError("");
     try {
-      const recent = await listEpisodes().then(rows => rows.slice(0, 8).map(row => row.chosenTitle || row.meta.titles[0]).filter(Boolean)).catch(() => previousTitles);
+      const recent = await listEpisodes().then(rows => rows.filter(row => row.id !== newEpisodeId.current).slice(0, 8).map(row => row.chosenTitle || row.meta.titles[0]).filter(Boolean)).catch(() => previousTitles);
       controller.signal.throwIfAborted();
+      let audio = analysis.audio;
+      if (!analysis.facts.length && !isAudioUsable(audio)) {
+        const prepared = sourceAudioRef.current ?? await extractAudio(analysis.file, controller.signal);
+        sourceAudioRef.current = prepared;
+        audio = await sourceCacheRef.current.get("source", settings.apiKey, async () => prepared.mp3,
+          bytes => uploadEpisodeAudio(settings.apiKey, bytes, () => {}, undefined, controller.signal));
+      }
       const copy = await generateSpotifyCopy({
         apiKey: settings.apiKey,
         model,
         facts: analysis.facts,
-        audio: analysis.audio,
+        audio,
         config: settings.prompt,
         previousTitles: recent,
         onModelChanged,
         signal: controller.signal,
       });
       controller.signal.throwIfAborted();
-      const id = crypto.randomUUID();
+      const id = newEpisodeId.current ?? crypto.randomUUID();
+      await sourceSaved.current;
+      controller.signal.throwIfAborted();
       await saveEpisode({
         id, createdAt: Date.now(), fileName: analysis.file.name,
         durationSec: analysis.durationSec, removedSec: 0, chosenTitle: copy.titles[0],
-        audio: analysis.file, originalAudio: true, uploaded: analysis.audio,
+        audio: analysis.file, originalAudio: true, sourceRevision: sourceRevisionRef.current, uploaded: audio,
         meta: { ...copy, clips: analysis.clips, showNotes: "", chapters: [], hashtags: [], transcriptSummary: "", keywords: [] },
-      }).catch(() => {
+      }, newEpisodeId.current ? originalKey(id) : undefined).catch(() => {
         if (!controller.signal.aborted) setSpotifyError("文章を表示しました。履歴に保存できなかったため、コピーして控えてください。");
       });
       if (!controller.signal.aborted) {
         newEpisodeId.current = id;
-        for (const [range, cues] of rangeDrafts.current) saveEpisodeDraft(id, range, cues);
+        for (const [range, cues] of rangeDrafts.current) saveEpisodeDraft(id, sourceRevisionRef.current ?? id, range, cues);
         setSpotify(copy);
       }
     } catch (e) {
@@ -340,7 +360,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   };
 
   const handleFile = async (file: File) => {
-    onProductionFile?.(file);
+    const registered = onProductionFile?.(file);
+    sourceSaved.current = registered?.saved ?? Promise.resolve();
     if (!settings.apiKey) {
       setError("先に設定画面で Gemini API キーを入力してください");
       return;
@@ -367,7 +388,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     captionActivity.current.clear();
     rangeDrafts.current.clear();
     splitDrafts.current.clear();
-    newEpisodeId.current = undefined;
+    newEpisodeId.current = registered?.session.id;
+    sourceRevisionRef.current = registered?.session.original?.id;
+    captionOrigins.current.clear();
+    setSessionId(registered?.session.id);
     for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
     setResults({});
@@ -381,6 +405,59 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     setVideoUnusable(false);
 
     await findCandidates();
+  };
+
+  const resumeProduction = async () => {
+    const original = production?.original;
+    if (!production || !original || resuming) return;
+    setResuming(true);
+    try {
+      const checkpoint = await readProductionCheckpoint(production.id, original.id);
+      const analysis = checkpoint?.analysis;
+      if (!analysis) {
+        if (settings.apiKey) await handleFile(original.file);
+        else setError("候補生成には設定でGemini APIキーを登録してください。");
+        return;
+      }
+      const { inspectVideo } = await loadClipLib();
+      const { hasVideo: video, decodable } = await inspectVideo(original.file);
+      setHasVideo(decodable);
+      setVideoUnusable(video && !decodable);
+      fileRef.current = original.file;
+      analysisRef.current = { ...analysis, file: original.file };
+      newEpisodeId.current = production.id;
+      sourceRevisionRef.current = original.id;
+      captionOrigins.current.clear();
+      setSessionId(production.id);
+      setFileInfo(original.file.name);
+      setClips(analysis.clips);
+      setChecked(analysis.clips.map((_, i) => i));
+      setSpotify(analysis.copy ?? null);
+      setError("");
+      if (checkpoint.shorts) {
+        const saved = checkpoint.shorts;
+        setNudges(saved.nudges);
+        setCaptions(saved.captions);
+        setSpeakers(saved.speakers);
+        setSpeakerLinks(saved.speakerLinks);
+        setWithCaptions(saved.withCaptions);
+        setResolution(saved.resolution);
+        rangeDrafts.current = new Map(saved.ranges);
+        for (const [range, cues] of saved.ranges) saveEpisodeDraft(production.id, original.id, range, cues);
+        setResults(Object.fromEntries(Object.entries(saved.videos).map(([i, result]) => {
+          const url = URL.createObjectURL(result.blob);
+          urlsRef.current.add(url);
+          return [i, { ...result, url }];
+        })));
+      }
+      recordGeminiCache("analysis");
+      if (analysis.copy) recordGeminiCache("spotify");
+      setPhase("ready");
+    } catch {
+      setError("端末に保存した制作を再開できませんでした。原音を選び直せます。");
+    } finally {
+      setResuming(false);
+    }
   };
 
   const findCandidates = async () => {
@@ -445,45 +522,83 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     }
   };
 
-  /**
-   * その候補の字幕を作る。
-   *
-   * 「この区間の音声」だけを切り出して渡す。全編を聴かせて「12:34 から」と
-   * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
-   */
+  const historyCaptionPlan = async (startSec: number, endSec: number, signal: AbortSignal) => {
+    const id = existing?.episodeId;
+    const row = id ? await getEpisode(id) : undefined;
+    signal.throwIfAborted();
+    if (row && row.sourceRevision !== existing?.sourceRevision) {
+      throw new Error("履歴の素材が更新されました。履歴を開き直してからお試しください。");
+    }
+    const transcript = row ? row.transcript : existing?.transcript;
+    const archived = archivedCaptionCues(transcript, startSec, endSec, sourceDuration() ?? endSec);
+    const origin = archived
+      ? JSON.stringify(["full", row?.transcriptRevision ?? archived])
+      : "range";
+    return { archived, origin };
+  };
+
+  /** Full transcripts and range captions are separate; cache hits cannot override history. */
   const buildCaptions = async (i: number, signal: AbortSignal): Promise<CaptionCue[]> => {
-    const draft = captions[i];
-    if (draft) return draft;
     const file = fileRef.current!;
     const { startSec, endSec } = rangeOf(i);
     const durationMs = Math.round((endSec - startSec) * 1000);
-    const rangeKey = JSON.stringify([startSec, endSec]);
-    const cached = rangeDrafts.current.get(rangeKey);
-    if (cached) {
-      // Local edits and speaker assignments remain scoped to each candidate.
-      setCaptions(prev => ({ ...prev, [i]: cached }));
-      return cached;
+    const rangeKey = captionRangeKey(startSec, endSec);
+    const { archived, origin } = existing ? await historyCaptionPlan(startSec, endSec, signal) : { archived: null, origin: "range" };
+    const draft = captions[i];
+    if (draft && (!existing || captionOrigins.current.get(i) === origin)) {
+      recordGeminiCache("captions");
+      return draft;
     }
-    const { prepareCaptionAudio, captionActivityForRange } = await loadClipLib();
-    const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
+    const commit = (cues: CaptionCue[]) => {
+      signal.throwIfAborted();
+      if (fileRef.current !== file) throw new DOMException("Source changed", "AbortError");
+      const previous = captionOrigins.current.get(i);
+      if (previous && previous !== origin) {
+        setSpeakerLinks(links => ({ ...links, [i]: {} }));
+        dropResult(i);
+      }
+      captionOrigins.current.set(i, origin);
+      setCaptions(prev => ({ ...prev, [i]: cues }));
+      return cues;
+    };
+    const verifyHistory = async () => {
+      if (!existing) return;
+      const latest = await historyCaptionPlan(startSec, endSec, signal);
+      if (latest.origin !== origin) throw new Error("履歴の字幕が更新されました。もう一度お試しください。");
+    };
     if (archived) {
+      recordGeminiCache("captions");
+      const { captionActivityForRange } = await loadClipLib();
       setStatus("保存済み字幕を音声に合わせています…");
       const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
       signal.throwIfAborted();
       const aligned = await measureStage("caption-alignment", async () => alignCues(archived, activity, durationMs));
-      rangeDrafts.current.set(rangeKey, aligned);
-      if (rangeDrafts.current.size > 4) rangeDrafts.current.delete(rangeDrafts.current.keys().next().value!);
-      setCaptions(prev => ({ ...prev, [i]: aligned }));
-      return aligned;
+      await verifyHistory();
+      return commit(aligned);
     }
     const episodeId = existing?.episodeId ?? newEpisodeId.current;
-    const sharedDraft = episodeId ? readEpisodeDraft(episodeId, rangeKey) : undefined;
-    if (sharedDraft) {
-      setCaptions(prev => ({ ...prev, [i]: sharedDraft }));
-      return sharedDraft;
+    const sourceId = existing?.sourceRevision ?? sourceRevisionRef.current ?? episodeId;
+    const cached = rangeDrafts.current.get(rangeKey)
+      ?? (episodeId && sourceId ? readEpisodeDraft(episodeId, sourceId, rangeKey) : undefined);
+    if (cached) {
+      recordGeminiCache("captions");
+      return commit(cached);
+    }
+    if (existing?.episodeId && existing.sourceRevision) {
+      const saved = await readProductionCheckpoint(existing.episodeId, existing.sourceRevision).catch(() => undefined);
+      signal.throwIfAborted();
+      const cues = saved?.shorts?.ranges.find(([key]) => key === rangeKey)?.[1];
+      if (cues) {
+        await verifyHistory();
+        recordGeminiCache("captions");
+        saveEpisodeDraft(existing.episodeId, existing.sourceRevision, rangeKey, cues);
+        return commit(cues);
+      }
     }
     if (!settings.apiKey) throw new Error("保存済みの字幕が区間全体にありません。Gemini APIキーを設定するか、字幕をオフにしてください。");
     setStatus("この区間の音声を取り出しています…");
+    const { prepareCaptionAudio } = await loadClipLib();
+    await verifyHistory();
     const extract = async () => {
       const prepared = await measureStage("caption-conversion", () => prepareCaptionAudio(file, startSec, endSec, signal));
       signal.throwIfAborted();
@@ -516,15 +631,16 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     signal.throwIfAborted();
     setStatus("字幕を調整しています…");
     const aligned = await measureStage("caption-alignment", async () => alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs, true));
+    await verifyHistory();
+    signal.throwIfAborted();
     rangeDrafts.current.set(rangeKey, aligned);
     const savedId = existing?.episodeId ?? newEpisodeId.current;
-    if (savedId) saveEpisodeDraft(savedId, rangeKey, aligned);
+    if (savedId && sourceId) saveEpisodeDraft(savedId, sourceId, rangeKey, aligned);
     if (rangeDrafts.current.size > 4) {
       const oldest = rangeDrafts.current.keys().next().value;
       if (oldest !== undefined) rangeDrafts.current.delete(oldest);
     }
-    setCaptions(prev => ({ ...prev, [i]: aligned }));
-    return aligned;
+    return commit(aligned);
   };
 
   /** 書き出す前に字幕を確認・修正できるようにする。焼き込んでからでは直せないため。 */
@@ -573,12 +689,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const file = fileRef.current!;
     const clip = clips[i];
     const { startSec, endSec } = rangeOf(i);
+    const priorOrigin = captionOrigins.current.get(i);
     const segments = withCaptions ? await buildCaptions(i, signal) : [];
+    const origin = captionOrigins.current.get(i);
     signal.throwIfAborted();
     if (segments.some(cue => cue.startMs === null || cue.endMs === null)) {
       throw new Error("時刻が未確定の字幕があります。字幕の下書きで時刻を入力してから、書き出しを再試行してください。");
     }
-    const captionCues = displayCues(segments, speakers, speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
+    const captionCues = displayCues(segments, speakers, priorOrigin && priorOrigin !== origin ? {} : speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
     const [bitmap, logo] = await Promise.all([
@@ -614,6 +732,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       logo?.close();
     }
     signal.throwIfAborted();
+    if (withCaptions && existing && (await historyCaptionPlan(startSec, endSec, signal)).origin !== origin) {
+      dropResult(i);
+      throw new Error("書き出し中に履歴の字幕が更新されました。最新の字幕で再試行してください。");
+    }
     const url = URL.createObjectURL(blob);
     urlsRef.current.add(url);
     setResults((prev) => {
@@ -760,7 +882,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     }
   };
 
-  const busy =
+  const busy = resuming ||
     phase === "extracting" || phase === "finding" || phase === "rendering" || phase === "captioning";
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   useEffect(() => {
@@ -806,16 +928,23 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         </div>
       )}
 
-      {!existing && !busy && productionAsset && fileRef.current !== productionAsset.file && (
+      {!existing && production?.edited && (
         <section className="card">
-          <p>共通素材 {productionAsset.file.name}</p>
-          <button type="button" disabled={!settings.apiKey} onClick={() => void handleFile(productionAsset.file)}>
-            共通素材で候補を生成
+          <p>編集済み本編 {production.edited.file.name}</p>
+          <p>番組分析とショート動画には原音を使います。{!production.original && "続けるには原音を選択してください。"}</p>
+        </section>
+      )}
+      {checkpointError && <p role="status">制作の途中経過を端末に保存できませんでした。必要な動画を保存してから画面を閉じてください。</p>}
+      {!existing && (!busy || resuming) && production?.original && fileRef.current !== production.original.file && (
+        <section className="card">
+          <p>原音 {production.original.file.name}</p>
+          <button type="button" disabled={resuming} onClick={() => void resumeProduction()}>
+            {resuming ? "保存した制作を確認中…" : "保存した制作を再開する"}
           </button>
           {!settings.apiKey && <p>候補生成には設定でGemini APIキーを登録してください。</p>}
         </section>
       )}
-      {!existing && phase === "idle" && clips.length === 0 && fileRef.current && (
+      {!existing && !resuming && phase === "idle" && clips.length === 0 && fileRef.current && (
         <div className="card">
           <p className="muted">{fileInfo} — 完了した音声処理・有効な送信済み音声を再利用します。</p>
           <button className="primary" onClick={() => void findCandidates()}>候補の抽出を再開する</button>
@@ -826,6 +955,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
           <input
             type="file"
             aria-label="音声または動画を選択"
+            disabled={resuming}
             accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.mp4,.mov,.m4v,.webm,.flac,.opus,.ogg,.caf"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -1219,6 +1349,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
               rangeDrafts.current.clear();
               splitDrafts.current.clear();
               newEpisodeId.current = undefined;
+              setSessionId(undefined);
               for (const u of urlsRef.current) URL.revokeObjectURL(u);
               urlsRef.current.clear();
               setResults({});
