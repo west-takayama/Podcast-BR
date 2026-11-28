@@ -20,7 +20,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
   const [number, setNumber] = useState("");
   const [planned, setPlanned] = useState("");
   const [cover, setCover] = useState<Blob>();
-  const [height, setHeight] = useState<VideoResolution>(720);
+  const [height, setHeight] = useState<VideoResolution>(360);
   const [result, setResult] = useState<Result>();
   const [confirm, setConfirm] = useState(false);
   const [reference, setReference] = useState("");
@@ -84,7 +84,9 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
 
   const run = async (action: () => Promise<unknown>) => {
     setNotice("");
-    try { await action(); } catch (error) { setNotice(error instanceof Error ? error.message : "処理に失敗しました。"); }
+    try { await action(); } catch (error) { setNotice(error instanceof DOMException && error.name === "QuotaExceededError"
+      ? "端末の空き容量が足りません。空き容量を確保してから再試行してください。編集済み音源は保存されています。"
+      : error instanceof Error ? error.message : "処理に失敗しました。"); }
   };
   if (!id || !feature) return <section className="card"><h2>YouTube本編</h2>
     <p>制作中のエピソードとAUDIOで編集済みの本編を準備してください。</p><button onClick={openAudio}>音声制作を開く</button></section>;
@@ -140,7 +142,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
         <label>本編タイトル<input type="text" maxLength={100} value={title} onChange={event => { setTitle(event.target.value); setConfirm(false); }} /></label>
         <label>回番号<input type="text" inputMode="numeric" value={number} onChange={event => { setNumber(event.target.value); setConfirm(false); }} /></label>
         <label>本編の配信予定（日本時間）<input type="datetime-local" value={planned} onChange={event => { setPlanned(event.target.value); setConfirm(false); }} /></label>
-        <label>画質<select value={height} onChange={event => { setHeight(event.target.value === "1080" ? 1080 : 720); setConfirm(false); }}><option value={720}>720p</option><option value={1080}>1080p</option></select></label>
+        <label>画質<select value={height} onChange={event => { setHeight(Number(event.target.value) as VideoResolution); setConfirm(false); }}><option value={360}>360p（標準）</option><option value={480}>480p</option><option value={720}>720p</option></select></label>
         <button onClick={() => void run(saveMetadata)}>回番号・タイトル・予定を保存</button>
         <button className="primary" disabled={!session?.edited} onClick={() => void run(generate)}>YouTube本編を書き出す</button>
       </fieldset>

@@ -9,7 +9,7 @@ function walk(directory) {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const file = join(directory, entry.name);
     const path = relative(root, file).split("\\").join("/");
-    if (entry.isSymbolicLink() || forbidden.test(path)) {
+    if (entry.isSymbolicLink() || forbidden.test(path) || /aac-encoder|ffmpeg/i.test(path)) {
       throw new Error(`公開成果物に禁止対象が含まれています: ${path}`);
     }
     if (entry.isDirectory()) walk(file);
@@ -19,7 +19,7 @@ function walk(directory) {
   }
 }
 walk(root);
-if (/AudioPanel-/.test(readFileSync(join(root, "sw.js"), "utf8"))) {
-  throw new Error("AUDIOの入口がサービスワーカーで先読みされています。");
+if (/(?:AudioPanel|AnalyticsPanel|FeaturePanel|longVideo)-/.test(readFileSync(join(root, "sw.js"), "utf8"))) {
+  throw new Error("必要時に読むモジュールがサービスワーカーで先読みされています。");
 }
 console.log("OK: public build audio, private directories, source maps and prefetch checks");

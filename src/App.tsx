@@ -843,7 +843,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 β4</h1>
+        <h1>🎙️ AI STUDIO 3.0 RC1</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>

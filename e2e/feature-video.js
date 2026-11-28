@@ -16,6 +16,7 @@ const audio = execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=
       remote.push(route.request().url()); return route.abort();
     });
     await page.goto(base);
+    if (process.env.FEATURE_TEST_CODEC === "1") await page.evaluate(async () => import("/e2e/fixture-aac.ts"));
     await page.getByRole("button", { name: "音声", exact: true }).click();
     await page.getByLabel(/完成した本編/).setInputFiles({ name: "edited.mp3", mimeType: "audio/mpeg", buffer: audio });
     await page.getByText("本編を取り込みました。").waitFor();
@@ -30,7 +31,21 @@ const audio = execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=
     await page.getByLabel("本編タイトル", { exact: true }).fill("合成音声・選抜した回");
     await page.getByLabel("回番号", { exact: true }).fill("42");
     await page.getByLabel(/本編の配信予定/).fill("2026-12-20T18:15");
-    await page.getByRole("button", { name: "YouTube本編を書き出す" }).click();
+    const render = page.getByRole("button", { name: "YouTube本編を書き出す" });
+    await page.evaluate(() => Object.defineProperty(navigator.storage, "getDirectory", {
+      configurable: true, value() { throw new DOMException("mock quota", "QuotaExceededError"); },
+    }));
+    await render.click();
+    await page.getByText(/端末の空き容量が足りません/).waitFor();
+    await page.evaluate(() => { delete navigator.storage.getDirectory; });
+    await render.click();
+    if (process.env.FEATURE_TEST_CODEC !== "1") {
+      await page.getByText(/AAC書き出しに対応していません/).waitFor();
+      assert.equal(await page.locator("video").count(), 0);
+      assert.deepEqual(remote, []);
+      console.log("OK without native AAC the source remains and no fallback is loaded");
+      return;
+    }
     await page.locator("video").waitFor({ timeout: 45_000 });
     const symbol = page.getByRole("button", { name: "この本編動画を承認" });
     assert.ok(await symbol.isDisabled());
