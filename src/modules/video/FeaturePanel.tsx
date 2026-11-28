@@ -13,6 +13,7 @@ import type { VideoResolution } from "./longVideo";
 type Result = { file: File; digest: string; url: string; duration: number; elapsed: number; height: VideoResolution; signature: string };
 export default function FeaturePanel({ session, openAudio }: { session?: ProductionSession; openAudio: () => void }) {
   const id = session?.id;
+  const editedRevision = session?.edited?.id;
   const feature = useFeature(id);
   const [clips, setClips] = useState<Clip[]>([]);
   const [title, setTitle] = useState("");
@@ -63,7 +64,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
 
   useEffect(() => {
     const stored = feature?.approval;
-    if (!stored?.file || (feature?.handoff && feature.handoff !== "pending") || !/^studio-feature-[a-f0-9-]+\.mp4$/.test(stored.file)) return;
+    if (!stored?.file || (!feature?.handoff && stored.sourceRevision !== editedRevision) || (feature?.handoff && feature.handoff !== "pending") || !/^studio-feature-[a-f0-9-]+\.mp4$/.test(stored.file)) return;
     const controller = new AbortController();
     let url: string | undefined;
     void (async () => {
@@ -79,7 +80,7 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
       }
     })();
     return () => { controller.abort(); if (url) URL.revokeObjectURL(url); setSavedUrl(""); };
-  }, [feature?.approval?.file, feature?.approval?.digest, feature?.handoff]);
+  }, [feature?.approval?.file, feature?.approval?.digest, feature?.approval?.sourceRevision, feature?.handoff, editedRevision]);
 
   const run = async (action: () => Promise<unknown>) => {
     setNotice("");
@@ -89,9 +90,9 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
     <p>制作中のエピソードとAUDIOで編集済みの本編を準備してください。</p><button onClick={openAudio}>音声制作を開く</button></section>;
 
   const locked = !!feature.handoff;
-  const signature = JSON.stringify([title.trim(), number.trim(), planned, height]);
+  const signature = JSON.stringify([title.trim(), number.trim(), planned, height, editedRevision]);
   const resultMatches = result?.signature === signature;
-  const handoffDigest = resultMatches && result?.digest === feature.approval?.digest ? result.digest : savedUrl ? feature.approval?.digest : undefined;
+  const handoffDigest = feature.approval?.sourceRevision !== editedRevision ? undefined : resultMatches && result?.digest === feature.approval?.digest ? result.digest : savedUrl ? feature.approval?.digest : undefined;
   const metadataMatches = title.trim() === feature.title && number.trim() === feature.number && planned === feature.plannedAt;
   function saveMetadata() {
     if (!title.trim() || title.trim().length > 100 || !/^[0-9]{1,6}$/.test(number.trim())) throw new Error("100文字以内の本編タイトルと回番号を入力してください。");
@@ -104,12 +105,14 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
   }
   async function generate() {
     if (!session?.edited || job.current) return;
-    await saveMetadata();
-    setConfirm(false); setResult(undefined); release(); setProgress(0); setStage("音声とH.264・AACの対応を確認中");
     const controller = new AbortController();
     job.current = controller;
+    setStage("音声とH.264・AACの対応を確認中");
     const started = performance.now();
     try {
+      await saveMetadata();
+      controller.signal.throwIfAborted();
+      setConfirm(false); setResult(undefined); release(); setProgress(0);
       const { generateLongVideo } = await import("./longVideo");
       const exported = await generateLongVideo({ file: session.edited.file, title: title.trim(), number: number.trim(), cover, height,
         signal: controller.signal, onProgress: fraction => { setProgress(fraction); setStage("本編動画を書き出しています"); } });
@@ -147,11 +150,11 @@ export default function FeaturePanel({ session, openAudio }: { session?: Product
         <button disabled={!confirm || !metadataMatches || !resultMatches} onClick={() => void run(() => updateFeature(id, row => {
           if (!row.selected || row.handoff || row.title !== title.trim() || row.number !== number.trim() || row.plannedAt !== planned) throw new Error("回の情報が変わりました。確認し直してください。");
           keptFile.current = result.file.name;
-          return { ...row, approval: { at: Date.now(), digest: result.digest, file: result.file.name } };
+          return { ...row, approval: { at: Date.now(), digest: result.digest, file: result.file.name, sourceRevision: editedRevision } };
         }))}>この本編動画を承認</button>
       </div>}
       {handoffDigest && !locked && metadataMatches && <button onClick={() => void run(() => updateFeature(id, (row, all) => {
-        if (!row.selected || row.handoff || row.approval?.digest !== handoffDigest ||
+        if (!row.selected || row.handoff || row.approval?.digest !== handoffDigest || row.approval?.sourceRevision !== editedRevision ||
           Object.values(all).some(item => item.episodeId !== id && item.handoff && item.approval?.digest === handoffDigest)) throw new Error("すでに引き渡した動画があります。外部結果を確認してください。");
         return { ...row, handoff: "pending" };
       }))}>承認済み本編の引き渡しを記録する</button>}

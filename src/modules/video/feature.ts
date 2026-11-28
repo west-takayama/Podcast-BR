@@ -6,7 +6,7 @@ export type Feature = {
   title: string;
   number: string;
   plannedAt: string;
-  approval?: { digest: string; at: number; file?: string };
+  approval?: { digest: string; at: number; file?: string; sourceRevision?: string };
   handoff?: "pending" | "unknown" | "scheduled" | "published";
   youtubeId?: string;
   publishedAt?: number;
