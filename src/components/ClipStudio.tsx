@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Clip, TranscriptSegment, UploadedAudio } from "../lib/gemini";
 import type { Settings } from "../lib/settings";
+import { subscribeEpisodeRevisions } from "../lib/history";
 import ShortsPanel from "./ShortsPanel";
 
 interface Props {
@@ -8,6 +9,8 @@ interface Props {
   source?: Blob;
   durationSec?: number;
   episodeId?: string;
+  sourceRevision?: string;
+  transcriptRevision?: string;
   audioUrl?: string;
   transcript?: TranscriptSegment[] | null;
   uploaded?: UploadedAudio | null;
@@ -20,12 +23,19 @@ interface Props {
 }
 
 /** Mount the common editor using an episode's local media and saved candidates. */
-export default function ClipStudio({ source, durationSec, episodeId, audioUrl, fileName, clips, originalAudio, settings, onModelChanged, transcript, uploaded, background, onClipsFound }: Props) {
+export default function ClipStudio({ source, durationSec, episodeId, sourceRevision, transcriptRevision, audioUrl, fileName, clips, originalAudio, settings, onModelChanged, transcript, uploaded, background, onClipsFound }: Props) {
   const [picked, setPicked] = useState<File>();
   const [pickedUrl, setPickedUrl] = useState("");
   const media = picked ?? source;
-  const [ready, setReady] = useState<{ media: Blob; file: File; durationSec: number; hasVideo: boolean }>();
+  const [ready, setReady] = useState<{ media: Blob; file: File; durationSec: number; hasVideo: boolean; openedId: string }>();
   const [error, setError] = useState("");
+  const [editorRevision, setEditorRevision] = useState(0);
+  useEffect(() => {
+    if (!episodeId || picked) return;
+    return subscribeEpisodeRevisions(id => {
+      if (id === episodeId) setEditorRevision(previous => previous + 1);
+    });
+  }, [episodeId, picked]);
 
   useEffect(() => {
     if (!picked) return;
@@ -44,7 +54,7 @@ export default function ClipStudio({ source, durationSec, episodeId, audioUrl, f
         throw new Error("この回と素材の長さが一致しません");
       }
       const file = media instanceof File ? media : new File([media], fileName, { type: media.type });
-      if (active) setReady({ media, file, ...info });
+      if (active) setReady({ media, file, ...info, openedId: crypto.randomUUID() });
     }).catch(() => {
       if (active) setError("素材から音声を読み取れませんでした。元の回と同じファイルを選んでください。");
     });
@@ -53,11 +63,12 @@ export default function ClipStudio({ source, durationSec, episodeId, audioUrl, f
 
   if (ready && ready.media === media) {
     return <ShortsPanel
-      key={JSON.stringify(clips)}
+      key={JSON.stringify([ready.openedId, episodeId, sourceRevision, transcriptRevision, editorRevision, clips])}
       settings={settings}
       previousTitles={[]}
       onModelChanged={onModelChanged}
-      existing={{ ...ready, episodeId: picked ? undefined : episodeId, clips, transcript, uploaded: picked ? undefined : uploaded, background,
+      existing={{ ...ready, episodeId: picked ? undefined : episodeId, sourceRevision: picked ? undefined : sourceRevision, clips,
+        transcript: picked ? undefined : transcript, uploaded: picked ? undefined : uploaded, background,
         previewUrl: picked ? pickedUrl : audioUrl, onClipsFound }}
     />;
   }

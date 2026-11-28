@@ -20,6 +20,8 @@ interface Props {
   audioUrl?: string;
   shortsSource?: Blob;
   shortsEpisodeId?: string;
+  shortsSourceRevision?: string;
+  shortsTranscriptRevision?: string;
   shortsUploaded?: UploadedAudio | null;
   shortsDuration?: number;
   originalAudio?: boolean;
@@ -453,6 +455,8 @@ export default function ResultView({
   audioUrl,
   shortsSource,
   shortsEpisodeId,
+  shortsSourceRevision,
+  shortsTranscriptRevision,
   shortsUploaded,
   shortsDuration,
   originalAudio = false,
@@ -643,6 +647,8 @@ export default function ResultView({
           clips={meta.clips ?? []}
           source={shortsSource}
           episodeId={shortsEpisodeId}
+          sourceRevision={shortsSourceRevision}
+          transcriptRevision={shortsTranscriptRevision}
           audioUrl={audioUrl}
           transcript={transcript}
           uploaded={shortsUploaded}

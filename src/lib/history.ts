@@ -39,6 +39,8 @@ export interface EpisodeRecord {
   meta: EpisodeMeta;
   chosenTitle: string;
   originalAudio?: boolean;
+  sourceRevision?: string;
+  transcriptRevision?: string;
   audio?: Blob; // 古い履歴では削除されている場合がある
   /** 全文書き起こし。作った回だけ入る。 */
   transcript?: TranscriptSegment[];
@@ -134,13 +136,56 @@ export async function saveEpisode(record: EpisodeRecord, stagedAudioKey?: string
   await pruneAudio();
 }
 
+// A revision event carries only the local episode ID. It invalidates open editors in other tabs.
+const revisionListeners = new Set<(id: string) => void>();
+let revisionChannel: BroadcastChannel | undefined;
+
+function getRevisionChannel() {
+  if (!revisionChannel && typeof window !== "undefined" && typeof BroadcastChannel !== "undefined") {
+    revisionChannel = new BroadcastChannel("podcast-br-episode-revision");
+    revisionChannel.onmessage = ({ data }) => {
+      if (typeof data === "string") revisionListeners.forEach(listener => listener(data));
+    };
+  }
+  return revisionChannel;
+}
+
+export function subscribeEpisodeRevisions(listener: (id: string) => void) {
+  getRevisionChannel();
+  revisionListeners.add(listener);
+  return () => { revisionListeners.delete(listener); };
+}
+
 export async function updateEpisode(
   id: string,
-  patch: Partial<EpisodeRecord>,
+  patch: Partial<EpisodeRecord> | ((existing: EpisodeRecord) => Partial<EpisodeRecord>),
+  preserveSource = false,
 ): Promise<void> {
-  const existing = await tx<EpisodeRecord | undefined>("readonly", (s) => s.get(id));
-  if (!existing) return;
-  await tx("readwrite", (s) => s.put({ ...existing, ...patch, id, updatedAt: Date.now() }));
+  let revisionChanged = false;
+  await writeStores(STORE, transaction => {
+    const store = transaction.objectStore(STORE);
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const existing = request.result as EpisodeRecord | undefined;
+      if (!existing) return;
+      const changes = typeof patch === "function" ? patch(existing) : patch;
+      const next = { ...existing, ...changes, id, updatedAt: Date.now() };
+      if ("transcript" in changes) next.transcriptRevision = crypto.randomUUID();
+      if ("audio" in changes && !preserveSource) {
+        next.sourceRevision = crypto.randomUUID();
+        if (!("transcript" in changes)) {
+          delete next.transcript;
+          delete next.transcriptRevision;
+        }
+      }
+      revisionChanged = "transcript" in changes || ("audio" in changes && !preserveSource);
+      store.put(next);
+    };
+  });
+  if (revisionChanged) {
+    revisionListeners.forEach(listener => listener(id));
+    getRevisionChannel()?.postMessage(id);
+  }
 }
 
 export async function deleteEpisode(id: string): Promise<void> {
@@ -152,8 +197,7 @@ async function pruneAudio(): Promise<void> {
   const all = await listEpisodes();
   const stale = all.slice(MAX_AUDIO_RETAINED).filter((r) => r.audio);
   for (const record of stale) {
-    const { audio: _audio, ...rest } = record;
-    await tx("readwrite", (s) => s.put(rest as EpisodeRecord));
+    await updateEpisode(record.id, { audio: undefined }, true);
   }
 }
 
@@ -167,8 +211,7 @@ export async function dropAllAudio(): Promise<void> {
   const all = await listEpisodes();
   for (const record of all) {
     if (!record.audio) continue;
-    const { audio: _audio, ...rest } = record;
-    await tx("readwrite", (s) => s.put(rest as EpisodeRecord));
+    await updateEpisode(record.id, { audio: undefined }, true);
   }
 }
 

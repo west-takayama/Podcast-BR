@@ -50,8 +50,11 @@ export async function restoreProductionSession(): Promise<ProductionSession | un
   const id = stored.id;
   async function load(ref: AssetReference | undefined, key: string, history = false) {
     if (!ref) return;
-    const data = await readProductionEntry<Blob>(key)
-      ?? (history ? (await getEpisode(id))?.audio : undefined);
+    let data = await readProductionEntry<Blob>(key);
+    if (!data && history) {
+      const episode = await getEpisode(id);
+      if (episode && (!episode.sourceRevision || episode.sourceRevision === ref.id)) data = episode.audio;
+    }
     if (!data) return;
     const { name, type, lastModified, ...asset } = ref;
     return { ...asset, file: data instanceof File ? data : new File([data], name, { type, lastModified }) };

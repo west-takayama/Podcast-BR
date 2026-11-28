@@ -378,7 +378,7 @@ export default function App() {
         if (prev) URL.revokeObjectURL(prev);
         return URL.createObjectURL(blob);
       });
-      if (episodeId) await updateEpisode(episodeId, { audio: blob });
+      if (episodeId) await updateEpisode(episodeId, { audio: blob }, true);
     } catch {
       // 付け直しに失敗しても、元の MP3 はそのまま使える
     } finally {
@@ -457,9 +457,11 @@ export default function App() {
         onModelChanged: (m) => setSettings((s) => ({ ...s, model: m })),
         signal: controller.signal,
       });
-      abortRef.current = null;
+      controller.signal.throwIfAborted();
+      if (episodeId) await updateEpisode(episodeId, { transcript: segments });
+      controller.signal.throwIfAborted();
+      if (abortRef.current === controller) abortRef.current = null;
       setTranscript(segments);
-      if (episodeId) updateEpisode(episodeId, { transcript: segments });
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
         setError(noteError("書き起こし", err, settings.model));
@@ -474,10 +476,7 @@ export default function App() {
     id: string,
     patch: Partial<EpisodeMeta>,
   ): Promise<void> => {
-    const all = await listEpisodes();
-    const target = all.find((r) => r.id === id);
-    if (!target) return;
-    await updateEpisode(id, { meta: { ...target.meta, ...patch } });
+    await updateEpisode(id, current => ({ meta: { ...current.meta, ...patch } }));
   };
 
   /** 編集した本文を履歴に残す。投稿前の手直しを次回以降も参照できるようにする。 */

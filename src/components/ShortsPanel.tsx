@@ -11,7 +11,7 @@ import SpeakerAssignments from "./SpeakerAssignments";
 import { alignCues, formatCueTime, type CaptionCue, type SpeechSpan } from "../lib/video/captionAlignment";
 import { addSpeaker, displayCues, swapSpeakerNames, type Speaker } from "../lib/video/speakers";
 import CopyButton from "./CopyButton";
-import { listEpisodes, saveEpisode } from "../lib/history";
+import { getEpisode, listEpisodes, saveEpisode } from "../lib/history";
 import { withDeadline } from "../lib/deadline";
 import { measureStage } from "../lib/timing";
 import { ShortsAudioCache } from "../lib/shortsCache";
@@ -45,6 +45,7 @@ interface Props {
     clips: Clip[];
     durationSec: number;
     episodeId?: string;
+    sourceRevision?: string;
     hasVideo: boolean;
     transcript?: TranscriptSegment[] | null;
     uploaded?: UploadedAudio | null;
@@ -124,6 +125,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
   const newEpisodeId = useRef<string>();
   const splitDrafts = useRef(new Map<string, SplitCaptionDraft>());
+  const captionOrigins = useRef(new Map<number, string>());
+  const sourceRevisionRef = useRef<string>();
   const rangeDrafts = useRef(new Map<string, CaptionCue[]>());
   const [results, setResults] = useState<Record<number, Result>>({});
   const [frames, setFrames] = useState<Record<number, CoverCandidate[]>>({});
@@ -336,14 +339,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       await saveEpisode({
         id, createdAt: Date.now(), fileName: analysis.file.name,
         durationSec: analysis.durationSec, removedSec: 0, chosenTitle: copy.titles[0],
-        audio: analysis.file, originalAudio: true, uploaded: audio,
+        audio: analysis.file, originalAudio: true, sourceRevision: sourceRevisionRef.current, uploaded: audio,
         meta: { ...copy, clips: analysis.clips, showNotes: "", chapters: [], hashtags: [], transcriptSummary: "", keywords: [] },
       }, newEpisodeId.current ? originalKey(id) : undefined).catch(() => {
         if (!controller.signal.aborted) setSpotifyError("文章を表示しました。履歴に保存できなかったため、コピーして控えてください。");
       });
       if (!controller.signal.aborted) {
         newEpisodeId.current = id;
-        for (const [range, cues] of rangeDrafts.current) saveEpisodeDraft(id, range, cues);
+        for (const [range, cues] of rangeDrafts.current) saveEpisodeDraft(id, sourceRevisionRef.current ?? id, range, cues);
         setSpotify(copy);
       }
     } catch (e) {
@@ -386,6 +389,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     rangeDrafts.current.clear();
     splitDrafts.current.clear();
     newEpisodeId.current = registered?.session.id;
+    sourceRevisionRef.current = registered?.session.original?.id;
+    captionOrigins.current.clear();
     setSessionId(registered?.session.id);
     for (const u of urlsRef.current) URL.revokeObjectURL(u);
     urlsRef.current.clear();
@@ -421,6 +426,8 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       fileRef.current = original.file;
       analysisRef.current = { ...analysis, file: original.file };
       newEpisodeId.current = production.id;
+      sourceRevisionRef.current = original.id;
+      captionOrigins.current.clear();
       setSessionId(production.id);
       setFileInfo(original.file.name);
       setClips(analysis.clips);
@@ -436,7 +443,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         setWithCaptions(saved.withCaptions);
         setResolution(saved.resolution);
         rangeDrafts.current = new Map(saved.ranges);
-        for (const [range, cues] of saved.ranges) saveEpisodeDraft(production.id, range, cues);
+        for (const [range, cues] of saved.ranges) saveEpisodeDraft(production.id, original.id, range, cues);
         setResults(Object.fromEntries(Object.entries(saved.videos).map(([i, result]) => {
           const url = URL.createObjectURL(result.blob);
           urlsRef.current.add(url);
@@ -515,59 +522,83 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     }
   };
 
-  /**
-   * その候補の字幕を作る。
-   *
-   * 「この区間の音声」だけを切り出して渡す。全編を聴かせて「12:34 から」と
-   * 頼むと AI はファイルの頭から数えることになり、後ろの回ほど時刻がずれる。
-   */
+  const historyCaptionPlan = async (startSec: number, endSec: number, signal: AbortSignal) => {
+    const id = existing?.episodeId;
+    const row = id ? await getEpisode(id) : undefined;
+    signal.throwIfAborted();
+    if (row && row.sourceRevision !== existing?.sourceRevision) {
+      throw new Error("履歴の素材が更新されました。履歴を開き直してからお試しください。");
+    }
+    const transcript = row ? row.transcript : existing?.transcript;
+    const archived = archivedCaptionCues(transcript, startSec, endSec, sourceDuration() ?? endSec);
+    const origin = archived
+      ? JSON.stringify(["full", row?.transcriptRevision ?? archived])
+      : "range";
+    return { archived, origin };
+  };
+
+  /** Full transcripts and range captions are separate; cache hits cannot override history. */
   const buildCaptions = async (i: number, signal: AbortSignal): Promise<CaptionCue[]> => {
-    const draft = captions[i];
-    if (draft) { recordGeminiCache("captions"); return draft; }
     const file = fileRef.current!;
     const { startSec, endSec } = rangeOf(i);
     const durationMs = Math.round((endSec - startSec) * 1000);
     const rangeKey = captionRangeKey(startSec, endSec);
-    const cached = rangeDrafts.current.get(rangeKey);
-    if (cached) {
+    const { archived, origin } = existing ? await historyCaptionPlan(startSec, endSec, signal) : { archived: null, origin: "range" };
+    const draft = captions[i];
+    if (draft && (!existing || captionOrigins.current.get(i) === origin)) {
       recordGeminiCache("captions");
-      // Local edits and speaker assignments remain scoped to each candidate.
-      setCaptions(prev => ({ ...prev, [i]: cached }));
-      return cached;
+      return draft;
     }
-    const { prepareCaptionAudio, captionActivityForRange } = await loadClipLib();
-    const archived = archivedCaptionCues(existing?.transcript, startSec, endSec, sourceDuration() ?? endSec);
+    const commit = (cues: CaptionCue[]) => {
+      signal.throwIfAborted();
+      if (fileRef.current !== file) throw new DOMException("Source changed", "AbortError");
+      const previous = captionOrigins.current.get(i);
+      if (previous && previous !== origin) {
+        setSpeakerLinks(links => ({ ...links, [i]: {} }));
+        dropResult(i);
+      }
+      captionOrigins.current.set(i, origin);
+      setCaptions(prev => ({ ...prev, [i]: cues }));
+      return cues;
+    };
+    const verifyHistory = async () => {
+      if (!existing) return;
+      const latest = await historyCaptionPlan(startSec, endSec, signal);
+      if (latest.origin !== origin) throw new Error("履歴の字幕が更新されました。もう一度お試しください。");
+    };
     if (archived) {
       recordGeminiCache("captions");
+      const { captionActivityForRange } = await loadClipLib();
       setStatus("保存済み字幕を音声に合わせています…");
       const activity = await measureStage("caption-audio-decode", () => captionActivityForRange(file, startSec, endSec, signal));
       signal.throwIfAborted();
       const aligned = await measureStage("caption-alignment", async () => alignCues(archived, activity, durationMs));
-      rangeDrafts.current.set(rangeKey, aligned);
-      if (rangeDrafts.current.size > 4) rangeDrafts.current.delete(rangeDrafts.current.keys().next().value!);
-      setCaptions(prev => ({ ...prev, [i]: aligned }));
-      return aligned;
+      await verifyHistory();
+      return commit(aligned);
     }
     const episodeId = existing?.episodeId ?? newEpisodeId.current;
-    const sharedDraft = episodeId ? readEpisodeDraft(episodeId, rangeKey) : undefined;
-    if (sharedDraft) {
+    const sourceId = existing?.sourceRevision ?? sourceRevisionRef.current ?? episodeId;
+    const cached = rangeDrafts.current.get(rangeKey)
+      ?? (episodeId && sourceId ? readEpisodeDraft(episodeId, sourceId, rangeKey) : undefined);
+    if (cached) {
       recordGeminiCache("captions");
-      setCaptions(prev => ({ ...prev, [i]: sharedDraft }));
-      return sharedDraft;
+      return commit(cached);
     }
-    if (existing?.episodeId) {
-      const saved = await readProductionCheckpoint(existing.episodeId).catch(() => undefined);
+    if (existing?.episodeId && existing.sourceRevision) {
+      const saved = await readProductionCheckpoint(existing.episodeId, existing.sourceRevision).catch(() => undefined);
       signal.throwIfAborted();
       const cues = saved?.shorts?.ranges.find(([key]) => key === rangeKey)?.[1];
       if (cues) {
+        await verifyHistory();
         recordGeminiCache("captions");
-        saveEpisodeDraft(existing.episodeId, rangeKey, cues);
-        setCaptions(prev => ({ ...prev, [i]: cues }));
-        return cues;
+        saveEpisodeDraft(existing.episodeId, existing.sourceRevision, rangeKey, cues);
+        return commit(cues);
       }
     }
     if (!settings.apiKey) throw new Error("保存済みの字幕が区間全体にありません。Gemini APIキーを設定するか、字幕をオフにしてください。");
     setStatus("この区間の音声を取り出しています…");
+    const { prepareCaptionAudio } = await loadClipLib();
+    await verifyHistory();
     const extract = async () => {
       const prepared = await measureStage("caption-conversion", () => prepareCaptionAudio(file, startSec, endSec, signal));
       signal.throwIfAborted();
@@ -600,15 +631,16 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     signal.throwIfAborted();
     setStatus("字幕を調整しています…");
     const aligned = await measureStage("caption-alignment", async () => alignCues(raw, captionActivity.current.get(rangeKey) ?? [], durationMs, true));
+    await verifyHistory();
+    signal.throwIfAborted();
     rangeDrafts.current.set(rangeKey, aligned);
     const savedId = existing?.episodeId ?? newEpisodeId.current;
-    if (savedId) saveEpisodeDraft(savedId, rangeKey, aligned);
+    if (savedId && sourceId) saveEpisodeDraft(savedId, sourceId, rangeKey, aligned);
     if (rangeDrafts.current.size > 4) {
       const oldest = rangeDrafts.current.keys().next().value;
       if (oldest !== undefined) rangeDrafts.current.delete(oldest);
     }
-    setCaptions(prev => ({ ...prev, [i]: aligned }));
-    return aligned;
+    return commit(aligned);
   };
 
   /** 書き出す前に字幕を確認・修正できるようにする。焼き込んでからでは直せないため。 */
@@ -657,12 +689,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
     const file = fileRef.current!;
     const clip = clips[i];
     const { startSec, endSec } = rangeOf(i);
+    const priorOrigin = captionOrigins.current.get(i);
     const segments = withCaptions ? await buildCaptions(i, signal) : [];
+    const origin = captionOrigins.current.get(i);
     signal.throwIfAborted();
     if (segments.some(cue => cue.startMs === null || cue.endMs === null)) {
       throw new Error("時刻が未確定の字幕があります。字幕の下書きで時刻を入力してから、書き出しを再試行してください。");
     }
-    const captionCues = displayCues(segments, speakers, speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
+    const captionCues = displayCues(segments, speakers, priorOrigin && priorOrigin !== origin ? {} : speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
     const [bitmap, logo] = await Promise.all([
@@ -698,6 +732,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       logo?.close();
     }
     signal.throwIfAborted();
+    if (withCaptions && existing && (await historyCaptionPlan(startSec, endSec, signal)).origin !== origin) {
+      dropResult(i);
+      throw new Error("書き出し中に履歴の字幕が更新されました。最新の字幕で再試行してください。");
+    }
     const url = URL.createObjectURL(blob);
     urlsRef.current.add(url);
     setResults((prev) => {
