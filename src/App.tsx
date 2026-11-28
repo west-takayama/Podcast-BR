@@ -58,6 +58,7 @@ const InsightsPanel = lazy(() => import("./components/InsightsPanel"));
 const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
 const PodcastPanel = lazy(() => import("./modules/publisher/podcast/PodcastPanel"));
 const PublisherPanel = lazy(() => import("./modules/publisher/PublisherPanel"));
+const FeaturePanel = lazy(() => import("./modules/video/FeaturePanel"));
 const BudgetPanel = lazy(() => import("./modules/budget/BudgetPanel"));
 const AnalyticsPanel = lazy(() => import("./modules/analytics/AnalyticsPanel"));
 const TrackPicker = lazy(() => import("./components/TrackPicker"));
@@ -67,7 +68,7 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget" | "publisher" | "podcast" | "analytics";
+type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget" | "publisher" | "podcast" | "analytics" | "feature";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -842,7 +843,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 β3</h1>
+        <h1>🎙️ AI STUDIO 3.0 β4</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
@@ -855,6 +856,7 @@ export default function App() {
             履歴
           </button>
           <button className={tab === "podcast" ? "active" : ""} onClick={() => setTab("podcast")}>本編配信</button>
+          <button className={tab === "feature" ? "active" : ""} onClick={() => setTab("feature")}>YouTube本編</button>
           <button className={tab === "publisher" ? "active" : ""} onClick={() => setTab("publisher")}>投稿</button>
           <button className={tab === "budget" ? "active" : ""} onClick={() => setTab("budget")}>予算</button>
           <button className={tab === "analytics" ? "active" : ""} onClick={() => setTab("analytics")}>経営分析</button>
@@ -915,6 +917,7 @@ export default function App() {
       {tab === "budget" && <BudgetPanel />}
       {tab === "analytics" && <AnalyticsPanel apiKey={settings.apiKey} model={settings.model} />}
       {tab === "publisher" && <PublisherPanel />}
+      {tab === "feature" && <FeaturePanel key={production?.id} session={production} openAudio={() => setTab("audio")} />}
       {tab === "podcast" && <PodcastPanel session={production} openAudio={() => setTab("audio")} />}
       {tab === "settings" && (
         <>
@@ -932,6 +935,7 @@ export default function App() {
       {(tab === "create" || studioVisited) && <div hidden={tab !== "create"}>
         <ShortsPanel
           production={production}
+          openFeature={() => setTab("feature")}
           onProductionFile={file => changeProductionSource(file, "original")}
           settings={settings}
           previousTitles={previousTitles}

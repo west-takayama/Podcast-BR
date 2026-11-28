@@ -1,3 +1,4 @@
+const { selectEpisode } = require("./select-episode");
 const { openLegacy } = require("./legacy-production");
 // 切り抜きが「頼んだ場所」を切り出しているか。
 //
@@ -123,6 +124,7 @@ async function countBeeps(url) {
   const studio = page.locator(".card").filter({ has: page.locator(".clip-trim") }).first();
   await studio.scrollIntoViewIfNeeded();
   await studio.getByRole("checkbox", { name: /字幕を入れる/ }).uncheck();
+  await selectEpisode(page);
   const btn = studio.locator("button").filter({ hasText: "縦型" }).first();
   if (!(await btn.count())) {
     console.log("  ボタン:", (await studio.locator("button").allInnerTexts()).join(" / "));

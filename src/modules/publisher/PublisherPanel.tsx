@@ -1,3 +1,6 @@
+import { applySeriesSchedule, observedHours, planQuotaWarnings } from "./featureSchedule";
+import { getFeature } from "../video/store";
+import { canHandoffShort } from "../video/feature";
 import { filterLabels, matchesFilter, type Filter } from "./dashboard";
 import { verifyOnDevice } from "./providerResult";
 import { importReceipt, makeRequest } from "./exchange";
@@ -130,11 +133,15 @@ export default function PublisherPanel() {
   };
   const prepare = (network: Destination) => void run(async signal => {
     if (!draft) return;
+    const parent = draft.candidate.parent;
+    const planned = draft.plan[network];
+    if (parent && planned) canHandoffShort(parent, await getFeature(parent.episodeId), fromJst(planned.at), Date.now());
     const { blob, digest } = await openVideo(draft.candidate, signal);
+    const feature = parent && await getFeature(parent.episodeId);
     signal.throwIfAborted();
     const item = await publisherTransaction(true, data => {
       if (JSON.stringify(data.drafts[current]) !== JSON.stringify(draft)) throw new Error("候補が変更されました。内容を確認し直してください。");
-      return beginHandoff(data, current, network, digest, Date.now());
+      return beginHandoff(data, current, network, digest, Date.now(), feature);
     });
     signal.throwIfAborted();
     showVideo(blob, draft.candidate);
@@ -142,6 +149,8 @@ export default function PublisherPanel() {
     handoffVideo.current = blob;
     await refresh();
   });
+  const warnings = planQuotaWarnings(state, selected);
+  const linkedSelection = selected.length > 0 && selected.every(key => state.drafts[key]?.candidate.parent);
   const selectedForReview = selected.length > 0 && selected.every(key => state.drafts[key]?.state === "review");
 
   return <div className="publisher">
@@ -190,6 +199,19 @@ export default function PublisherPanel() {
           {item.candidate.title} · {labels[item.state]}</label>
         <button type="button" disabled={busy} onClick={() => { clearPreview(); setCurrent(key); }}>版 {item.candidate.versionId.slice(0, 8)} を開く</button>
       </div>)}
+      {linkedSelection && <button type="button" disabled={busy} onClick={() => void run(async () => {
+        const parents = selected.map(key => state.drafts[key].candidate.parent!);
+        if (parents.some(parent => parent.episodeId !== parents[0].episodeId)) throw new Error("同じ本編のショートを選んでください。");
+        const feature = await getFeature(parents[0].episodeId);
+        if (!feature?.selected) throw new Error("先に本編を選抜してください。");
+        const now = Date.now();
+        const { readAnalytics } = await import("../analytics/store");
+        const hourly = observedHours(await readAnalytics(), now);
+        await update(data => applySeriesSchedule(data, selected, feature.publishedAt ?? fromJst(feature.plannedAt), now, hourly));
+        setMessage(Object.keys(hourly).length ? "分析で比較できた時間帯を参考に分散しました。その他はMetricoolの参考時刻または仮時刻です。" :
+          "本編より後の日程へ分散しました。Metricoolの有効な参考時刻がない場合は仮時刻です。");
+      })}>選んだショートを本編の後に分散</button>}
+      {warnings.length > 0 && <p role="alert">{warnings.join("、")}の計画が無料枠の目安を超えます。媒体・日時を見直してください。</p>}
       <button type="button" disabled={busy || !selectedForReview} onClick={() => void run(async signal => {
         for (const key of selected) await openVideo(state.drafts[key].candidate, signal);
         signal.throwIfAborted();
@@ -206,6 +228,7 @@ export default function PublisherPanel() {
     {draft && <section className="card">
       <h3>{draft.candidate.title} · {labels[draft.state]}</h3>
       <p>動画の版 {draft.candidate.versionId.slice(0, 12)}</p>
+      {draft.candidate.parent && <p>本編 #{draft.candidate.parent.number}「{draft.candidate.parent.title}」 · 本編の公開確認後に引き渡せます。</p>}
       <button type="button" disabled={busy || !drive.connection} onClick={() => void run(async signal => {
         const { blob } = await openVideo(draft.candidate, signal);
         signal.throwIfAborted();
@@ -297,7 +320,9 @@ export default function PublisherPanel() {
         <button type="button" disabled={busy} onClick={() => void run(async () => {
           const video = handoffVideo.current;
           if (!video || !handoff.requestId) throw new Error("動画の引き渡しを準備し直してください。");
-          const value = await publisherTransaction(false, data => makeRequest(data, handoff.requestId!, Date.now()));
+          const parent = state.drafts[draftKey(handoff)]?.candidate.parent;
+          const feature = parent && await getFeature(parent.episodeId);
+          const value = await publisherTransaction(false, data => makeRequest(data, handoff.requestId!, Date.now(), feature));
           const json = new File([JSON.stringify(value, null, 2)], `publisher-${value.requestId}.json`, { type: "application/json" });
           clearPacket();
           const url = URL.createObjectURL(json);

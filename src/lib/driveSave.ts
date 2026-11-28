@@ -1,3 +1,4 @@
+import { withParentTitle, type ShortParent } from "../modules/video/feature";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 
@@ -10,6 +11,7 @@ const BLOB_DIGESTS = new WeakMap<Blob, string>();
 
 export interface DriveShort {
   blob: Blob;
+  parent?: ShortParent;
   title: string;
   description: string;
   hashtags: string[];
@@ -70,7 +72,7 @@ export async function candidateIdentity(source: Blob, startMs: number, endMs: nu
 
 export async function versionIdentity(clip: DriveShort, signal: AbortSignal) {
   const digest = await blobDigest(clip.blob, signal);
-  const content = JSON.stringify(["short-version-v1", digest, clip.blob.type, clip.title, clip.description, clip.hashtags]);
+  const content = JSON.stringify(["short-version-v1", digest, clip.blob.type, clip.title, clip.description, clip.hashtags, ...(clip.parent ? [[clip.parent.episodeId, clip.parent.title, clip.parent.number]] : [])]);
   return bytesToHex(sha256(utf8ToBytes(content)));
 }
 
@@ -260,7 +262,8 @@ export async function saveShortToDrive(options: {
   token: string; project: string; source: Blob; clip: DriveShort; signal: AbortSignal;
   onProgress: (stage: string, fraction: number) => void;
 }): Promise<SavedShort> {
-  const { token, project, source, clip, signal, onProgress } = options;
+  const { token, project, source, signal, onProgress } = options;
+  const clip = { ...options.clip, description: withParentTitle(options.clip.description, options.clip.parent) };
   onProgress("候補と版を確認中", 0);
   const candidateId = await candidateIdentity(source, clip.startMs, clip.endMs, signal);
   const versionId = await versionIdentity(clip, signal);
@@ -296,7 +299,7 @@ export async function saveShortToDrive(options: {
     onProgress("投稿情報を保存中", 0.93);
     const manifest = {
       schemaVersion: 2, ...key, status: "pending_owner_approval",
-      title: clip.title, description: clip.description, hashtags: clip.hashtags,
+      title: clip.title, description: clip.description, hashtags: clip.hashtags, ...(clip.parent ? { parent: clip.parent } : {}),
       video: { driveFileId: videoId, filename: videoFile.name ?? `${filename}.${ext}`, mimeType: videoFile.mimeType ?? clip.blob.type },
       range: { startMs: clip.startMs, endMs: clip.endMs },
     };

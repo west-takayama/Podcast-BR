@@ -1,3 +1,4 @@
+const { selectEpisode, scores } = require("./select-episode");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
 const { mkdtempSync, rmSync } = require("node:fs");
@@ -9,8 +10,8 @@ const port = process.argv[2] || 4218;
 const answer = data => ({ usageMetadata: { promptTokenCount: 123, candidatesTokenCount: 45, thoughtsTokenCount: 6, cachedContentTokenCount: 0 }, candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }] });
 const candidates = {
   clips: [
-    { start: "00:00", end: "00:05", hook: "最初の候補", why: "理由", socialPost: "ショート用の投稿文", hashtags: ["#対話"] },
-    { start: "00:05", end: "00:10", hook: "次の候補", why: "理由" },
+    { start: "00:00", end: "00:05", hook: "最初の候補", scores, why: "理由", socialPost: "ショート用の投稿文", hashtags: ["#対話"] },
+    { start: "00:05", end: "00:10", hook: "次の候補", scores, why: "理由" },
   ],
   episodeFacts: ["会話では収録機材について話した。"],
 };
@@ -116,7 +117,8 @@ const candidates = {
         await previewAtFirst();
         await namesAtStart.getByText("たそ", { exact: true }).waitFor();
         assert.equal(requestCount(), beforeLink);
-        await page.getByRole("button", { name: /すべてのショート動画をまとめて生成/ }).click();
+        await selectEpisode(page);
+        await page.getByRole("button", { name: /推奨ショート動画をまとめて生成/ }).click();
         await page.getByRole("heading", { name: /書き出した動画\(2本\)/ }).waitFor({ timeout: 90000 });
         const videos = page.locator("video.card-preview");
         assert.equal(await videos.count(), 2);

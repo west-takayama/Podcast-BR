@@ -76,7 +76,7 @@ export default function ClipStudio({ source, durationSec, episodeId, sourceRevis
   return (
     <section className="card">
       <h2>ショートの候補</h2>
-      <button type="button" className="primary shorts-all-generate" disabled>すべてのショート動画をまとめて生成</button>
+      <button type="button" className="primary shorts-all-generate" disabled>推奨ショート動画をまとめて生成</button>
       {media && !error && <p role="status">素材を確認しています…</p>}
       {error && <p role="alert">{error}</p>}
       {(!source || error) && <>

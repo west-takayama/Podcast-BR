@@ -1,3 +1,4 @@
+import { getFeature } from "../video/store";
 import { beginHandoff, reconcile, type Delivery, type Destination } from "./model";
 import { publisherTransaction } from "./store";
 
@@ -9,8 +10,10 @@ export interface PublisherProvider {
 }
 
 export async function dispatch(provider: PublisherProvider, key: string, network: Destination, digest: string) {
+  const parent = await publisherTransaction(false, state => state.drafts[key]?.candidate.parent);
+  const feature = parent && await getFeature(parent.episodeId);
   const { item, index } = await publisherTransaction(true, state => ({
-    item: beginHandoff(state, key, network, digest, Date.now()), index: state.deliveries.length - 1,
+    item: beginHandoff(state, key, network, digest, Date.now(), feature), index: state.deliveries.length - 1,
   }));
   try {
     const id = await provider.reserve(item);

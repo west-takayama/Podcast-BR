@@ -1,3 +1,4 @@
+import { canHandoffShort, youtubeURL, type Feature } from "../video/feature";
 import { applyProvider, parseProvider } from "./providerResult";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
@@ -12,7 +13,7 @@ const sha256Pattern = /^[0-9a-f]{64}$/;
 
 const approvalOf = (item: Delivery) => hash([item.versionId, item.digest, item.destination, item.copy, item.audience ?? null, item.copy.visibility ?? "public"]);
 
-export function makeRequest(state: PublisherState, requestId: string, now: number) {
+export function makeRequest(state: PublisherState, requestId: string, now: number, feature?: Feature) {
   const item = state.deliveries.find(delivery => delivery.requestId === requestId);
   if (!item || item.state !== "sending") throw new Error("有効な引き渡し記録がありません。");
   const draft = state.drafts[draftKey(item)];
@@ -22,10 +23,12 @@ export function makeRequest(state: PublisherState, requestId: string, now: numbe
     throw new Error("承認済みの版・投稿情報が変わりました。再確認してください。");
   }
   validate({ ...draft, plan: { [item.destination]: plan } }, now);
+  const parent = draft.candidate.parent && canHandoffShort(draft.candidate.parent, feature, fromJst(plan.at), now);
   const approval = approvalOf(item);
   return {
     schema: requestSchema, requestId, idempotencyKey: hash([brandId, item.destination, item.digest]),
     brandId, candidateId: item.candidateId, videoVersion: item.versionId, approval,
+    ...(parent ? { parent: { ...parent, url: youtubeURL(parent.youtubeId), relatedVideoRequiresStudio: item.destination === "youtube" } } : {}),
     media: { driveFileId: draft.candidate.videoId, sha256: item.digest, filename: draft.candidate.filename, mimeType: draft.candidate.mime },
     destination: { network: item.destination, account: accounts[item.destination].split(" · ")[1] },
     post: { ...item.copy, publishAt: item.copy.at + ":00+09:00", timezone: "Asia/Tokyo",

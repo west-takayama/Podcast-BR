@@ -1,9 +1,11 @@
+import type { ShortParent } from "../video/feature";
 import { parseTimestamp } from "../../lib/id3";
 import type { CaptionCue } from "../../lib/video/captionAlignment";
 import type { Speaker } from "../../lib/video/speakers";
 
 export type ShortVideo = {
   blob: Blob;
+  parent?: ShortParent;
   filename: string;
   title: string;
   post: string;

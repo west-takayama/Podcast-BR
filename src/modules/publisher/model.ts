@@ -1,3 +1,4 @@
+import { canHandoffShort, type Feature, type ShortParent } from "../video/feature";
 export const destinations = ["instagram", "tiktok", "youtube"] as const;
 export type Destination = typeof destinations[number];
 export const accounts: Record<Destination, string> = {
@@ -13,6 +14,7 @@ export function fromJst(value: string) {
 export const monthOf = (at: number) => localDate(at).slice(0, 7);
 export type Candidate = {
   candidateId: string; versionId: string; videoId: string; manifestId: string; filename: string; mime: string;
+  parent?: ShortParent;
   title: string; description: string; hashtags: string[]; startMs: number; endMs: number;
 };
 export type Visibility = "public" | "private" | "SELF_ONLY" | "draft";
@@ -70,6 +72,7 @@ export function validate(draft: Draft, now: number) {
     if (network === "youtube" && (!copy.title.trim() || copy.title.length > 100 || !draft.audience)) {
       throw new Error("YouTubeのタイトル（100文字以内）と子ども向け設定を確認してください。");
     }
+    if (draft.candidate.parent && !copy.text.includes(draft.candidate.parent.title)) throw new Error("ショートの投稿文に本編タイトルを残してください。");
     if (copy.text.length + copy.hashtags.length + 2 > (network === "youtube" ? 5000 : 2200)) throw new Error("投稿文とハッシュタグを短くしてください。");
   }
 }
@@ -95,12 +98,13 @@ export function quota(state: PublisherState, month: string) {
   return Math.max(local, confirmed.count + newer);
 }
 
-export function beginHandoff(state: PublisherState, key: string, network: Destination, digest: string, now: number) {
+export function beginHandoff(state: PublisherState, key: string, network: Destination, digest: string, now: number, feature?: Feature) {
   const draft = state.drafts[key];
   if (!draft || draft.state !== "approved") throw new Error("承認済みの版を開いてください。");
   const copy = draft.plan[network];
   if (!copy) throw new Error("承認済みの投稿先を選んでください。");
   validate({ ...draft, plan: { [network]: copy } }, now);
+  if (draft.candidate.parent) canHandoffShort(draft.candidate.parent, feature, fromJst(copy.at), now);
   if (state.deliveries.some(item => item.destination === network && active(item) &&
     (item.digest === digest || item.candidateId === draft.candidate.candidateId))) {
     throw new Error("同じ動画または候補の記録があります。外部結果を確認してください。");

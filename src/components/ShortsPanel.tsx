@@ -1,3 +1,6 @@
+import Selection, { useFeature } from "../modules/video/Selection";
+import { getFeature } from "../modules/video/store";
+import { qualityClips, withParentTitle, type ShortParent } from "../modules/video/feature";
 import { originalKey, readProductionCheckpoint, saveProductionCheckpoint, type ProductionSession } from "../core/productionSession";
 import { findClips, generateSpotifyCopy, type EpisodeAnalysis } from "../modules/editorial/analysis";
 import { captionRangeKey, sourceClipRange, type ShortVideo } from "../modules/shorts/checkpoint";
@@ -36,6 +39,7 @@ const loadClipLib = () => import("../lib/video/clip");
 
 interface Props {
   production?: ProductionSession;
+  openFeature?: () => void;
   onProductionFile?: (file: File) => { session: ProductionSession; saved: Promise<void> };
   settings: Settings;
   previousTitles: string[];
@@ -90,7 +94,7 @@ const fmt = (sec: number) =>
  * 音声だけを Gemini に聴かせて面白い区間を選ばせ、映像はその区間を
  * 端末内で切り出す。動画そのものはどこにも送らない。
  */
-export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing, production, onProductionFile }: Props) {
+export default function ShortsPanel({ settings, previousTitles, onModelChanged, existing, production, onProductionFile, openFeature }: Props) {
   const [phase, setPhase] = useState<Phase>(existing ? "ready" : "idle");
   const [status, setStatus] = useState("");
   const [progress, setProgress] = useState(0);
@@ -112,7 +116,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [fileInfo, setFileInfo] = useState(existing?.file.name ?? "");
   const [clips, setClips] = useState<Clip[]>(existing?.clips ?? []);
   const [selected, setSelected] = useState(0);
-  const [checked, setChecked] = useState<number[]>(existing?.clips.map((_, i) => i) ?? []);
+  const [checked, setChecked] = useState<number[]>([]);
   const [batch, setBatch] = useState<BatchProgress | null>(null);
   const [batchSummary, setBatchSummary] = useState("");
   const [failures, setFailures] = useState<Partial<Record<number, string>>>({});
@@ -123,7 +127,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [speakerLinks, setSpeakerLinks] = useState<Record<number, Record<string, string>>>({});
   const captionActivity = useRef(new Map<string, SpeechSpan[]>());
+  const anonymousId = useRef(crypto.randomUUID());
   const newEpisodeId = useRef<string>();
+  const feature = useFeature(existing ? existing.episodeId ?? anonymousId.current : sessionId ?? newEpisodeId.current);
+  const canGenerate = !!(feature?.selected && feature.number && feature.title);
   const splitDrafts = useRef(new Map<string, SplitCaptionDraft>());
   const captionOrigins = useRef(new Map<number, string>());
   const sourceRevisionRef = useRef<string>();
@@ -434,7 +441,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       setSessionId(production.id);
       setFileInfo(original.file.name);
       setClips(analysis.clips);
-      setChecked(analysis.clips.map((_, i) => i));
+      setChecked(analysis.clips.flatMap((clip, index) => qualityClips([clip]).length ? [index] : []));
       setSpotify(analysis.copy ?? null);
       setError("");
       if (checkpoint.shorts) {
@@ -515,7 +522,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       analysisRef.current = { file, audio, facts, clips: found, durationSec };
       setClips(found);
       existing?.onClipsFound?.(found);
-      setChecked(found.map((_, i) => i));
+      setChecked(found.flatMap((clip, index) => qualityClips([clip]).length ? [index] : []));
       setPhase("ready");
       setStatus("");
       if (!existing) void makeSpotify(model);
@@ -704,6 +711,10 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       throw new Error("時刻が未確定の字幕があります。字幕の下書きで時刻を入力してから、書き出しを再試行してください。");
     }
     const captionCues = displayCues(segments, speakers, priorOrigin && priorOrigin !== origin ? {} : speakerLinks[i] ?? {}, Math.round((endSec - startSec) * 1000));
+    if (!feature) throw new Error("エピソードを選抜してください。");
+    const latest = await getFeature(feature.episodeId);
+    if (!latest?.selected || !latest.title || !latest.number || latest.title !== feature.title || latest.number !== feature.number) throw new Error("動画化の選抜・本編情報が変わりました。確認してください。");
+    const parent: ShortParent = { episodeId: latest.episodeId, title: latest.title, number: latest.number };
     const { renderClip } = await loadClipLib();
     setStatus(`動画を書き出しています…(${clip.hook || `候補${i + 1}`})`);
     const [bitmap, logo] = await Promise.all([
@@ -722,6 +733,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         startSec,
         endSec,
         hook: clip.hook,
+        episodeNumber: parent.number,
         showName: settings.prompt.showName || "BRIDGE RADIO",
         accent: settings.accentColor,
         captionCues,
@@ -753,10 +765,11 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
       }
       const extension = blob.type === "video/mp4" ? "mp4" : "webm";
       const title = clip.hook || `候補${i + 1}`;
-      const post = [clip.socialPost, clip.hashtags?.join(" ")].filter(Boolean).join("\n\n");
+      const description = withParentTitle(clip.socialPost ?? "", parent);
+      const post = [description, clip.hashtags?.join(" ")].filter(Boolean).join("\n\n");
       return { ...prev, [i]: {
         blob, url, filename: `short${i + 1}.${extension}`, title, post,
-        description: clip.socialPost ?? "", hashtags: clip.hashtags ?? [],
+        description, parent, hashtags: clip.hashtags ?? [],
         startMs: Math.round(startSec * 1000), endMs: Math.round(endSec * 1000),
       } };
     });
@@ -764,6 +777,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
 
   /** One decoder/encoder at a time. Commit each result before starting the next candidate. */
   const make = async (indexes: number[]) => {
+    if (!canGenerate || !feature) { setError("この回を動画化に選抜し、本編タイトルと回番号を保存してください。"); return; }
     if (!fileRef.current || indexes.length === 0 || abortRef.current || !cap) return;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -913,7 +927,9 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
   const selectedLinks = speakerLinks[selected] ?? {};
   const doneCount = completedVideos.length;
   const batchTargets = checked.filter(i => !results[i] || failures[i]).sort((a, b) => a - b);
-  const allTargets = clips.flatMap((_, i) => !results[i] || failures[i] ? [i] : []);
+  const recommended = qualityClips(clips);
+  const qualityTargets = clips.flatMap((clip, i) => recommended.includes(clip) ? [i] : []);
+  const allTargets = qualityTargets.filter(i => !results[i] || failures[i]);
   const failedIndexes = Object.keys(failures).map(Number);
   const overallProgress = batch ? (batch.position - 1 + progress) / batch.total : progress;
 
@@ -1015,13 +1031,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         <button type="button" className="primary" disabled={!settings.apiKey} onClick={() => void findCandidates()}>この素材から候補を作る</button>
         {!settings.apiKey && <p>候補を作るにはGemini APIキーを設定してください。</p>}
       </section>}
+      {feature && !busy && <Selection feature={feature} clips={clips} edit={openFeature} suggestedTitle={spotify?.titles[0] ?? ""} />}
       {batchSummary && <p role="status" className="card">{batchSummary}</p>}
       {clips.length > 0 && !busy && (
         <div className="card">
           <h2>✂️ ショートの候補</h2>
-          <button type="button" className="primary shorts-all-generate" disabled={!cap || !allTargets.length}
-            onClick={() => { setChecked(clips.map((_, i) => i)); void make(allTargets); }}>
-            すべてのショート動画をまとめて生成
+          <button type="button" className="primary shorts-all-generate" disabled={!cap || !canGenerate || !allTargets.length}
+            onClick={() => { setChecked(qualityTargets); void make(allTargets); }}>
+            推奨ショート動画をまとめて生成
           </button>
           <p className="muted">{fileInfo}</p>
           <div className="row-buttons">
@@ -1056,7 +1073,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
                 </div>
                 {failures[i] && <div className="error">
                   <p>{failures[i]}</p>
-                  <button type="button" disabled={!cap} onClick={() => void make([i])}>候補{i + 1}を再試行</button>
+                  <button type="button" disabled={!cap || !canGenerate} onClick={() => void make([i])}>候補{i + 1}を再試行</button>
                 </div>}
                 <ClipDetails clip={c} />
               </div>
@@ -1125,14 +1142,14 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
               {withCaptions && !lines && (
                 <button onClick={prepareCaptions}>📝 先に字幕を作って確認する</button>
               )}
-              <button className="primary" onClick={() => void make([selected])}>
+              <button className="primary" disabled={!canGenerate} onClick={() => void make([selected])}>
                 🎬 この範囲を縦型ショートにする
               </button>
-              <button type="button" className="primary" disabled={!batchTargets.length} onClick={() => void make(batchTargets)}>
+              <button type="button" className="primary" disabled={!canGenerate || !batchTargets.length} onClick={() => void make(batchTargets)}>
                 選択した動画をまとめて生成
               </button>
               {failedIndexes.length > 0 && (
-                <button type="button" onClick={() => void make(failedIndexes)}>失敗した動画だけ再試行</button>
+                <button type="button" disabled={!canGenerate} onClick={() => void make(failedIndexes)}>失敗した動画だけ再試行</button>
               )}
             </>
           )}
@@ -1301,11 +1318,13 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
                 <label>投稿文（{video.title}）
                   <textarea value={video.description} disabled={busy} onChange={event => {
                     const description = event.target.value;
-                    setClips(previous => previous.map((clip, index) => index === video.index ? { ...clip, socialPost: description } : clip));
+                    const original = video.parent ? `本編 #${video.parent.number}「${video.parent.title}」` : "";
+                    const social = original && description.endsWith(original) ? description.slice(0, -original.length).trimEnd() : description;
+                    setClips(previous => previous.map((clip, index) => index === video.index ? { ...clip, socialPost: social } : clip));
                     setResults(previous => {
                       const result = previous[video.index];
                       if (!result || result.url !== video.url) return previous;
-                      const post = [description, result.hashtags.join(" ")].filter(Boolean).join("\n\n");
+                      const post = [withParentTitle(description, result.parent), result.hashtags.join(" ")].filter(Boolean).join("\n\n");
                       return { ...previous, [video.index]: { ...result, description, post } };
                     });
                   }} />
@@ -1322,7 +1341,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         <DriveSavePanel videos={completedVideos} source={fileRef.current} encoding={busy} />
       )}
 
-      {!existing && clips.length > 0 && (
+      {!existing && (clips.length > 0 || spotify || spotifyBusy || spotifyError) && (
         <section className="card">
           <h2>Spotify用タイトル・概要欄</h2>
           {spotifyBusy && <p role="status">文章を準備中です。ショートの編集を進められます。</p>}
@@ -1333,7 +1352,7 @@ export default function ShortsPanel({ settings, previousTitles, onModelChanged, 
         </section>
       )}
 
-      {!existing && clips.length > 0 && !busy && (
+      {!existing && (clips.length > 0 || analysisRef.current) && !busy && (
         <div className="card">
           <button
             onClick={() => {

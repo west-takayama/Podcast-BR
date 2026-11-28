@@ -57,6 +57,7 @@ export interface ClipOptions {
   endSec: number;
   /** 画面上部に大きく出す見出し。 */
   hook: string;
+  episodeNumber?: string;
   showName: string;
   accent: string;
   /** 背景に敷く画像(取り込んだ写真)。無ければ暗い単色。 */
@@ -876,7 +877,7 @@ function drawFrame(
     const size = W * 0.03;
     ctx.font = `700 ${size}px ${FONT_STACK}`;
     ctx.fillStyle = accent;
-    ctx.fillText(opts.showName, pad, y);
+    ctx.fillText(opts.episodeNumber ? `${opts.showName}  ·  #${opts.episodeNumber}` : opts.showName, pad, y);
     y += size * 1.9;
   }
 
