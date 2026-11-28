@@ -59,6 +59,7 @@ const ShortsPanel = lazy(() => import("./components/ShortsPanel"));
 const PodcastPanel = lazy(() => import("./modules/publisher/podcast/PodcastPanel"));
 const PublisherPanel = lazy(() => import("./modules/publisher/PublisherPanel"));
 const BudgetPanel = lazy(() => import("./modules/budget/BudgetPanel"));
+const AnalyticsPanel = lazy(() => import("./modules/analytics/AnalyticsPanel"));
 const TrackPicker = lazy(() => import("./components/TrackPicker"));
 
 /** 読み込み中の置き場所。一瞬で終わるので、飛び跳ねない高さだけ確保する。 */
@@ -66,7 +67,7 @@ function Loading() {
   return <div className="card muted">読み込み中…</div>;
 }
 
-type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget" | "publisher" | "podcast";
+type Tab = "audio" | "create" | "legacy" | "next" | "history" | "settings" | "budget" | "publisher" | "podcast" | "analytics";
 type Phase = "idle" | "running" | "done";
 
 export type { AudioReport };
@@ -841,7 +842,7 @@ export default function App() {
   return (
     <DriveConnectionProvider openSettings={() => openSettings(true)}>
       <header>
-        <h1>🎙️ AI STUDIO 3.0 β2</h1>
+        <h1>🎙️ AI STUDIO 3.0 β3</h1>
         <nav className="tabs">
           <button className={tab === "audio" ? "active" : ""} onClick={() => setTab("audio")}>音声</button>
           <button className={tab === "create" || tab === "legacy" ? "active" : ""} onClick={() => setTab("create")}>
@@ -856,6 +857,7 @@ export default function App() {
           <button className={tab === "podcast" ? "active" : ""} onClick={() => setTab("podcast")}>本編配信</button>
           <button className={tab === "publisher" ? "active" : ""} onClick={() => setTab("publisher")}>投稿</button>
           <button className={tab === "budget" ? "active" : ""} onClick={() => setTab("budget")}>予算</button>
+          <button className={tab === "analytics" ? "active" : ""} onClick={() => setTab("analytics")}>経営分析</button>
           <button className={tab === "settings" ? "active" : ""} onClick={() => openSettings()}>
             設定
           </button>
@@ -911,6 +913,7 @@ export default function App() {
 
       <Suspense fallback={<Loading />}>
       {tab === "budget" && <BudgetPanel />}
+      {tab === "analytics" && <AnalyticsPanel apiKey={settings.apiKey} model={settings.model} />}
       {tab === "publisher" && <PublisherPanel />}
       {tab === "podcast" && <PodcastPanel session={production} openAudio={() => setTab("audio")} />}
       {tab === "settings" && (

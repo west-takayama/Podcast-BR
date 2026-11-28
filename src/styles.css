@@ -719,3 +719,20 @@ button.primary.shorts-all-generate:active { background: #e7bc00; }
 .publisher video { width: 100%; max-height: 480px; margin-block: 12px; }
 .publisher-network { margin-block: 12px; padding: 12px; border: 1px solid #404040; border-radius: 10px; overflow-wrap: anywhere; }
 .publisher fieldset { min-width: 0; }
+
+.analytics p, .analytics li { line-height: 1.55; }
+.analytics a { color: var(--accent); }
+.analytics fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.analytics summary { cursor: pointer; min-height: 44px; padding: 10px 0; }
+.analytics button, .analytics select { min-height: 44px; }
+.analytics select, .analytics input { max-width: 100%; }
+.analytics-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.analytics-summary article, .analytics-series { background: #282828; padding: 12px; border-radius: 10px; overflow-wrap: anywhere; }
+.analytics-summary span, .analytics small { display: block; margin-top: 3px; }
+.analytics small { color: #bcbcbc; }
+.analytics-series { margin-top: 10px; }
+.analytics-series dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 10px 0 0; }
+.analytics-series dt { color: #bcbcbc; font-size: .85rem; }
+.analytics-series dd { margin: 3px 0 0; }
+.analytics-suggestion { white-space: pre-wrap; overflow-wrap: anywhere; }
+.analytics-status:not(:empty) { position: sticky; bottom: 8px; background: #332d19; padding: 0 12px; border: 1px solid var(--accent); border-radius: 10px; }

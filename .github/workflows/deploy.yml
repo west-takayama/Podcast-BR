@@ -2,7 +2,7 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main, development/ai-studio-v2.1, development/ai-studio-v2.2, development/ai-studio-v2.2-shared-shorts, development/ai-studio-v2.3-drive, development/ai-studio-v2.3.1, development/ai-studio-v2.4-performance, development/ai-studio-v2.4.1-stability, development/ai-studio-v3.0-alpha1, development/ai-studio-v3.0-alpha2, development/ai-studio-v3.0-alpha3, development/ai-studio-v3.0-beta1, development/ai-studio-v3.0-beta1.2, development/ai-studio-v3.0-beta2]
+    branches: [main, development/ai-studio-v2.1, development/ai-studio-v2.2, development/ai-studio-v2.2-shared-shorts, development/ai-studio-v2.3-drive, development/ai-studio-v2.3.1, development/ai-studio-v2.4-performance, development/ai-studio-v2.4.1-stability, development/ai-studio-v3.0-alpha1, development/ai-studio-v3.0-alpha2, development/ai-studio-v3.0-alpha3, development/ai-studio-v3.0-beta1, development/ai-studio-v3.0-beta1.2, development/ai-studio-v3.0-beta2, development/ai-studio-v3.0-beta3]
   workflow_dispatch:
 
 permissions:

@@ -4,7 +4,7 @@ import { beginRequest, BudgetError, type RequestResult } from "../modules/budget
 import { tokens, type UsageCounts } from "../modules/budget/pricing";
 import { cacheRequest, dropUnsentRequest, markValidationFailure, readBudget, reserveRequest, settleRequest } from "../modules/budget/store";
 
-export type GeminiPurpose = "analysis" | "spotify" | "captions" | "metadata" | "transcript" | "topics" | "models" | "upload" | "activation";
+export type GeminiPurpose = "analysis" | "spotify" | "captions" | "metadata" | "transcript" | "topics" | "analytics" | "models" | "upload" | "activation";
 export type GeminiUsage = UsageCounts & {
   purpose: GeminiPurpose;
   model?: string;

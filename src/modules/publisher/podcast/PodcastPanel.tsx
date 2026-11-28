@@ -1,3 +1,4 @@
+import { captureProduction } from "../../../lib/productionMetrics";
 import { useEffect, useRef, useState } from "react";
 import { editedKey, type ProductionSession } from "../../../core/productionSession";
 import { readProductionEntry } from "../../../lib/history";
@@ -205,11 +206,16 @@ function PodcastEditor({ id, initial, session, onRows, openAudio }: {
       {entry.status === "approved" && <div className="row-buttons">
         <button type="button" disabled={busy || !canPrepare} onClick={() => void run(async signal => {
           if (!session) return;
-          const { file, revision, digest } = await readEditedMp3(session, signal);
-          signal.throwIfAborted();
-          await update((row, all) => startHandoff(row, all, revision, digest, Date.now()));
-          signal.throwIfAborted();
-          showHandoff(file);
+          const started = performance.now();
+          let success = false;
+          try {
+            const { file, revision, digest } = await readEditedMp3(session, signal);
+            signal.throwIfAborted();
+            await update((row, all) => startHandoff(row, all, revision, digest, Date.now()));
+            signal.throwIfAborted();
+            showHandoff(file);
+            success = true;
+          } finally { captureProduction("podcast-prep", performance.now() - started, success); }
         })}>承認済み素材を引き渡す</button>
         <button type="button" disabled={busy} onClick={() => void run(() => update(row => revoke(row, Date.now())))}>承認を取り消す</button>
       </div>}

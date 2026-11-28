@@ -17,6 +17,7 @@ const PORT = process.env.E2E_PORT || "4218";
 const ALL = [
   "audio-entry",
   "publisher",
+  "analytics",
   "unified-production",
   "shorts-batch",
   "shared-shorts-paths",
